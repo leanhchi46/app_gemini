@@ -1,0 +1,6785 @@
+# -*- coding: utf-8 -*-
+"""\nỨNG DỤNG: Gemini Folder Analyze Once — Phân tích Ảnh Theo Lô (1 lần) + Báo cáo ICT/SMC\n========================================================================================\nMục tiêu:\n- Tự động nạp toàn bộ ảnh trong 1 thư mục (các khung D1/H4/M15/M1 hoặc theo đặt tên).\n- (Tuỳ chọn) Lấy dữ liệu từ MT5 để bổ sung số liệu khách quan (ATR, spread, VWAP, PDH/PDL...).\n- Gọi model Gemini để tạo BÁO CÁO TIÊU CHUẨN (7 dòng + phần A→E + JSON máy-đọc-được).\n- Hỗ trợ cache/upload song song, xuất báo cáo .md, gửi Telegram, NO-TRADE, và auto-trade thử nghiệm.\n\nKiến trúc tổng quan:\n- Tkinter GUI (Notebook: Report/Prompt/Options) + hàng đợi UI để đảm bảo thread-safe.\n- Lớp GeminiFolderOnceApp: chứa toàn bộ trạng thái và quy trình điều phối.\n- RunConfig (dataclass): snapshot cấu hình từ UI để dùng trong worker thread.\n- Các khối chức năng: upload/cache, gọi Gemini, hợp nhất báo cáo, MT5/Telegram/News, auto-trade.\n\nLưu ý:\n- Không thay đổi logic/chức năng gốc; chỉ xoá các comment cũ và thay bằng docstring tiếng Việt.\n- Tất cả docstring đều nhằm giải thích ý tưởng/luồng xử lý; không ảnh hưởng hành vi runtime.\n"""
+
+from __future__ import annotations
+
+                              
+import os
+import sys
+import re
+import json
+import time
+import ssl
+import base64
+import hashlib
+import queue
+import threading
+import mimetypes
+import urllib.parse
+import urllib.request
+import urllib.error
+import ast
+from pathlib import Path
+import math
+import subprocess
+from statistics import median
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
+import platform
+from dataclasses import dataclass
+
+                     
+import tkinter as tk
+from tkinter import ttk, filedialog
+from tkinter.scrolledtext import ScrolledText
+
+                                                
+HAS_MPL = False
+try:
+    import pandas as pd
+    import mplfinance as mpf
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+    HAS_MPL = True
+except Exception:
+    pd = None
+    mpf = None
+    Figure = None
+    FigureCanvasTkAgg = None
+    NavigationToolbar2Tk = None
+    HAS_MPL = False
+
+                                       
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
+
+try:
+    import google.generativeai as genai
+except Exception:
+    print("Bạn cần cài SDK Gemini: pip install google-generativeai")
+    sys.exit(1)
+
+try:
+    import certifi
+except Exception:
+    certifi = None
+
+try:
+    import MetaTrader5 as mt5
+except Exception:
+    mt5 = None
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None
+
+
+                                                             
+SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".tif"}
+DEFAULT_MODEL = "gemini-2.5-flash"
+
+APP_DIR = Path.home() / ".gemini_folder_analyze"
+APP_DIR.mkdir(parents=True, exist_ok=True)
+WORKSPACE_JSON = APP_DIR / "workspace.json"
+API_KEY_ENC = APP_DIR / "api_key.enc"
+UPLOAD_CACHE_JSON = APP_DIR / "upload_cache.json"
+
+def _xor_bytes(data: bytes, key: bytes) -> bytes:
+    """
+    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+    Tham số:
+      - data: bytes — (tự suy luận theo ngữ cảnh sử dụng).
+      - key: bytes — (tự suy luận theo ngữ cảnh sử dụng).
+    Trả về: bytes
+    Ghi chú:
+      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+    """
+    if not key:
+        return data
+    return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+
+def _machine_key() -> bytes:
+    """
+    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+    Tham số: (không)
+    Trả về: bytes
+    Ghi chú:
+      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+    """
+    base = (os.name + os.getenv("USERNAME", "") + os.getenv("COMPUTERNAME", "") + sys.executable).encode("utf-8")
+    return hashlib.sha256(base).digest()
+
+def obfuscate_text(s: str) -> str:
+    """
+    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+    Tham số:
+      - s: str — (tự suy luận theo ngữ cảnh sử dụng).
+    Trả về: str
+    Ghi chú:
+      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+    """
+    raw = s.encode("utf-8")
+    key = _machine_key()
+    enc = _xor_bytes(raw, key)
+    return base64.urlsafe_b64encode(enc).decode("ascii")
+
+def deobfuscate_text(s: str) -> str:
+    """
+    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+    Tham số:
+      - s: str — (tự suy luận theo ngữ cảnh sử dụng).
+    Trả về: str
+    Ghi chú:
+      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+    """
+    if not s:
+        return ""
+    try:
+        enc = base64.urlsafe_b64decode(s.encode("ascii"))
+        raw = _xor_bytes(enc, _machine_key())
+        return raw.decode("utf-8")
+    except Exception:
+        return ""
+
+                                                                         
+@dataclass(frozen=True)
+class RunConfig:
+    """
+    Lớp "RunConfig" đại diện cho một thành phần chính của ứng dụng.
+    Trách nhiệm chính:
+      - Khởi tạo UI (Notebook: Report/Prompt/Options, v.v.).
+      - Đọc/ghi workspace, cache, prompt.
+      - Quy trình phân tích 1 lần: nạp ảnh → (tối ưu/cache) upload → gọi Gemini → gom báo cáo.
+      - (Tuỳ chọn) Lấy dữ liệu MT5, tạo JSON ngữ cảnh, lọc NO-TRADE, gửi Telegram.
+      - Quản trị thread an toàn với Tkinter thông qua hàng đợi UI.
+    """
+                      
+    folder: str
+    delete_after: bool
+    max_files: int
+
+                   
+    upload_workers: int
+    cache_enabled: bool
+    optimize_lossless: bool
+    only_generate_if_changed: bool
+
+             
+    ctx_limit: int
+    create_ctx_json: bool
+    prefer_ctx_json: bool
+    ctx_json_n: int
+
+              
+    telegram_enabled: bool
+    telegram_token: str
+    telegram_chat_id: str
+    telegram_skip_verify: bool
+    telegram_ca_path: str
+
+         
+    mt5_enabled: bool
+    mt5_symbol: str
+    mt5_n_M1: int
+    mt5_n_M5: int
+    mt5_n_M15: int
+    mt5_n_H1: int
+
+              
+    nt_enabled: bool
+    nt_spread_factor: float
+    nt_min_atr_m5_pips: float
+    nt_min_ticks_per_min: int
+
+                
+    auto_trade_enabled: bool
+    trade_strict_bias: bool
+    trade_size_mode: str
+    trade_lots_total: float
+    trade_equity_risk_pct: float
+    trade_money_risk: float
+    trade_split_tp1_pct: int
+    trade_deviation_points: int
+    trade_pending_threshold_points: int
+    trade_magic: int
+    trade_comment_prefix: str
+    trade_pending_ttl_min: int
+    trade_min_rr_tp2: float
+    trade_min_dist_keylvl_pips: float
+    trade_cooldown_min: int
+    trade_dynamic_pending: bool
+    auto_trade_dry_run: bool
+    trade_move_to_be_after_tp1: bool
+    trade_trailing_atr_mult: float
+    trade_allow_session_asia: bool
+    trade_allow_session_london: bool
+    trade_allow_session_ny: bool
+    trade_news_block_before_min: int
+    trade_news_block_after_min: int                                                                              
+                                                                                
+def _session_ranges(
+    m1_rates,
+    tz_shift_hours: int | None = None,
+    source_tz: str = "UTC",
+    target_tz: str = "Asia/Ho_Chi_Minh",
+    day=None,
+    ):
+    """
+    Tính high/low theo *các phiên trong ngày* (theo giờ Việt Nam, IANA tz chuẩn), dựa trên M1.
+    London/New York tự xử lý DST. New York được tách 2 khóa: `newyork_pre`, `newyork_post`.
+    - tz_shift_hours != None: dùng dịch thô (tương thích cũ, KHÔNG DST).
+    - tz_shift_hours == None: dùng zoneinfo source_tz -> target_tz (có DST).
+    """
+    from datetime import datetime, timedelta, timezone
+    try:
+        from zoneinfo import ZoneInfo  # py>=3.9
+    except Exception:
+        ZoneInfo = None
+
+    def _to_local(dt_naive_str: str):
+        dt_utc = datetime.strptime(dt_naive_str, "%Y-%m-%d %H:%M:%S")
+        if tz_shift_hours is not None:
+            return dt_utc + timedelta(hours=int(tz_shift_hours))
+        if ZoneInfo:
+            src = ZoneInfo(source_tz or "UTC")
+            dst = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
+            return dt_utc.replace(tzinfo=src).astimezone(dst).replace(tzinfo=None)
+        # Fallback không zoneinfo: giả định UTC +7
+        return dt_utc + timedelta(hours=7)
+
+    if not m1_rates:
+        return {
+            "asia": {"start": "07:00", "end": "16:00", "high": None, "low": None},
+            "london": {"start": "14:00", "end": "23:00", "high": None, "low": None},
+            "newyork_pre": {"start": "19:00", "end": "24:00", "high": None, "low": None},
+            "newyork_post": {"start": "00:00", "end": "05:00", "high": None, "low": None},
+        }
+
+    first_local = _to_local(m1_rates[0]["time"])
+    today_local = day or first_local.date()
+    year = today_local.year
+
+    def _dst_on(zone: str, d) -> bool:
+        if not ZoneInfo:
+            return False
+        z = ZoneInfo(zone)
+        jan = datetime(year, 1, 1, tzinfo=z).utcoffset()
+        jul = datetime(year, 7, 1, tzinfo=z).utcoffset()
+        cur = datetime(d.year, d.month, d.day, tzinfo=z).utcoffset()
+        base = min(jan, jul)
+        return cur > base
+
+    uk_dst = _dst_on("Europe/London", today_local)
+    us_dst = _dst_on("America/New_York", today_local)
+
+    # Khung theo giờ VN (UTC+7), đã xét DST UK/US
+    if uk_dst and us_dst:
+        # UK+1, US+1
+        buckets = {
+            "asia":        (7, 16),
+            "london":      (14, 22),  # 8–16 UK local -> VN 14–22
+            "newyork_pre": (20, 24),  # 8–12 US local -> VN 19/20–24 (chọn 20–24)
+            "newyork_post":(0, 5),    # 12–16 US local -> VN 00–04/05 (chọn 00–05)
+        }
+    elif (not uk_dst) and (not us_dst):
+        # Cả hai không DST
+        buckets = {
+            "asia":        (7, 16),
+            "london":      (15, 23),  # 8–16 UK local -> VN 15–23
+            "newyork_pre": (19, 24),  # 8–12 US local -> VN 19–24
+            "newyork_post":(0, 4),    # 12–16 US local -> VN 00–04
+        }
+    elif uk_dst and (not us_dst):
+        # UK DST ON, US DST OFF (giai đoạn chuyển mùa hiếm)
+        buckets = {
+            "asia":        (7, 16),
+            "london":      (14, 22),
+            "newyork_pre": (19, 24),
+            "newyork_post":(0, 4),
+        }
+    else:
+        # UK DST OFF, US DST ON
+        buckets = {
+            "asia":        (7, 16),
+            "london":      (15, 23),
+            "newyork_pre": (20, 24),
+            "newyork_post":(0, 5),
+        }
+
+    out = {k: {"start": f"{v[0]:02d}:00", "end": f"{v[1]:02d}:00", "high": None, "low": None} for k, v in buckets.items()}
+    for r in m1_rates:
+        try:
+            t = _to_local(r["time"])
+        except Exception:
+            continue
+        if t.date() != today_local:
+            continue
+        h = t.hour
+        for name, (h0, h1) in buckets.items():
+            if h0 <= h < h1:
+                hi = out[name]["high"]
+                lo = out[name]["low"]
+                rh = float(r.get("high")) if r.get("high") is not None else None
+                rl = float(r.get("low")) if r.get("low") is not None else None
+                out[name]["high"] = rh if hi is None else (max(hi, rh) if rh is not None else hi)
+                out[name]["low"]  = rl if lo is None else (min(lo, rl) if rl is not None else lo)
+    return out
+
+# -----------------------------------------------------------------------------
+# Killzones theo GIỜ VIỆT NAM (UTC+7), suy từ giờ địa phương chuẩn quốc tế:
+#   - London: 08:00–11:00 Europe/London (local)
+#   - New York (pre): 08:30–11:00 America/New_York (local)
+#   - New York (post): 13:30–16:00 America/New_York (local)
+# Tự động xử lý DST/tuần lệch pha nhờ zoneinfo, trả về HH:MM theo Asia/Ho_Chi_Minh.
+# -----------------------------------------------------------------------------
+def _killzones_vn_for_date(day=None, target_tz: str = "Asia/Ho_Chi_Minh"):
+    """
+    Trả về dict killzones theo giờ Việt Nam cho ngày 'day' (datetime.date).
+    Nếu day=None, dùng ngày hiện tại. Không đụng tới Tkinter (an toàn gọi từ worker).
+    """
+    from datetime import datetime, date as _date
+    try:
+        from zoneinfo import ZoneInfo  # Python 3.9+
+    except Exception:
+        ZoneInfo = None
+
+    d = day or datetime.now().date()
+    # Fallback khi không có zoneinfo: dùng mapping mùa hè thường thấy (EDT/BST)
+    if ZoneInfo is None:
+        return {
+            "london":       {"start": "14:00", "end": "17:00"},
+            "newyork_pre":  {"start": "19:30", "end": "22:00"},
+            "newyork_post": {"start": "00:30", "end": "03:00"},
+        }
+
+    tz_vn = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
+    tz_uk = ZoneInfo("Europe/London")
+    tz_us = ZoneInfo("America/New_York")
+
+    def _fmt(dt_local_tzaware):
+        # Quy sang VN và định dạng HH:MM
+        return dt_local_tzaware.astimezone(tz_vn).strftime("%H:%M")
+
+    def _local_range(tz, h0, m0, h1, m1):
+        s = datetime(d.year, d.month, d.day, h0, m0, tzinfo=tz)
+        e = datetime(d.year, d.month, d.day, h1, m1, tzinfo=tz)
+        return _fmt(s), _fmt(e)
+
+    # London 08:00–11:00 local
+    l_st, l_ed = _local_range(tz_uk, 8, 0, 11, 0)
+    # New York pre 08:30–11:00 local
+    ny_pre_st, ny_pre_ed = _local_range(tz_us, 8, 30, 11, 0)
+    # New York post 13:30–16:00 local
+    ny_post_st, ny_post_ed = _local_range(tz_us, 13, 30, 16, 0)
+
+    return {
+        "london":       {"start": l_st,        "end": l_ed},
+        "newyork_pre":  {"start": ny_pre_st,   "end": ny_pre_ed},
+        "newyork_post": {"start": ny_post_st,  "end": ny_post_ed},
+    }
+
+def _points_per_pip_from_info(info: dict) -> int:
+    """
+    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+    Tham số:
+      - info: dict — (tự suy luận theo ngữ cảnh sử dụng).
+    Trả về: int
+    Ghi chú:
+      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+    """
+    try:
+        d = int((info or {}).get("digits") or 0)
+    except Exception:
+        d = 0
+    return 10 if d >= 3 else 1
+
+
+def _pip_size_from_info(info: dict) -> float:
+    """
+    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+    Tham số:
+      - info: dict — (tự suy luận theo ngữ cảnh sử dụng).
+    Trả về: float
+    Ghi chú:
+      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+    """
+    point = float((info or {}).get("point") or 0.0)
+    ppp = _points_per_pip_from_info(info)
+    return point * ppp if point else 0.0
+
+                                                                                    
+def _value_per_point_safe(symbol: str, info_obj=None) -> float | None:
+    """
+    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+    Tham số:
+      - symbol: str — (tự suy luận theo ngữ cảnh sử dụng).
+      - info_obj — (tự suy luận theo ngữ cảnh sử dụng).
+    Trả về: float | None
+    Ghi chú:
+      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+    """
+    try:
+        if mt5 is None:
+            return None
+        info_obj = info_obj or mt5.symbol_info(symbol)
+        if not info_obj:
+            return None
+
+        point = float(getattr(info_obj, "point", 0.0) or 0.0)
+        if point <= 0:
+            return None
+
+        tick_value = float(getattr(info_obj, "trade_tick_value", 0.0) or 0.0)
+        tick_size  = float(getattr(info_obj, "trade_tick_size", 0.0) or 0.0)
+
+                                                                            
+        if tick_value > 0 and tick_size > 0:
+            return tick_value * (point / tick_size)
+
+                                                                                       
+        try:
+            tick = mt5.symbol_info_tick(symbol)
+            mid = None
+            if tick:
+                bid = float(getattr(tick, "bid", 0.0) or 0.0)
+                ask = float(getattr(tick, "ask", 0.0) or 0.0)
+                mid = (bid + ask) / 2.0 if (bid and ask) else (ask or bid)
+            if mid and point > 0:
+                pr = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, symbol, 1.0, mid, mid + point)
+                if isinstance(pr, (int, float)):
+                    return abs(float(pr))
+        except Exception:
+            pass
+
+                                                          
+        csize = float(getattr(info_obj, "trade_contract_size", 0.0) or 0.0)
+        if csize > 0:
+            return csize * point
+
+        return None
+    except Exception:
+        return None
+
+def _tg_html_escape(s: str) -> str:
+    """
+    Mục đích: Gửi/thử thông báo Telegram, xử lý chứng chỉ và kết quả phản hồi.
+    Tham số:
+      - s: str — (tự suy luận theo ngữ cảnh sử dụng).
+    Trả về: str
+    Ghi chú:
+      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+    """
+    if s is None:
+        return ""
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+                                                    
+class GeminiFolderOnceApp:
+    """
+    Lớp giao diện và điều phối chính của ứng dụng: quản lý cấu hình, hàng đợi UI, tải ảnh, gọi Gemini, tổng hợp báo cáo, tích hợp MT5/Telegram và (tuỳ chọn) auto-trade.
+    Trách nhiệm chính:
+      - Khởi tạo UI (Notebook: Report/Prompt/Options, v.v.).
+      - Đọc/ghi workspace, cache, prompt.
+      - Quy trình phân tích 1 lần: nạp ảnh → (tối ưu/cache) upload → gọi Gemini → gom báo cáo.
+      - (Tuỳ chọn) Lấy dữ liệu MT5, tạo JSON ngữ cảnh, lọc NO-TRADE, gửi Telegram.
+      - Quản trị thread an toàn với Tkinter thông qua hàng đợi UI.
+    """
+    def __init__(self, root: tk.Tk):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - root: tk.Tk — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self.root = root
+        self.root.title("PHẦN MỀM GIAO DỊCH TỰ ĐỘNG BY CHÍ")
+        self.root.geometry("1180x780")
+        self.root.minsize(1024, 660)
+        self._trade_log_lock = threading.Lock()
+                                                              
+        self._ui_log_lock = threading.Lock()
+
+                          
+        self.folder_path = tk.StringVar(value="")
+        api_init = ""
+        if API_KEY_ENC.exists():
+            api_init = deobfuscate_text(API_KEY_ENC.read_text(encoding="utf-8"))
+        api_init = api_init or os.environ.get("GOOGLE_API_KEY", "")
+        self.api_key_var = tk.StringVar(value=api_init)
+        self.model_var = tk.StringVar(value=DEFAULT_MODEL)
+
+        self.delete_after_var = tk.BooleanVar(value=True)
+        self.max_files_var = tk.IntVar(value=0)                      
+        self.status_var = tk.StringVar(value="Chưa chọn thư mục.")
+        self.progress_var = tk.DoubleVar(value=0.0)
+
+                  
+        self.autorun_var = tk.BooleanVar(value=False)
+        self.autorun_seconds_var = tk.IntVar(value=60)
+        self._autorun_job = None
+
+                               
+        self.remember_context_var = tk.BooleanVar(value=True)
+        self.context_n_reports_var = tk.IntVar(value=1)
+        self.context_limit_chars_var = tk.IntVar(value=2000)
+        self.create_ctx_json_var = tk.BooleanVar(value=True)
+        self.prefer_ctx_json_var = tk.BooleanVar(value=True)
+        self.ctx_json_n_var = tk.IntVar(value=5)
+
+                        
+        self.telegram_enabled_var = tk.BooleanVar(value=False)
+        self.telegram_token_var = tk.StringVar(value="")
+        self.telegram_chat_id_var = tk.StringVar(value="")
+        self.telegram_skip_verify_var = tk.BooleanVar(value=False)
+        self.telegram_ca_path_var = tk.StringVar(value="")
+        self._last_telegram_signature = None
+
+             
+        self.mt5_enabled_var = tk.BooleanVar(value=False)
+        self.mt5_term_path_var = tk.StringVar(value="")
+        self.mt5_symbol_var = tk.StringVar(value="")
+        self.mt5_status_var = tk.StringVar(value="MT5: chưa kết nối")
+        self.mt5_n_M1 = tk.IntVar(value=120)
+        self.mt5_n_M5 = tk.IntVar(value=180)
+        self.mt5_n_M15 = tk.IntVar(value=96)
+        self.mt5_n_H1 = tk.IntVar(value=120)
+        self.mt5_initialized = False
+
+                               
+        self.no_trade_enabled_var = tk.BooleanVar(value=True)
+        self.nt_spread_factor_var = tk.DoubleVar(value=1.2)                          
+        self.nt_min_atr_m5_pips_var = tk.DoubleVar(value=3.0)                                 
+        self.nt_min_ticks_per_min_var = tk.IntVar(value=5)                                             
+
+                          
+        self.upload_workers_var = tk.IntVar(value=4)
+        self.cache_enabled_var = tk.BooleanVar(value=True)
+        self.optimize_lossless_var = tk.BooleanVar(value=False)
+        self.only_generate_if_changed_var = tk.BooleanVar(value=False)
+
+                             
+        self.auto_trade_enabled_var = tk.BooleanVar(value=False)
+        self.trade_strict_bias_var = tk.BooleanVar(value=True)                          
+        self.trade_size_mode_var = tk.StringVar(value="lots")                       
+        self.trade_lots_total_var = tk.DoubleVar(value=0.10)
+        self.trade_equity_risk_pct_var = tk.DoubleVar(value=1.0)      
+        self.trade_money_risk_var = tk.DoubleVar(value=10.0)                            
+        self.trade_split_tp1_pct_var = tk.IntVar(value=50)                                
+        self.trade_deviation_points_var = tk.IntVar(value=20)
+        self.trade_pending_threshold_points_var = tk.IntVar(value=60)
+        self.trade_magic_var = tk.IntVar(value=26092025)
+        self.trade_comment_prefix_var = tk.StringVar(value="AI-ICT")
+                                      
+        self.trade_pending_ttl_min_var      = tk.IntVar(value=90)                                 
+        self.trade_min_rr_tp2_var           = tk.DoubleVar(value=2.0)                       
+        self.trade_min_dist_keylvl_pips_var = tk.DoubleVar(value=5.0)                                              
+        self.trade_cooldown_min_var         = tk.IntVar(value=10)                                  
+        self.trade_dynamic_pending_var      = tk.BooleanVar(value=True)                              
+        self.auto_trade_dry_run_var         = tk.BooleanVar(value=False)                          
+        self.trade_move_to_be_after_tp1_var = tk.BooleanVar(value=True)                          
+        self.trade_trailing_atr_mult_var    = tk.DoubleVar(value=0.5)                                 
+        self.trade_allow_session_asia_var   = tk.BooleanVar(value=True)                 
+        self.trade_allow_session_london_var = tk.BooleanVar(value=True)
+        self.trade_allow_session_ny_var     = tk.BooleanVar(value=True)
+                                                
+        self.trade_news_block_before_min_var = tk.IntVar(value=15)                      
+        self.trade_news_block_after_min_var  = tk.IntVar(value=15)                    
+
+                                                 
+        self.ff_cache_events_local = []                                    
+        self.ff_cache_fetch_time   = 0.0                                      
+
+                         
+        self.is_running = False
+        self.stop_flag = False
+        self.results = []                                   
+        self.combined_report_text = ""
+        self.ui_queue = queue.Queue()
+
+                                    
+        self.prompt_file_path_var = tk.StringVar(value="")
+        self.auto_load_prompt_txt_var = tk.BooleanVar(value=True)
+
+        self._build_ui()
+        self._load_workspace()                      
+        self._poll_ui_queue()
+                                                  
+    def _build_ui(self):
+        """
+        Mục đích: Khởi tạo/cấu hình thành phần giao diện hoặc cấu trúc dữ liệu nội bộ.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self.root.columnconfigure(0, weight=1)
+                 
+        top = ttk.Frame(self.root, padding=(10, 8, 10, 6))
+        top.grid(row=0, column=0, sticky="ew")
+        for c in (1, 3, 5):
+            top.columnconfigure(c, weight=1)
+
+        ttk.Label(top, text="API Key:").grid(row=0, column=0, sticky="w")
+        self.api_entry = ttk.Entry(top, textvariable=self.api_key_var, show="*", width=44)
+        self.api_entry.grid(row=0, column=1, sticky="ew", padx=(6, 8))
+        ttk.Checkbutton(top, text="Hiện", command=self._toggle_api_visibility).grid(row=0, column=2, sticky="w")
+
+        ttk.Button(top, text="Tải .env", command=self._load_env).grid(row=0, column=3, sticky="w")
+        ttk.Button(top, text="Lưu an toàn", command=self._save_api_safe).grid(row=0, column=4, sticky="w", padx=(6, 0))
+        ttk.Button(top, text="Xoá đã lưu", command=self._delete_api_safe).grid(row=0, column=5, sticky="w", padx=(6, 0))
+
+        ttk.Label(top, text="Model:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.model_combo = ttk.Combobox(
+            top,
+            textvariable=self.model_var,
+            values=["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"],
+            state="readonly",
+            width=22,
+        )
+        self.model_combo.grid(row=1, column=1, sticky="w", padx=(6, 8), pady=(6, 0))
+
+        ttk.Label(top, text="Thư mục ảnh:").grid(row=1, column=2, sticky="e", pady=(6, 0))
+        self.folder_label = ttk.Entry(top, textvariable=self.folder_path, state="readonly")
+        self.folder_label.grid(row=1, column=3, sticky="ew", padx=(6, 8), pady=(6, 0))
+        ttk.Button(top, text="Chọn thư mục…", command=self.choose_folder).grid(row=1, column=4, sticky="w", pady=(6, 0))
+
+        actions = ttk.Frame(top)
+        actions.grid(row=1, column=5, sticky="e", pady=(6, 0))
+        ttk.Button(actions, text="► Bắt đầu", command=self.start_analysis).pack(side="left")
+        self.stop_btn = ttk.Button(actions, text="□ Dừng", command=self.stop_analysis, state="disabled")
+        self.stop_btn.pack(side="left", padx=(6, 0))
+        self.export_btn = ttk.Button(actions, text="↓ Xuất .md", command=self.export_markdown, state="disabled")
+        self.export_btn.pack(side="left", padx=(6, 0))
+        ttk.Button(actions, text="✖ Xoá kết quả", command=self.clear_results).pack(side="left", padx=(6, 0))
+
+                  
+        prog = ttk.Frame(self.root, padding=(10, 0, 10, 6))
+        prog.grid(row=1, column=0, sticky="ew")
+        prog.columnconfigure(0, weight=1)
+        ttk.Progressbar(prog, variable=self.progress_var, maximum=100).grid(row=0, column=0, sticky="ew")
+        ttk.Label(prog, textvariable=self.status_var).grid(row=1, column=0, sticky="w", pady=(3, 0))
+
+                  
+        self.nb = ttk.Notebook(self.root)
+        self.nb.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.root.rowconfigure(2, weight=1)
+
+                         
+        tab_report = ttk.Frame(self.nb, padding=8)
+        self.nb.add(tab_report, text="Report")
+
+                                  
+        tab_report.columnconfigure(0, weight=1)             
+        tab_report.columnconfigure(1, weight=2)                        
+        tab_report.rowconfigure(0, weight=1)
+
+                                                                               
+        left_panel = ttk.Frame(tab_report)
+        left_panel.grid(row=0, column=0, sticky="nsew")
+        left_panel.columnconfigure(0, weight=1)
+        left_panel.rowconfigure(0, weight=1)                  
+        left_panel.rowconfigure(1, weight=1)                      
+
+                      
+        cols = ("#", "name", "status")
+        self.tree = ttk.Treeview(left_panel, columns=cols, show="headings", selectmode="browse")
+        self.tree.heading("#", text="#")
+        self.tree.heading("name", text="Tệp ảnh")
+        self.tree.heading("status", text="Trạng thái")
+        self.tree.column("#", width=56, anchor="e")
+        self.tree.column("name", width=320, anchor="w")
+        self.tree.column("status", width=180, anchor="w")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scr_y = ttk.Scrollbar(left_panel, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand= scr_y.set)
+        scr_y.grid(row=0, column=0, sticky="nse", padx=(0,0))
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+
+                                                       
+        archives = ttk.LabelFrame(left_panel, text="History & JSON", padding=6)
+        archives.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        archives.columnconfigure(0, weight=1)                
+        archives.columnconfigure(1, weight=1)             
+        archives.rowconfigure(1, weight=1)
+
+                             
+        hist_col = ttk.Frame(archives)
+        hist_col.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 6))
+        hist_col.columnconfigure(0, weight=1)
+        hist_col.rowconfigure(1, weight=1)
+
+        ttk.Label(hist_col, text="History (.md)").grid(row=0, column=0, sticky="w")
+        self.history_list = tk.Listbox(hist_col, exportselection=False)
+        self.history_list.grid(row=1, column=0, sticky="nsew")
+        hist_scr = ttk.Scrollbar(hist_col, orient="vertical", command=self.history_list.yview)
+        self.history_list.configure(yscrollcommand=hist_scr.set)
+        hist_scr.grid(row=1, column=1, sticky="ns")
+
+        hist_btns = ttk.Frame(hist_col); hist_btns.grid(row=2, column=0, sticky="ew", pady=(6,0))
+        ttk.Button(hist_btns, text="Mở",   command=self._open_history_selected).pack(side="left")
+        ttk.Button(hist_btns, text="Xoá",  command=self._delete_history_selected).pack(side="left", padx=(6,0))
+        ttk.Button(hist_btns, text="Thư mục", command=self._open_reports_folder).pack(side="left", padx=(6,0))
+
+        self.history_list.bind("<<ListboxSelect>>", lambda e: self._preview_history_selected())
+        self.history_list.bind("<Double-Button-1>", lambda e: self._open_history_selected())
+
+                          
+        json_col = ttk.Frame(archives)
+        json_col.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(6, 0))
+        json_col.columnconfigure(0, weight=1)
+        json_col.rowconfigure(1, weight=1)
+
+        ttk.Label(json_col, text="JSON (ctx_*.json)").grid(row=0, column=0, sticky="w")
+        self.json_list = tk.Listbox(json_col, exportselection=False)
+        self.json_list.grid(row=1, column=0, sticky="nsew")
+        json_scr = ttk.Scrollbar(json_col, orient="vertical", command=self.json_list.yview)
+        self.json_list.configure(yscrollcommand=json_scr.set)
+        json_scr.grid(row=1, column=1, sticky="ns")
+
+        json_btns = ttk.Frame(json_col); json_btns.grid(row=2, column=0, sticky="ew", pady=(6,0))
+        ttk.Button(json_btns, text="Mở",   command=self._load_json_selected).pack(side="left")
+        ttk.Button(json_btns, text="Xoá",  command=self._delete_json_selected).pack(side="left", padx=(6,0))
+        ttk.Button(json_btns, text="Thư mục", command=self._open_json_folder).pack(side="left", padx=(6,0))
+
+        self.json_list.bind("<<ListboxSelect>>", lambda e: self._preview_json_selected())
+        self.json_list.bind("<Double-Button-1>", lambda e: self._load_json_selected())
+
+                                                               
+        detail_box = ttk.LabelFrame(tab_report, text="Chi tiết (Báo cáo Tổng hợp)", padding=8)
+        detail_box.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        detail_box.rowconfigure(0, weight=1)
+        detail_box.columnconfigure(0, weight=1)
+        self.detail_text = ScrolledText(detail_box, wrap="word")
+        self.detail_text.grid(row=0, column=0, sticky="nsew")
+        self.detail_text.insert("1.0", "Báo cáo tổng hợp sẽ hiển thị tại đây sau khi phân tích.")
+                                                                         
+        self._refresh_history_list()
+        self._refresh_json_list()
+
+                       
+        if HAS_MPL:
+            self.chart_tab_tv = ChartTabTV(self, self.nb)
+        else:
+                                                       
+            tab_chart_placeholder = ttk.Frame(self.nb, padding=8)
+            self.nb.add(tab_chart_placeholder, text="Chart")
+            ttk.Label(
+                tab_chart_placeholder,
+                text="Chức năng Chart yêu cầu matplotlib + mplfinance.\n"
+                    "Cài: pip install matplotlib mplfinance",
+                foreground="#666"
+            ).pack(anchor="w")
+
+                         
+        tab_prompt = ttk.Frame(self.nb, padding=8)
+        self.nb.add(tab_prompt, text="Prompt")
+        tab_prompt.columnconfigure(0, weight=1)
+        tab_prompt.rowconfigure(1, weight=1)
+
+        pr = ttk.Frame(tab_prompt)
+        pr.grid(row=0, column=0, sticky="ew")
+
+        ttk.Button(pr, text="Tải PROMPT.txt", command=self._auto_load_prompt_for_current_folder).pack(side="left")
+        ttk.Button(pr, text="Chọn file…", command=self._pick_prompt_file).pack(side="left", padx=(6, 0))
+        ttk.Button(pr, text="Định dạng lại", command=self._reformat_prompt_area).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(pr, text="Tự động nạp khi chọn thư mục",
+                        variable=self.auto_load_prompt_txt_var).pack(side="left", padx=(10, 0))
+
+        self.prompt_text = ScrolledText(tab_prompt, wrap="word", height=18)
+        self.prompt_text.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+
+                                                                       
+        if not self._load_prompt_from_file(silent=True):
+            self.ui_status("Chưa nạp PROMPT.txt — hãy bấm 'Tải PROMPT.txt' hoặc 'Chọn file…'")
+                                     
+        tab_opts = ttk.Frame(self.nb, padding=8)
+        self.nb.add(tab_opts, text="Options")
+        tab_opts.columnconfigure(0, weight=1)
+        tab_opts.rowconfigure(0, weight=1)
+        opts_nb = ttk.Notebook(tab_opts)
+        opts_nb.grid(row=0, column=0, sticky="nsew")
+
+                    
+        run_tab = ttk.Frame(opts_nb, padding=8)
+        opts_nb.add(run_tab, text="Run")
+        run_tab.columnconfigure(0, weight=1)
+
+        card_auto = ttk.LabelFrame(run_tab, text="Auto-run", padding=8)
+        card_auto.grid(row=0, column=0, sticky="ew")
+        row_ar = ttk.Frame(card_auto)
+        row_ar.grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(row_ar, text="Tự động chạy định kỳ", variable=self.autorun_var,
+                        command=self._toggle_autorun).pack(side="left")
+        ttk.Label(row_ar, text="  mỗi (giây):").pack(side="left")
+        self.autorun_interval_spin = ttk.Spinbox(
+            row_ar, from_=5, to=86400, textvariable=self.autorun_seconds_var, width=8,
+            command=self._autorun_interval_changed
+        )
+        self.autorun_interval_spin.pack(side="left", padx=(6, 0))
+        self.autorun_interval_spin.bind("<FocusOut>", lambda e: self._autorun_interval_changed())
+
+        card_upload = ttk.LabelFrame(run_tab, text="Upload & Giới hạn", padding=8)
+        card_upload.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        ttk.Checkbutton(card_upload, text="Xoá file trên Gemini sau khi phân tích",
+                        variable=self.delete_after_var).grid(row=0, column=0, sticky="w")
+        row_ul = ttk.Frame(card_upload)
+        row_ul.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(row_ul, text="Giới hạn số ảnh tối đa (0 = không giới hạn):").pack(side="left")
+        ttk.Spinbox(row_ul, from_=0, to=1000, textvariable=self.max_files_var, width=8).pack(side="left", padx=(6, 0))
+
+                       
+        card_fast = ttk.LabelFrame(run_tab, text="Tăng tốc & Cache", padding=8)
+        card_fast.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        row_w = ttk.Frame(card_fast)
+        row_w.grid(row=0, column=0, sticky="w")
+        ttk.Label(row_w, text="Số luồng upload song song:").pack(side="left")
+        ttk.Spinbox(row_w, from_=1, to=16, textvariable=self.upload_workers_var, width=6).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(card_fast, text="Bật cache ảnh (tái dùng file đã upload nếu chưa đổi)",
+                        variable=self.cache_enabled_var).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(card_fast, text="Tối ưu ảnh lossless trước khi upload (PNG)",
+                        variable=self.optimize_lossless_var).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(card_fast, text="Chỉ gọi model nếu bộ ảnh không đổi",
+                        variable=self.only_generate_if_changed_var).grid(row=3, column=0, sticky="w", pady=(6, 0))
+
+                          
+        card_nt = ttk.LabelFrame(run_tab, text="NO-TRADE cứng (chặn gọi model nếu điều kiện xấu)", padding=8)
+        card_nt.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        ttk.Checkbutton(card_nt, text="Bật NO-TRADE cứng",
+                        variable=self.no_trade_enabled_var).grid(row=0, column=0, columnspan=3, sticky="w")
+        r1 = ttk.Frame(card_nt); r1.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(r1, text="Ngưỡng spread > p90 ×").pack(side="left")
+        ttk.Spinbox(r1, from_=1.0, to=3.0, increment=0.1,
+                    textvariable=self.nt_spread_factor_var, width=6).pack(side="left", padx=(6, 12))
+        r2 = ttk.Frame(card_nt); r2.grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(r2, text="ATR M5 tối thiểu (pips):").pack(side="left")
+        ttk.Spinbox(r2, from_=0.5, to=50.0, increment=0.5,
+                    textvariable=self.nt_min_atr_m5_pips_var, width=6).pack(side="left", padx=(6, 12))
+        r3 = ttk.Frame(card_nt); r3.grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(r3, text="Ticks mỗi phút tối thiểu (5m):").pack(side="left")
+        ttk.Spinbox(r3, from_=0, to=200, textvariable=self.nt_min_ticks_per_min_var,
+                    width=6).pack(side="left", padx=(6, 12))
+
+                        
+        ctx_tab = ttk.Frame(opts_nb, padding=8)
+        opts_nb.add(ctx_tab, text="Context")
+        ctx_tab.columnconfigure(0, weight=1)
+
+        card_ctx_text = ttk.LabelFrame(ctx_tab, text="Ngữ cảnh từ lịch sử (Text Reports)", padding=8)
+        card_ctx_text.grid(row=0, column=0, sticky="ew")
+        ttk.Checkbutton(card_ctx_text, text="Dùng ngữ cảnh từ báo cáo trước (text)",
+                        variable=self.remember_context_var).grid(row=0, column=0, columnspan=3, sticky="w")
+        rowt = ttk.Frame(card_ctx_text)
+        rowt.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(rowt, text="Số báo cáo gần nhất:").pack(side="left")
+        ttk.Spinbox(rowt, from_=1, to=10, textvariable=self.context_n_reports_var, width=6).pack(side="left", padx=(6, 12))
+        ttk.Label(rowt, text="Giới hạn ký tự/report:").pack(side="left")
+        ttk.Spinbox(rowt, from_=500, to=8000, increment=250, textvariable=self.context_limit_chars_var, width=8).pack(side="left", padx=(6, 0))
+
+        card_ctx_json = ttk.LabelFrame(ctx_tab, text="Ngữ cảnh tóm tắt JSON", padding=8)
+        card_ctx_json.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        ttk.Checkbutton(card_ctx_json, text="Tự tạo tóm tắt JSON sau mỗi lần phân tích",
+                        variable=self.create_ctx_json_var).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(card_ctx_json, text="Ưu tiên dùng tóm tắt JSON làm bối cảnh",
+                        variable=self.prefer_ctx_json_var).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        rowj = ttk.Frame(card_ctx_json)
+        rowj.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(rowj, text="Số JSON gần nhất:").pack(side="left")
+        ttk.Spinbox(rowj, from_=1, to=20, textvariable=self.ctx_json_n_var, width=6).pack(side="left", padx=(6, 0))
+
+                         
+        tg_tab = ttk.Frame(opts_nb, padding=8)
+        opts_nb.add(tg_tab, text="Telegram")
+        tg_tab.columnconfigure(1, weight=1)
+
+        ttk.Checkbutton(tg_tab, text="Bật thông báo khi có setup xác suất cao",
+                        variable=self.telegram_enabled_var).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(tg_tab, text="Bot Token:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        tk.Entry(tg_tab, textvariable=self.telegram_token_var, show="*", width=48).grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+        ttk.Label(tg_tab, text="Chat ID:").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        tk.Entry(tg_tab, textvariable=self.telegram_chat_id_var, width=24).grid(row=2, column=1, sticky="w", padx=(6, 0), pady=(6, 0))
+        ttk.Button(tg_tab, text="Gửi thử", command=self._telegram_test).grid(row=2, column=2, sticky="e", padx=(8, 0), pady=(6, 0))
+
+        ttk.Label(tg_tab, text="CA bundle (.pem/.crt):").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        tk.Entry(tg_tab, textvariable=self.telegram_ca_path_var).grid(row=3, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+        ttk.Button(tg_tab, text="Chọn…", command=self._pick_ca_bundle).grid(row=3, column=2, sticky="e", padx=(8, 0), pady=(6, 0))
+        ttk.Checkbutton(tg_tab, text="Bỏ qua kiểm tra chứng chỉ (KHÔNG KHUYẾN NGHỊ)",
+                        variable=self.telegram_skip_verify_var).grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+                    
+        mt5_tab = ttk.Frame(opts_nb, padding=8)
+        opts_nb.add(mt5_tab, text="MT5")
+        mt5_tab.columnconfigure(1, weight=1)
+
+        ttk.Checkbutton(mt5_tab, text="Bật lấy dữ liệu nến từ MT5 và đưa vào phân tích",
+                        variable=self.mt5_enabled_var).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(mt5_tab, text="MT5 terminal (tùy chọn):").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        tk.Entry(mt5_tab, textvariable=self.mt5_term_path_var).grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+        ttk.Button(mt5_tab, text="Chọn…", command=self._pick_mt5_terminal).grid(row=1, column=2, sticky="e", padx=(8, 0), pady=(6, 0))
+        ttk.Label(mt5_tab, text="Symbol:").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        tk.Entry(mt5_tab, textvariable=self.mt5_symbol_var, width=18).grid(row=2, column=1, sticky="w", padx=(6, 0), pady=(6, 0))
+        ttk.Button(mt5_tab, text="Tự nhận từ tên ảnh", command=self._mt5_guess_symbol).grid(row=2, column=2, sticky="e", padx=(8, 0), pady=(6, 0))
+
+        rowc = ttk.Frame(mt5_tab)
+        rowc.grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Label(rowc, text="Số nến:").pack(side="left")
+        ttk.Label(rowc, text="M1").pack(side="left", padx=(10, 2))
+        ttk.Spinbox(rowc, from_=30, to=2000, textvariable=self.mt5_n_M1, width=6).pack(side="left")
+        ttk.Label(rowc, text="M5").pack(side="left", padx=(10, 2))
+        ttk.Spinbox(rowc, from_=30, to=2000, textvariable=self.mt5_n_M5, width=6).pack(side="left")
+        ttk.Label(rowc, text="M15").pack(side="left", padx=(10, 2))
+        ttk.Spinbox(rowc, from_=20, to=2000, textvariable=self.mt5_n_M15, width=6).pack(side="left")
+        ttk.Label(rowc, text="H1").pack(side="left", padx=(10, 2))
+        ttk.Spinbox(rowc, from_=20, to=2000, textvariable=self.mt5_n_H1, width=6).pack(side="left")
+
+        btns_mt5 = ttk.Frame(mt5_tab)
+        btns_mt5.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        btns_mt5.columnconfigure(0, weight=1)
+        btns_mt5.columnconfigure(1, weight=1)
+        ttk.Button(btns_mt5, text="Kết nối/kiểm tra MT5", command=self._mt5_connect).grid(row=0, column=0, sticky="ew")
+        ttk.Button(btns_mt5, text="Chụp snapshot ngay", command=self._mt5_snapshot_popup).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        ttk.Label(mt5_tab, textvariable=self.mt5_status_var, foreground="#555").grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+                              
+        auto_card = ttk.LabelFrame(mt5_tab, text="Auto-Trade khi có Thiết lập xác suất cao", padding=8)
+        auto_card.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        r0 = ttk.Frame(auto_card); r0.grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Checkbutton(r0, text="Bật Auto-Trade", variable=self.auto_trade_enabled_var).pack(side="left")
+        ttk.Checkbutton(r0, text="KHÔNG trade nếu NGƯỢC bias H1", variable=self.trade_strict_bias_var).pack(side="left", padx=(12,0))
+
+        r1 = ttk.Frame(auto_card); r1.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6,0))
+        ttk.Label(r1, text="Khối lượng:").pack(side="left")
+        ttk.Radiobutton(r1, text="Lots cố định", value="lots", variable=self.trade_size_mode_var).pack(side="left", padx=(6,0))
+        ttk.Radiobutton(r1, text="% Equity", value="percent", variable=self.trade_size_mode_var).pack(side="left", padx=(6,0))
+        ttk.Radiobutton(r1, text="Tiền rủi ro", value="money", variable=self.trade_size_mode_var).pack(side="left", padx=(6,0))
+
+        r2 = ttk.Frame(auto_card); r2.grid(row=2, column=0, columnspan=3, sticky="w", pady=(4,0))
+        ttk.Label(r2, text="Lots:").pack(side="left")
+        ttk.Spinbox(r2, from_=0.01, to=100.0, increment=0.01, textvariable=self.trade_lots_total_var, width=8).pack(side="left", padx=(6,12))
+        ttk.Label(r2, text="% Equity rủi ro:").pack(side="left")
+        ttk.Spinbox(r2, from_=0.1, to=10.0, increment=0.1, textvariable=self.trade_equity_risk_pct_var, width=6).pack(side="left", padx=(6,12))
+        ttk.Label(r2, text="Tiền rủi ro:").pack(side="left")
+        ttk.Spinbox(r2, from_=1.0, to=1_000_000.0, increment=1.0, textvariable=self.trade_money_risk_var, width=10).pack(side="left", padx=(6,12))
+
+        r3 = ttk.Frame(auto_card); r3.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4,0))
+        ttk.Label(r3, text="Chia TP1 (%):").pack(side="left")
+        ttk.Spinbox(r3, from_=1, to=99, textvariable=self.trade_split_tp1_pct_var, width=6).pack(side="left", padx=(6,12))
+        ttk.Label(r3, text="Deviation (points):").pack(side="left")
+        ttk.Spinbox(r3, from_=5, to=200, textvariable=self.trade_deviation_points_var, width=6).pack(side="left", padx=(6,12))
+        ttk.Label(r3, text="Ngưỡng pending (points):").pack(side="left")
+        ttk.Spinbox(r3, from_=5, to=2000, textvariable=self.trade_pending_threshold_points_var, width=8).pack(side="left", padx=(6,12))
+
+        r4 = ttk.Frame(auto_card); r4.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4,0))
+        ttk.Label(r4, text="Magic:").pack(side="left")
+        ttk.Spinbox(r4, from_=1, to=2_147_000_000, textvariable=self.trade_magic_var, width=12).pack(side="left", padx=(6,12))
+        ttk.Label(r4, text="Comment:").pack(side="left")
+        tk.Entry(r4, textvariable=self.trade_comment_prefix_var, width=18).pack(side="left", padx=(6,0))
+
+                                                                         
+        r5 = ttk.Frame(auto_card); r5.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4,0))
+        ttk.Checkbutton(r5, text="Dry-run (không gửi lệnh)", variable=self.auto_trade_dry_run_var).pack(side="left")
+        ttk.Checkbutton(r5, text="Pending theo ATR", variable=self.trade_dynamic_pending_var).pack(side="left", padx=(12,0))
+        ttk.Checkbutton(r5, text="BE sau TP1", variable=self.trade_move_to_be_after_tp1_var).pack(side="left", padx=(12,0))
+
+                                   
+        r6 = ttk.Frame(auto_card); r6.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4,0))
+        ttk.Label(r6, text="TTL pending (phút):").pack(side="left")
+        ttk.Spinbox(r6, from_=1, to=1440, textvariable=self.trade_pending_ttl_min_var, width=6).pack(side="left", padx=(6,12))
+        ttk.Label(r6, text="RR tối thiểu TP2:").pack(side="left")
+        ttk.Spinbox(r6, from_=1.0, to=10.0, increment=0.1, textvariable=self.trade_min_rr_tp2_var, width=6).pack(side="left", padx=(6,12))
+        ttk.Label(r6, text="Khoảng cách key lvl (pips):").pack(side="left")
+        ttk.Spinbox(r6, from_=0.0, to=200.0, increment=0.5, textvariable=self.trade_min_dist_keylvl_pips_var, width=8).pack(side="left", padx=(6,12))
+        ttk.Label(r6, text="Cooldown (phút):").pack(side="left")
+        ttk.Spinbox(r6, from_=0, to=360, textvariable=self.trade_cooldown_min_var, width=6).pack(side="left", padx=(6,12))
+
+                           
+        r7 = ttk.Frame(auto_card); r7.grid(row=7, column=0, columnspan=3, sticky="w", pady=(4,0))
+        ttk.Label(r7, text="Trailing ATR ×").pack(side="left")
+        ttk.Spinbox(r7, from_=0.1, to=3.0, increment=0.1, textvariable=self.trade_trailing_atr_mult_var, width=6).pack(side="left", padx=(6,12))
+
+                            
+        r8 = ttk.Frame(auto_card); r8.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4,0))
+        ttk.Label(r8, text="Phiên cho phép:").pack(side="left")
+        ttk.Checkbutton(r8, text="Asia",   variable=self.trade_allow_session_asia_var).pack(side="left", padx=(6,0))
+        ttk.Checkbutton(r8, text="London", variable=self.trade_allow_session_london_var).pack(side="left", padx=(6,0))
+        ttk.Checkbutton(r8, text="New York", variable=self.trade_allow_session_ny_var).pack(side="left", padx=(6,0))
+
+                                                 
+        r9 = ttk.Frame(auto_card); r9.grid(row=9, column=0, columnspan=3, sticky="w", pady=(4,0))
+        ttk.Label(r9, text="Chặn quanh news:").pack(side="left")
+        ttk.Label(r9, text="Trước (phút):").pack(side="left", padx=(8,2))
+        ttk.Spinbox(r9, from_=0, to=180, textvariable=self.trade_news_block_before_min_var, width=6).pack(side="left")
+        ttk.Label(r9, text="Sau (phút):").pack(side="left", padx=(8,2))
+        ttk.Spinbox(r9, from_=0, to=180, textvariable=self.trade_news_block_after_min_var, width=6).pack(side="left")
+        ttk.Label(r9, text="Nguồn: Forex Factory (High)").pack(side="left", padx=(12,0))
+
+                          
+        ws_tab = ttk.Frame(opts_nb, padding=8)
+        opts_nb.add(ws_tab, text="Workspace")
+        for i in range(3):
+            ws_tab.columnconfigure(i, weight=1)
+        ttk.Button(ws_tab, text="Lưu workspace", command=self._save_workspace).grid(row=0, column=0, sticky="ew")
+        ttk.Button(ws_tab, text="Khôi phục", command=self._load_workspace).grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(ws_tab, text="Xoá workspace", command=self._delete_workspace).grid(row=0, column=2, sticky="ew")
+
+    def _toggle_api_visibility(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self.api_entry.configure(show="" if self.api_entry.cget("show") == "*" else "*")
+
+                                                                                             
+    def _snapshot_config(self) -> RunConfig:
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: RunConfig
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        return RunConfig(
+                              
+            folder=self.folder_path.get().strip(),
+            delete_after=bool(self.delete_after_var.get()),
+            max_files=int(self.max_files_var.get()),
+                           
+            upload_workers=int(self.upload_workers_var.get()),
+            cache_enabled=bool(self.cache_enabled_var.get()),
+            optimize_lossless=bool(self.optimize_lossless_var.get()),
+            only_generate_if_changed=bool(self.only_generate_if_changed_var.get()),
+                     
+            ctx_limit=int(self.context_limit_chars_var.get()),
+            create_ctx_json=bool(self.create_ctx_json_var.get()),
+            prefer_ctx_json=bool(self.prefer_ctx_json_var.get()),
+            ctx_json_n=int(self.ctx_json_n_var.get()),
+                      
+            telegram_enabled=bool(self.telegram_enabled_var.get()),
+            telegram_token=self.telegram_token_var.get().strip(),
+            telegram_chat_id=self.telegram_chat_id_var.get().strip(),
+            telegram_skip_verify=bool(self.telegram_skip_verify_var.get()),
+            telegram_ca_path=self.telegram_ca_path_var.get().strip(),
+                 
+            mt5_enabled=bool(self.mt5_enabled_var.get()),
+            mt5_symbol=self.mt5_symbol_var.get().strip(),
+            mt5_n_M1=int(self.mt5_n_M1.get()),
+            mt5_n_M5=int(self.mt5_n_M5.get()),
+            mt5_n_M15=int(self.mt5_n_M15.get()),
+            mt5_n_H1=int(self.mt5_n_H1.get()),
+                      
+            nt_enabled=bool(self.no_trade_enabled_var.get()),
+            nt_spread_factor=float(self.nt_spread_factor_var.get()),
+            nt_min_atr_m5_pips=float(self.nt_min_atr_m5_pips_var.get()),
+            nt_min_ticks_per_min=int(self.nt_min_ticks_per_min_var.get()),
+                        
+            auto_trade_enabled=bool(self.auto_trade_enabled_var.get()),
+            trade_strict_bias=bool(self.trade_strict_bias_var.get()),
+            trade_size_mode=self.trade_size_mode_var.get(),
+            trade_lots_total=float(self.trade_lots_total_var.get()),
+            trade_equity_risk_pct=float(self.trade_equity_risk_pct_var.get()),
+            trade_money_risk=float(self.trade_money_risk_var.get()),
+            trade_split_tp1_pct=int(self.trade_split_tp1_pct_var.get()),
+            trade_deviation_points=int(self.trade_deviation_points_var.get()),
+            trade_pending_threshold_points=int(self.trade_pending_threshold_points_var.get()),
+            trade_magic=int(self.trade_magic_var.get()),
+            trade_comment_prefix=self.trade_comment_prefix_var.get(),
+            trade_pending_ttl_min=int(self.trade_pending_ttl_min_var.get()),
+            trade_min_rr_tp2=float(self.trade_min_rr_tp2_var.get()),
+            trade_min_dist_keylvl_pips=float(self.trade_min_dist_keylvl_pips_var.get()),
+            trade_cooldown_min=int(self.trade_cooldown_min_var.get()),
+            trade_dynamic_pending=bool(self.trade_dynamic_pending_var.get()),
+            auto_trade_dry_run=bool(self.auto_trade_dry_run_var.get()),
+            trade_move_to_be_after_tp1=bool(self.trade_move_to_be_after_tp1_var.get()),
+            trade_trailing_atr_mult=float(self.trade_trailing_atr_mult_var.get()),
+            trade_allow_session_asia=bool(self.trade_allow_session_asia_var.get()),
+            trade_allow_session_london=bool(self.trade_allow_session_london_var.get()),
+            trade_allow_session_ny=bool(self.trade_allow_session_ny_var.get()),
+            trade_news_block_before_min=int(self.trade_news_block_before_min_var.get()),
+            trade_news_block_after_min=int(self.trade_news_block_after_min_var.get()),
+        )
+    
+                                                                  
+    def _load_env(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        path = filedialog.askopenfilename(title="Chọn file .env", filetypes=[("ENV", ".env"), ("Tất cả", "*.*")])
+        if not path:
+            return
+        if load_dotenv is None:
+            try:
+                for line in Path(path).read_text(encoding="utf-8").splitlines():
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        if k.strip() == "GOOGLE_API_KEY":
+                            self.api_key_var.set(v.strip())
+                            break
+                self.ui_message("info", "ENV", "Đã nạp GOOGLE_API_KEY từ file.")
+            except Exception as e:
+                self.ui_message("error", "ENV", str(e))
+        else:
+            load_dotenv(path)
+            val = os.environ.get("GOOGLE_API_KEY", "")
+            if val:
+                self.api_key_var.set(val)
+                self.ui_message("info", "ENV", "Đã nạp GOOGLE_API_KEY từ .env")
+
+    def _save_api_safe(self):
+        """
+        Mục đích: Ghi/Xuất dữ liệu (báo cáo .md, JSON tóm tắt, cache...).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            API_KEY_ENC.write_text(obfuscate_text(self.api_key_var.get().strip()), encoding="utf-8")
+            self.ui_message("info", "API", f"Đã lưu an toàn vào: {API_KEY_ENC}")
+        except Exception as e:
+            self.ui_message("error", "API", str(e))
+
+    def _delete_api_safe(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            if API_KEY_ENC.exists():
+                API_KEY_ENC.unlink()
+            self.ui_message("info", "API", "Đã xoá API key đã lưu.")
+        except Exception as e:
+            self.ui_message("error", "API", str(e))
+                                                              
+    def _get_reports_dir(self, folder_override: str | None = None) -> Path:
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - folder_override: str | None — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: Path
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        folder = Path(folder_override) if folder_override else (Path(self.folder_path.get().strip()) if self.folder_path.get().strip() else None)
+        if not folder:
+            return None
+        d = folder / "Reports"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def choose_folder(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        folder = filedialog.askdirectory(title="Chọn thư mục chứa ảnh")
+        if not folder:
+            return
+        self.folder_path.set(folder)
+        self._load_files(folder)
+        self._auto_load_prompt_for_current_folder()
+        self._refresh_history_list()
+        self._refresh_json_list()
+
+    def _load_files(self, folder):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số:
+          - folder — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self.results.clear()
+        self.combined_report_text = ""
+        if hasattr(self, "tree"):
+            self.tree.delete(*self.tree.get_children())
+        count = 0
+        for p in sorted(Path(folder).rglob("*")):
+            if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS:
+                self.results.append({"path": str(p), "name": p.name, "status": "Chưa xử lý", "text": ""})
+                idx = len(self.results)
+                if hasattr(self, "tree"):
+                    self.tree.insert("", "end", iid=str(idx - 1), values=(idx, p.name, "Chưa xử lý"))
+                count += 1
+        self.ui_status(
+            f"Đã nạp {count} ảnh. Sẵn sàng phân tích 1 lần."
+            if count
+            else "Không tìm thấy ảnh phù hợp trong thư mục đã chọn."
+        )
+        self.ui_progress(0)
+        if hasattr(self, "export_btn"):
+            self.export_btn.configure(state="disabled")
+        if hasattr(self, "detail_text"):
+            self.ui_detail_replace("Báo cáo tổng hợp sẽ hiển thị tại đây sau khi phân tích.")
+
+                                                          
+    def start_analysis(self):
+        """
+        Mục đích: Bắt đầu quy trình chính (khởi tạo trạng thái, đọc cấu hình, chạy tác vụ nền).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if self.is_running:
+            return
+        folder = self.folder_path.get().strip()
+        if not folder:
+            self.ui_message("warning", "Thiếu thư mục", "Vui lòng chọn thư mục ảnh trước.")
+            return
+
+        if self.cache_enabled_var.get() and self.delete_after_var.get():
+            self.ui_status("Lưu ý: Cache ảnh đang bật, KHÔNG nên xoá file trên Gemini sau phân tích.")
+
+                             
+        self.clear_results()
+        self.ui_status("Đang nạp lại ảnh từ thư mục đã chọn...")
+        self._load_files(folder)
+        if len(self.results) == 0:
+            return
+        prompt = self.prompt_text.get("1.0", "end").strip()
+        if not prompt and self._load_prompt_from_file(silent=True):
+            prompt = self.prompt_text.get("1.0", "end").strip()
+        if not prompt:
+            self.ui_message("warning", "Thiếu prompt", "Vui lòng nhập hoặc nạp PROMPT.txt trước khi chạy.")
+            return
+        api_key = self.api_key_var.get().strip() or os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            self.ui_message("warning", "Thiếu API key", "Vui lòng nhập API key hoặc đặt biến môi trường GOOGLE_API_KEY.")
+            return
+        try:
+            genai.configure(api_key=api_key)
+        except Exception as e:
+            self.ui_message("error", "Gemini", f"Lỗi cấu hình API: {e}")
+            return
+
+                    
+        for i, r in enumerate(self.results):
+            r["status"] = "Chưa xử lý"
+            r["text"] = ""
+            self._update_tree_row(i, r["status"])
+        self.combined_report_text = ""
+        self.ui_progress(0)
+        self.ui_detail_replace("Đang chuẩn bị phân tích...")
+
+        self.stop_flag = False
+        self.is_running = True
+        self.stop_btn.configure(state="normal")
+        self.export_btn.configure(state="disabled")
+
+                                                                                  
+        cfg = self._snapshot_config()
+        t = threading.Thread(
+            target=self._worker_run_whole_folder,
+            args=(prompt, self.model_var.get(), cfg),
+            daemon=True
+        )
+        t.start()
+
+    def stop_analysis(self):
+        """
+        Mục đích: Dừng quy trình đang chạy một cách an toàn (đặt cờ, giải phóng tài nguyên, cập nhật UI).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if self.is_running:
+            self.stop_flag = True
+            self.ui_status("Đang dừng sau khi hoàn tất tác vụ hiện tại...")
+
+                                                                    
+    def _load_upload_cache(self) -> dict:
+        """
+        Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
+        Tham số: (không)
+        Trả về: dict
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            if UPLOAD_CACHE_JSON.exists():
+                return json.loads(UPLOAD_CACHE_JSON.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    def _save_upload_cache(self, cache: dict):
+        """
+        Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
+        Tham số:
+          - cache: dict — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            UPLOAD_CACHE_JSON.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _file_sig(self, path: str) -> str:
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số:
+          - path: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: str
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        p = Path(path)
+        try:
+            size = p.stat().st_size
+            mtime = int(p.stat().st_mtime)
+            h = hashlib.sha1()
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            return f"{size}:{mtime}:{h.hexdigest()[:16]}"
+        except Exception:
+            return ""
+
+    def _cache_lookup(self, cache: dict, path: str) -> str:
+        """
+        Mục đích: Đọc/ghi cấu hình workspace, cache upload và các trạng thái phiên làm việc.
+        Tham số:
+          - cache: dict — (tự suy luận theo ngữ cảnh sử dụng).
+          - path: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: str
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        rec = cache.get(path)
+        if not rec:
+            return ""
+        sig_now = self._file_sig(path)
+        return rec["remote_name"] if sig_now and rec.get("sig") == sig_now else ""
+
+    def _cache_put(self, cache: dict, path: str, remote_name: str):
+        """
+        Mục đích: Đọc/ghi cấu hình workspace, cache upload và các trạng thái phiên làm việc.
+        Tham số:
+          - cache: dict — (tự suy luận theo ngữ cảnh sử dụng).
+          - path: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - remote_name: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        cache[path] = {"sig": self._file_sig(path), "remote_name": remote_name}
+
+                                                                     
+    def _prepare_image_for_upload(self, path: str) -> str:
+        """
+        Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
+        Tham số:
+          - path: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: str
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        return self._prepare_image_for_upload_cfg(path, optimize=bool(self.optimize_lossless_var.get()))
+
+    def _prepare_image_for_upload_cfg(self, path: str, optimize: bool) -> str:
+        """
+        Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
+        Tham số:
+          - path: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - optimize: bool — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: str
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not optimize or Image is None:
+            return path
+
+        try:
+            src = Path(path)
+            tmpdir = APP_DIR / "tmp_upload"
+            tmpdir.mkdir(parents=True, exist_ok=True)
+            out = tmpdir / (src.stem + "_opt.png")
+
+                                                                               
+            with Image.open(src) as im:
+                im.load()                                
+                                                              
+                has_alpha = (im.mode in ("RGBA", "LA")) or ("transparency" in im.info)
+                work = im.convert("RGBA") if has_alpha else im.convert("RGB")
+
+                                                                          
+            work.save(out, format="PNG", optimize=True)
+            work.close()                                     
+
+                                                                                
+            try:
+                if out.stat().st_size >= src.stat().st_size:
+                    try:
+                        out.unlink()
+                    except Exception:
+                        pass
+                    return str(src)
+            except Exception:
+                                                                          
+                try:
+                    out.unlink()
+                except Exception:
+                    pass
+                return str(src)
+
+                                          
+            return str(out)
+
+        except Exception:
+                                                  
+            return path
+
+
+                                                                  
+    def _as_inline_media_part(self, path: str) -> dict:
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - path: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: dict
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        mime, _ = mimetypes.guess_type(path)
+        with open(path, "rb") as f:
+            data = f.read()
+        return {"mime_type": mime or "application/octet-stream", "data": data}
+
+    def _file_or_inline_for_model(self, file_obj, prepared_path: str | None, original_path: str) -> object:
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số:
+          - file_obj — (tự suy luận theo ngữ cảnh sử dụng).
+          - prepared_path: str | None — (tự suy luận theo ngữ cảnh sử dụng).
+          - original_path: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: object
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            st = getattr(getattr(file_obj, "state", None), "name", None)
+            if st == "ACTIVE":
+                return file_obj
+        except Exception:
+            pass
+        use_path = prepared_path or original_path
+        return self._as_inline_media_part(use_path)
+
+                                                                     
+    def _parse_ctx_json_files(self, max_n=5, folder: str | None = None):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số:
+          - max_n — (tự suy luận theo ngữ cảnh sử dụng).
+          - folder: str | None — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        d = self._get_reports_dir(folder_override=folder)
+        if not d:
+            return []
+        files = sorted(d.glob("ctx_*.json"), reverse=True)[: max(1, int(max_n))]
+        out = []
+        for p in files:
+            try:
+                out.append(json.loads(p.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+        return out
+
+    def _summarize_checklist_trend(self, ctx_items):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - ctx_items — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not ctx_items:
+            return {"trend": "unknown", "enough_ratio": None}
+        order = ["A", "B", "C", "D", "E", "F"]
+        scores = {"ĐỦ": 2, "CHỜ": 1, "SAI": 0}
+        seq = []
+        enough_cnt = 0
+        total = 0
+        for it in ctx_items:
+            setup = it.get("blocks") or []
+            setup_json = None
+            for blk in setup:
+                try:
+                    obj = json.loads(blk)
+                    if isinstance(obj, dict) and "setup_status" in obj:
+                        setup_json = obj
+                        break
+                except Exception:
+                    pass
+            if not setup_json:
+                continue
+            st = setup_json.get("setup_status", {})
+            val = sum(scores.get(st.get(k, ""), 0) for k in order)
+            seq.append(val)
+            concl = setup_json.get("conclusions", "")
+            if isinstance(concl, str) and "ĐỦ" in concl.upper():
+                enough_cnt += 1
+            total += 1
+        if len(seq) < 2:
+            return {"trend": "flat", "enough_ratio": (enough_cnt / total if total else None)}
+        delta = seq[-1] - seq[0]
+        trend = "improving" if delta > 0 else ("deteriorating" if delta < 0 else "flat")
+        return {"trend": trend, "enough_ratio": (enough_cnt / total if total else None)}
+
+    def _images_tf_map(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        names = [Path(r["path"]).name for r in self.results if r.get("path")]
+        out = {}
+        for n in names:
+            out[n] = self._detect_timeframe_from_name(n)
+        return out
+
+    def _folder_signature(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        names = sorted([Path(r["path"]).name for r in self.results if r.get("path")])
+        sig = hashlib.sha1("\n".join(names).encode("utf-8")).hexdigest() if names else ""
+        return f"sha1:{sig}" if sig else ""
+
+    def compose_context(self, cfg: RunConfig, budget_chars=1800):
+                                                                        
+        """
+        Mục đích: Xây dựng/ngắt ghép ngữ cảnh (text/JSON) để truyền vào prompt của Gemini.
+        Tham số:
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+          - budget_chars — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        mt5_ctx_lite: dict | None = {}
+        mt5_flags: dict | None = {}
+        mt5full = None                                     
+        ctx_items = self._parse_ctx_json_files(cfg.ctx_json_n, folder=cfg.folder)
+        trend = self._summarize_checklist_trend(ctx_items)
+
+                                         
+        latest_7 = None
+        plan = None
+        latest_blocks = None
+        if ctx_items:
+            latest = ctx_items[0]
+            latest_7 = latest.get("seven_lines")
+            latest_blocks = latest.get("blocks") or []
+            for blk in latest_blocks:
+                try:
+                    o = json.loads(blk)
+                    if isinstance(o, dict) and "proposed_plan" in o:
+                        plan = o.get("proposed_plan")
+                        break
+                except Exception:
+                    pass
+
+                                                                                           
+        mt5_ctx_full_text = ""
+        if cfg.mt5_enabled:
+            try:
+                mt5_ctx_full_text = self._mt5_build_context(plan=plan, cfg=cfg)
+                if mt5_ctx_full_text:
+                    mt5full = (json.loads(mt5_ctx_full_text) or {}).get("MT5_DATA", {})
+                                  
+                    info = (mt5full.get("info") or {})
+                    tick = (mt5full.get("tick") or {})
+                    volATR = ((mt5full.get("volatility") or {}).get("ATR") or {})
+                    stats5 = (mt5full.get("tick_stats_5m") or {})
+                    key_near = mt5full.get("key_levels_nearby") or []
+                    pip_size = _pip_size_from_info(info)
+                    cp = tick.get("bid") or tick.get("last")
+                    atr_m5 = volATR.get("M5")
+                    tpm = stats5.get("ticks_per_min")
+                    dist_pdh = next((x.get("distance_pips") for x in key_near if x.get("name") == "PDH"), None)
+                    dist_pdl = next((x.get("distance_pips") for x in key_near if x.get("name") == "PDL"), None)
+                    dist_eq  = next((x.get("distance_pips") for x in key_near if x.get("name") == "EQ50_D"), None)
+                    session_name = None
+                    ss = mt5full.get("sessions_today") or {}
+                    now_hhmm = datetime.now().strftime("%H:%M")
+                    for k in ["asia","london","newyork_pre","newyork_post"]:
+                        rng = ss.get(k) or {}
+                        if rng.get("start") and rng.get("end") and rng["start"] <= now_hhmm < rng["end"]:
+                            session_name = k
+                            break
+                    mt5_ctx_lite = {
+                        "symbol": mt5full.get("symbol"),
+                        "current_price": cp,
+                        "spread_points": info.get("spread_current"),                                                
+                        "atr_m5_pips": (atr_m5 / pip_size) if (atr_m5 and pip_size) else None,
+                        "ticks_per_min": tpm,
+                        "pdh_pdl_distance_pips": {"PDH": dist_pdh, "PDL": dist_pdl},
+                        "eq50_d_distance_pips": dist_eq,
+                        "session_active": session_name,
+                        "mins_to_next_killzone": mt5full.get("mins_to_next_killzone"),
+                    }
+                               
+                    spread_cur = info.get("spread_current")
+                    p90 = stats5.get("p90_spread")
+                    low_liq_thr = int(cfg.nt_min_ticks_per_min)
+                    high_spread = (spread_cur is not None and p90 is not None and spread_cur > p90 * float(cfg.nt_spread_factor))
+                    low_liquidity = (tpm is not None and tpm < low_liq_thr)
+                    vol_reg = mt5full.get("volatility_regime")
+                    emaM5 = (((mt5full.get("trend_refs") or {}).get("EMA") or {}).get("M5") or {})
+                    ema50 = emaM5.get("ema50")
+                    ema200 = emaM5.get("ema200")
+                    atr_m5_safe = atr_m5 if atr_m5 is not None else 0
+                    trending = (ema50 is not None and ema200 is not None and atr_m5_safe) and (abs(ema50 - ema200) > (atr_m5_safe * 0.2))
+                                                                      
+                    mt5_flags = {
+                        "news_soon": False,
+                        "high_spread": bool(high_spread),
+                        "low_liquidity": bool(low_liquidity),
+                        "volatility_regime": vol_reg,
+                        "trend_regime": "trending" if trending else "choppy",
+                    }
+            except Exception:
+                mt5_ctx_full_text = ""
+
+                  
+        images_map = self._images_tf_map()
+        run_meta = {
+            "analysis_id": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00","Z"),
+            "folder_signature": self._folder_signature(),
+            "images_tf_map": images_map
+        }
+
+                                                         
+                                                                        
+        pass_cnt = 0; total = 0
+        for it in ctx_items:
+            blks = it.get("blocks") or []
+            for blk in blks:
+                try:
+                    o = json.loads(blk)
+                    if isinstance(o, dict) and "setup_status" in o:
+                        concl = (o.get("conclusions") or "").upper()
+                        total += 1
+                        pass_cnt += 1 if ("ĐỦ" in concl or "DU" in concl) else 0
+                        break
+                except Exception:
+                    continue
+        stats5 = (mt5full.get("tick_stats_5m") if mt5full else None) or {}
+        running_stats = {
+            "checklist_pass_ratio": (pass_cnt/total if total else None),
+            "hit_rate_high_prob": None,
+            "avg_rr_tp1": None,
+            "median_spread": stats5.get("median_spread"),
+            "median_ticks_per_min": stats5.get("ticks_per_min"),
+        }
+
+                            
+        risk_rules = {
+            "max_risk_per_trade_pct": float(cfg.trade_equity_risk_pct),
+            "daily_loss_limit_pct": 3.0,
+            "max_trades_per_day": 3,
+            "allowed_killzones": ["london", "newyork_pre", "newyork_post"],
+            "news_blackout_min_before_after": 15
+        }
+
+        composed = {
+            "CONTEXT_COMPOSED": {
+                "cycle": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "session": mt5_ctx_lite.get("session_active") if isinstance(mt5_ctx_lite, dict) else None,
+                "trend_checklist": trend,
+                "latest_plan": plan,
+                "latest_7_lines": latest_7,
+                "run_meta": run_meta,
+                "running_stats": running_stats,
+                "risk_rules": risk_rules,
+                "environment_flags": mt5_flags or None,
+                "mt5": (mt5full if mt5full else None),
+                "mt5_lite": (mt5_ctx_lite or None),
+            }
+        }
+
+                                                            
+        try:
+            self._log_trade_decision({
+                "stage": "run-start",
+                "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                                       
+                **(composed.get("CONTEXT_COMPOSED") or {})
+            }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+        except Exception:
+            pass
+
+        text = json.dumps(composed, ensure_ascii=False)
+        if len(text) <= budget_chars:
+            return text
+                                           
+        try:
+            slim = composed["CONTEXT_COMPOSED"]
+                                     
+            slim["mt5"] = None
+            text = json.dumps(composed, ensure_ascii=False)
+            if len(text) > budget_chars:
+                                         
+                slim["latest_7_lines"] = (slim.get("latest_7_lines") or [])[:3]
+                text = json.dumps(composed, ensure_ascii=False)
+        except Exception:
+            pass
+        return text[:budget_chars]
+
+                                                                
+    def _pretrade_hard_filters(self, mt5_ctx: dict, cfg: RunConfig):
+        """
+        Mục đích: Tự động hóa xử lý lệnh: tính khối lượng, đặt/huỷ lệnh, trailing/BE, kiểm soát RR.
+        Tham số:
+          - mt5_ctx: dict — (tự suy luận theo ngữ cảnh sử dụng).
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not cfg.nt_enabled:
+            return True, []
+        reasons = []
+        info = (mt5_ctx.get("info") or {})
+        tick_stats = (mt5_ctx.get("tick_stats_5m") or {})
+        vol = (mt5_ctx.get("volatility") or {}).get("ATR") or {}
+        point = float(info.get("point") or 0.0)
+        spread_cur = info.get("spread_current")
+        p90_sp = tick_stats.get("p90_spread")
+        median_sp = tick_stats.get("median_spread")
+        tpm = tick_stats.get("ticks_per_min")
+
+        if spread_cur is not None:
+            fac = max(1.0, float(cfg.nt_spread_factor))
+            if p90_sp:
+                if spread_cur > p90_sp * fac:
+                    reasons.append(f"Spread cao (cur={spread_cur}, p90={p90_sp}, factor={fac})")
+            elif median_sp:
+                if spread_cur > median_sp * (fac + 0.1):
+                    reasons.append(f"Spread cao (cur={spread_cur}, median~{median_sp})")
+
+        atr_m5 = vol.get("M5")
+        pip_size = _pip_size_from_info(info)
+        if atr_m5 and pip_size > 0:
+            atr_m5_pips = float(atr_m5) / pip_size
+            if atr_m5_pips < float(cfg.nt_min_atr_m5_pips):
+                reasons.append(f"ATR M5 thấp ({atr_m5_pips:.1f} pips)")
+
+
+        if tpm is not None and tpm < int(cfg.nt_min_ticks_per_min):
+            reasons.append(f"Thanh khoản thấp (ticks/min={tpm})")
+
+        return (len(reasons) == 0), reasons
+                                                      
+    def _worker_run_whole_folder(self, prompt: str, model_name: str, cfg: RunConfig):
+
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - prompt: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - model_name: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        def _tnow():
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số: (không)
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            return time.perf_counter()
+
+                                                
+        def _gen_with_retry(_model, _parts, tries=2, base_delay=2.0):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - _model — (tự suy luận theo ngữ cảnh sử dụng).
+              - _parts — (tự suy luận theo ngữ cảnh sử dụng).
+              - tries — (tự suy luận theo ngữ cảnh sử dụng).
+              - base_delay — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            last = None
+            for i in range(tries):
+                try:
+                    return _model.generate_content(_parts, request_options={"timeout": 1200})
+                except Exception as e:
+                    last = e
+                    if i == tries - 1:
+                        raise
+                    time.sleep(base_delay)
+                    base_delay *= 1.7
+            raise last
+
+        paths = [r["path"] for r in self.results]
+        names = [r["name"] for r in self.results]
+        max_files = max(0, int(cfg.max_files))
+        if max_files > 0 and len(paths) > max_files:
+            paths, names = paths[:max_files], names[:max_files]
+        total_imgs = len(paths)
+        if total_imgs == 0:
+            self.ui_status("Không có ảnh để phân tích.")
+            self._enqueue(self._finalize_stopped)
+            return
+
+        try:
+            model = genai.GenerativeModel(model_name=model_name)
+        except Exception as e:
+            self.ui_message("error", "Model", str(e))
+            self._enqueue(self._finalize_stopped)
+            return
+
+
+        uploaded_files = []                                                           
+        file_slots     = [None] * len(paths)                                     
+        combined_text  = ""
+        early_exit     = False
+
+        try:
+                                                                            
+            t_up0 = _tnow()
+            cache = self._load_upload_cache() if cfg.cache_enabled else {}
+
+                                                               
+            prepared_map = {}                               
+            to_upload = []                              
+            for i, (p, n) in enumerate(zip(paths, names)):
+                cached_remote = self._cache_lookup(cache, p) if cache else ""
+                if cached_remote:
+                    try:
+                        f = genai.get_file(cached_remote)
+                        if getattr(getattr(f, "state", None), "name", None) == "ACTIVE":
+                            file_slots[i] = f                             
+                            prepared_map[i] = None
+                            continue
+                    except Exception:
+                        pass
+                upath = self._prepare_image_for_upload_cfg(p, optimize=cfg.optimize_lossless)
+                to_upload.append((i, p, n, upath))
+                prepared_map[i] = upath
+
+                                                                                     
+            if cfg.only_generate_if_changed and len(to_upload) == 0 and all(file_slots):
+                plan = None
+                composed = ""
+                context_block = ""
+                try:
+                    composed = self.compose_context(cfg, budget_chars=max(800, int(cfg.ctx_limit))) or ""
+                    if composed:
+                        try:
+                            _obj = json.loads(composed)
+                            plan = (_obj.get("CONTEXT_COMPOSED") or {}).get("latest_plan")
+                        except Exception:
+                            plan = None
+                        context_block = "\n\n[CONTEXT_COMPOSED]\n" + composed
+                except Exception:
+                    composed = ""
+                    plan = None
+                    context_block = ""
+
+                mt5_ctx_text = self._mt5_build_context(plan=plan, cfg=cfg) if cfg.mt5_enabled else ""
+                text = "Ảnh không đổi so với lần gần nhất."
+                if context_block:
+                    text += "\n\n" + context_block
+                if mt5_ctx_text:
+                    text += "\n\n[PHỤ LỤC_MT5_JSON]\n" + mt5_ctx_text
+
+                self.combined_report_text = text
+                self.ui_detail_replace(text)
+                _ = self._auto_save_report(text, cfg)
+                self.ui_refresh_history_list()
+
+                try:
+                    mt5_dict_cache = {}
+                    if mt5_ctx_text:
+                        try:
+                            mt5_dict_cache = json.loads(mt5_ctx_text).get("MT5_DATA", {})
+                        except Exception:
+                            mt5_dict_cache = {}
+                    if mt5_dict_cache:
+                        self._mt5_manage_be_trailing(mt5_dict_cache, cfg)
+                except Exception:
+                    pass
+                early_exit = True
+                raise SystemExit
+
+                                        
+            for (i, p, n, upath) in to_upload:
+                self.results[i]["status"] = "Đang upload..."
+                self._update_tree_row(i, "Đang upload...")
+
+                                                                
+            if to_upload:
+                max_workers = max(1, min(len(to_upload), int(cfg.upload_workers)))
+                with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    futs = {
+                        ex.submit(self._upload_one_file_for_worker, (p, n, upath)): (i, p)
+                        for (i, p, n, upath) in to_upload
+                    }
+                    done_cnt = 0
+                    steps_upload   = len(to_upload)
+                    steps_process  = 1             
+                    total_steps    = steps_upload + steps_process + 1
+
+                    for fut in as_completed(futs):
+                        if self.stop_flag:
+                            for f_cancel in futs:
+                                try:
+                                    f_cancel.cancel()
+                                except Exception:
+                                    pass
+                            self._quick_be_trailing_sweep(cfg)
+                            early_exit = True
+                            raise SystemExit
+
+                        (p_ret, fobj) = fut.result()
+                        i, p = futs[fut]
+                        file_slots[i] = fobj                                          
+                        uploaded_files.append((fobj, p))                                         
+
+                        done_cnt += 1
+                        self._update_progress(done_cnt, total_steps)
+
+                        self.results[i]["status"] = "Đã upload"
+                        self._update_tree_row(i, "Đã upload")
+
+                self.ui_status(f"Upload xong trong {(_tnow()-t_up0):.2f}s")
+            else:
+                steps_upload   = 0
+                steps_process  = 1
+                total_steps    = steps_upload + steps_process + 1
+
+                                                 
+            if cfg.cache_enabled:
+                for (f, p) in uploaded_files:
+                    try:
+                        self._cache_put(cache, p, f.name)
+                    except Exception:
+                        pass
+                self._save_upload_cache(cache)
+
+            if self.stop_flag:
+                self._quick_be_trailing_sweep(cfg)
+                early_exit = True
+                raise SystemExit
+
+                                                                                 
+            all_media = []
+            for i in range(len(paths)):
+                f = file_slots[i]
+                if f is None:
+                                                                               
+                    all_media.append(self._as_inline_media_part(prepared_map.get(i) or paths[i]))
+                else:
+                    all_media.append(self._file_or_inline_for_model(
+                        f,
+                        prepared_map.get(i),
+                        paths[i]
+                    ))
+
+                       
+            if cfg.cache_enabled:
+                for (f, p) in uploaded_files:
+                    try:
+                        self._cache_put(cache, p, f.name)
+                    except Exception:
+                        pass
+                self._save_upload_cache(cache)
+
+            if self.stop_flag:
+                self._quick_be_trailing_sweep(cfg)
+                early_exit = True
+                raise SystemExit
+
+                                                                                             
+            t_ctx0 = _tnow()
+            plan = None
+            composed = ""
+            context_block = ""
+            try:
+                composed = self.compose_context(cfg, budget_chars=max(800, int(cfg.ctx_limit))) or ""
+                if composed:
+                    try:
+                        _obj = json.loads(composed)
+                        plan = (_obj.get("CONTEXT_COMPOSED") or {}).get("latest_plan")
+                    except Exception:
+                        plan = None
+                    context_block = "\n\n[CONTEXT_COMPOSED]\n" + composed
+            except Exception:
+                composed = ""
+                plan = None
+                context_block = ""
+
+            mt5_json_full = self._mt5_build_context(plan=plan, cfg=cfg) if cfg.mt5_enabled else ""
+            mt5_dict = {}
+            if mt5_json_full:
+                try:
+                    mt5_dict = json.loads(mt5_json_full).get("MT5_DATA", {})
+                except Exception:
+                    mt5_dict = {}
+            self.ui_status(f"Context+MT5 xong trong {(_tnow()-t_ctx0):.2f}s")
+
+                                                                 
+            if cfg.nt_enabled and mt5_dict:
+                ok, reasons = self._pretrade_hard_filters(mt5_dict, cfg)
+                if not ok:
+                                                 
+                    try:
+                        self._log_trade_decision({
+                            "stage": "no-trade",
+                            "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "reasons": reasons
+                        }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+                    except Exception:
+                        pass
+                    note = "NO-TRADE: Điều kiện giao dịch không thỏa.\n- " + "\n- ".join(reasons)
+                                                       
+                    try:
+                        self._log_trade_decision({
+                            "stage": "no-trade",
+                            "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "reasons": reasons,
+                            
+                        }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+                    except Exception:
+                        pass
+                    if context_block:
+                        note += "\n\n" + context_block
+                    if mt5_json_full:
+                        note += "\n\n[PHỤ LỤC_MT5_JSON]\n" + mt5_json_full
+                    self.combined_report_text = note
+                    self.ui_detail_replace(note)
+                    _ = self._auto_save_report(note, cfg)
+                    self.ui_refresh_history_list()
+                                                                
+                    try:
+                        if mt5_dict:
+                            self._mt5_manage_be_trailing(mt5_dict, cfg)
+                    except Exception:
+                        pass
+                    early_exit = True
+                    raise SystemExit
+
+                                                                                      
+            self.ui_status("Đang phân tích toàn bộ thư mục...")
+            try:
+                tf_section = self._build_timeframe_section([Path(p).name for p in paths]).strip()
+
+                                                          
+                parts_text = []
+                if tf_section:
+                    parts_text.append("### Nhãn khung thời gian (tự nhận từ tên tệp)\n")
+                    parts_text.append(tf_section)
+                    parts_text.append("\n\n")
+                parts_text.append(prompt)
+                if context_block:
+                    parts_text.append("\n\n")
+                    parts_text.append(context_block)
+                if mt5_json_full:
+                    parts_text.append("\n\n[PHỤ LỤC_MT5_JSON]\n")
+                    parts_text.append(mt5_json_full)
+                prompt_final = "".join(parts_text)
+
+                                                                           
+                t_llm0 = _tnow()
+                parts = all_media + [prompt_final]
+                resp = _gen_with_retry(model, parts, tries=2, base_delay=2.0)
+
+                combined_text = (getattr(resp, "text", "") or "").strip() or "[Không có nội dung trả về]"
+                self.ui_status(f"Model trả lời trong {(_tnow()-t_llm0):.2f}s")
+
+                                                         
+                self._update_progress(steps_upload + steps_process, steps_upload + steps_process + 1)
+
+            except Exception as e:
+                combined_text = f"[LỖI phân tích] {e}"
+
+                                                      
+            for p in paths:
+                idx_real = next((i for i, r in enumerate(self.results) if r["path"] == p), None)
+                if idx_real is not None:
+                    self.results[idx_real]["status"] = "Hoàn tất"
+                    self.results[idx_real]["text"] = ""
+                    self._update_tree_row(idx_real, "Hoàn tất")
+
+            self.combined_report_text = combined_text
+            self.ui_detail_replace(combined_text)
+
+            saved_path = self._auto_save_report(combined_text, cfg)
+            if cfg.create_ctx_json:
+                try:
+                    self._auto_save_json_from_report(combined_text, cfg)
+                except Exception:
+                    pass
+            self.ui_refresh_history_list()
+            self.ui_refresh_json_list()
+
+                                                                            
+            if not self.stop_flag and not early_exit:
+                try:
+                    self._maybe_notify_telegram(combined_text, saved_path, cfg)
+                except Exception:
+                    pass
+                try:
+                    self._auto_trade_if_high_prob(combined_text, mt5_dict, cfg)
+                except Exception as e:
+                    self.ui_status(f"Auto-Trade lỗi: {e}")
+                                                   
+                try:
+                    if mt5_dict:
+                        self._mt5_manage_be_trailing(mt5_dict, cfg)
+                except Exception:
+                    pass
+
+
+                                                
+            self._update_progress(steps_upload + steps_process + 1, steps_upload + steps_process + 1)
+
+        except SystemExit:
+                                    
+            pass
+        except Exception as e:
+            self.ui_message("error", "Lỗi", str(e))
+
+        finally:
+                                                         
+            if not cfg.cache_enabled and cfg.delete_after:
+                for uf, _ in uploaded_files:
+                    try:
+                        self._maybe_delete(uf)
+                    except Exception:
+                        pass
+
+                                                       
+            self._enqueue(self._finalize_done if not self.stop_flag else self._finalize_stopped)
+
+    def _upload_one_file_for_worker(self, item):
+        """
+        Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
+        Tham số:
+          - item — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        p, n, upath = item
+        mime, _ = mimetypes.guess_type(upath)
+        uf = genai.upload_file(path=upath, mime_type=mime or "application/octet-stream", display_name=n)
+        retries, delay = 10, 0.6
+        while retries > 0:
+            try:
+                f = genai.get_file(uf.name)
+                st = getattr(getattr(f, "state", None), "name", None)
+                if st == "ACTIVE":
+                    return (p, f)
+                if st == "FAILED":
+                    raise RuntimeError("File ở trạng thái FAILED.")
+            except Exception:
+                if retries <= 1:
+                    raise
+            time.sleep(delay)
+            retries -= 1
+            delay = min(delay * 1.5, 3.0)
+                                                                          
+        return (p, uf)
+
+    def _quick_be_trailing_sweep(self, cfg: RunConfig):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            if not (cfg.mt5_enabled and cfg.auto_trade_enabled):
+                return
+            ctx = self._mt5_build_context(plan=None, cfg=cfg) or ""
+            if not ctx:
+                return
+            data = json.loads(ctx).get("MT5_DATA", {})
+            if data:
+                self._mt5_manage_be_trailing(data, cfg)
+        except Exception:
+            pass
+
+                                                                      
+    def _auto_save_json_from_report(self, text: str, cfg: RunConfig):
+        """
+        Mục đích: Ghi/Xuất dữ liệu (báo cáo .md, JSON tóm tắt, cache...).
+        Tham số:
+          - text: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        d = self._get_reports_dir(cfg.folder)
+        if not d:
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        found = []
+        for m in re.finditer(r"\{[\s\S]*?\}", text):
+            j = m.group(0).strip()
+            try:
+                json.loads(j)
+                found.append(j)
+            except Exception:
+                continue
+        payload = {}
+        if found:
+            payload["blocks"] = found
+        lines, sig, high = self._extract_seven_lines(text)
+        if lines:
+            payload["seven_lines"] = lines
+            payload["signature"] = sig
+            payload["high_prob"] = bool(high)
+        payload["cycle"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        out = d / f"ctx_{ts}.json"
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return out
+
+                                                        
+    def _pick_ca_bundle(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        p = filedialog.askopenfilename(
+            title="Chọn CA bundle (.pem/.crt)",
+            filetypes=[("PEM/CRT", "*.pem *.crt *.cer"), ("Tất cả", "*.*")],
+        )
+        if p:
+            self.telegram_ca_path_var.set(p)
+
+    def _build_ssl_context(self) -> ssl.SSLContext:
+        """
+        Mục đích: Khởi tạo SSLContext (UI-based) qua helper hợp nhất.
+        """
+        cafile = (self.telegram_ca_path_var.get() or "").strip()
+        skip = bool(self.telegram_skip_verify_var.get())
+        return self._create_ssl_context(cafile or None, skip)
+    def _create_ssl_context(self, cafile: str | None, skip_verify: bool) -> ssl.SSLContext:
+        """
+        Mục đích: Tạo SSLContext hợp nhất (dùng chung cho Telegram/FF), giảm trùng lặp.
+        Tham số:
+        - cafile: str | None — đường dẫn CA file nếu có.
+        - skip_verify: bool — bỏ kiểm chứng chứng chỉ.
+        Trả về: ssl.SSLContext
+        """
+        try:
+            if cafile:
+                ctx = ssl.create_default_context(cafile=cafile)
+            elif certifi is not None:
+                ctx = ssl.create_default_context(cafile=certifi.where())
+            else:
+                ctx = ssl.create_default_context()
+        except Exception:
+            ctx = ssl.create_default_context()
+        if skip_verify:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+    def _telegram_api_call(self, method: str, params: dict, use_get_fallback: bool = True, timeout: int = 15):
+        """
+        Mục đích: Gửi/thử thông báo Telegram, xử lý chứng chỉ và kết quả phản hồi.
+        Tham số:
+          - method: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - params: dict — (tự suy luận theo ngữ cảnh sử dụng).
+          - use_get_fallback: bool — (tự suy luận theo ngữ cảnh sử dụng).
+          - timeout: int — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        token = self.telegram_token_var.get().strip()
+        if not token:
+            return False, {"error": "missing_token"}
+        base = f"https://api.telegram.org/bot{token}/{method}"
+        data = urllib.parse.urlencode(params).encode("utf-8")
+        ctx = self._build_ssl_context()
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+        try:
+            req = urllib.request.Request(base, data=data)
+            with opener.open(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+                obj = None
+                if body.startswith("{"):
+                    try:
+                        obj = json.loads(body)
+                    except json.JSONDecodeError:
+                        obj = None
+                if obj is None:
+                    obj = {"ok": resp.status == 200, "body": body}
+                ok = bool(obj.get("ok", resp.status == 200))
+                return ok, obj
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else str(e)
+            if not use_get_fallback:
+                return False, {"error": f"HTTP {e.code}", "body": body}
+        except urllib.error.URLError as e:
+            if not use_get_fallback:
+                return False, {"error": f"URLError: {getattr(e, 'reason', e)}"}
+        except json.JSONDecodeError as e:
+            if not use_get_fallback:
+                return False, {"error": f"JSONDecodeError: {e}"}
+                      
+        try:
+            url = base + "?" + urllib.parse.urlencode(params)
+            with opener.open(url, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+                obj = None
+                if body.startswith("{"):
+                    try:
+                        obj = json.loads(body)
+                    except json.JSONDecodeError:
+                        obj = None
+                if obj is None:
+                    obj = {"ok": resp.status == 200, "body": body}
+                ok = bool(obj.get("ok", resp.status == 200))
+                return ok, obj
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else str(e)
+            return False, {"error": f"HTTP {e.code}", "body": body}
+        except Exception as e:
+            return False, {"error": str(e)}
+
+    def _build_telegram_message(self, seven_lines, saved_report_path, folder_override: str | None = None):
+        """
+        Mục đích: Khởi tạo/cấu hình thành phần giao diện hoặc cấu trúc dữ liệu nội bộ.
+        Tham số:
+          - seven_lines — (tự suy luận theo ngữ cảnh sử dụng).
+          - saved_report_path — (tự suy luận theo ngữ cảnh sử dụng).
+          - folder_override: str | None — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        folder = folder_override if folder_override is not None else self.folder_path.get().strip()
+
+        MAX_PER_LINE = 220
+        cleaned = []
+        for ln in seven_lines:
+            ln = re.sub(r"\s+", " ", (ln or "")).strip()
+            if len(ln) > MAX_PER_LINE:
+                ln = ln[: MAX_PER_LINE - 1] + "…"
+                                                
+            cleaned.append(_tg_html_escape(ln))
+
+                                                   
+        folder_safe = _tg_html_escape(folder)
+        saved_safe = _tg_html_escape(saved_report_path.name) if saved_report_path else None
+        ts_safe = _tg_html_escape(ts)
+
+        msg = (
+            "🔔 <b>Setup xác suất cao</b>\n"
+            f"⏱ {ts_safe}\n"
+            f"📂 {folder_safe}\n\n"
+            + "\n".join(cleaned)
+            + (f"\n\n(Đã lưu: {saved_safe})" if saved_safe else "")
+        )
+
+        try:
+            rep = self._get_reports_dir(folder_override=folder_override)
+            (rep / "telegram_last.txt").write_text(msg, encoding="utf-8")
+        except Exception:
+            pass
+        return msg
+
+                                                        
+    def _build_ssl_context_from_cfg(self, cfg: RunConfig) -> ssl.SSLContext:
+        """
+        Mục đích: Khởi tạo/cấu hình thành phần giao diện hoặc cấu trúc dữ liệu nội bộ.
+        Tham số:
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: ssl.SSLContext
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            if cfg.telegram_ca_path:
+                ctx = ssl.create_default_context(cafile=cfg.telegram_ca_path)
+            elif certifi is not None:
+                ctx = ssl.create_default_context(cafile=certifi.where())
+            else:
+                ctx = ssl.create_default_context()
+        except Exception:
+            ctx = ssl.create_default_context()
+        if cfg.telegram_skip_verify:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+    def _telegram_api_call_from_cfg(self, cfg: RunConfig, method: str, params: dict, timeout: int = 15):
+        """
+        Mục đích: Gửi/thử thông báo Telegram, xử lý chứng chỉ và kết quả phản hồi.
+        Tham số:
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+          - method: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - params: dict — (tự suy luận theo ngữ cảnh sử dụng).
+          - timeout: int — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        token = cfg.telegram_token
+        if not token:
+            return False, {"error": "missing_token"}
+        base = f"https://api.telegram.org/bot{token}/{method}"
+        data = urllib.parse.urlencode(params).encode("utf-8")
+        ctx = self._build_ssl_context_from_cfg(cfg)
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+        try:
+            req = urllib.request.Request(base, data=data)
+            with opener.open(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+                obj = None
+                if body.startswith("{"):
+                    try:
+                        obj = json.loads(body)
+                    except json.JSONDecodeError:
+                        obj = None
+                if obj is None:
+                    obj = {"ok": resp.status == 200, "body": body}
+                ok = bool(obj.get("ok", resp.status == 200))
+                return ok, obj
+        except Exception:
+            try:
+                url = base + "?" + urllib.parse.urlencode(params)
+                with opener.open(url, timeout=timeout) as resp:
+                    body = resp.read().decode("utf-8", errors="ignore")
+                    obj = None
+                if body.startswith("{"):
+                    try:
+                        obj = json.loads(body)
+                    except json.JSONDecodeError:
+                        obj = None
+                if obj is None:
+                    obj = {"ok": resp.status == 200, "body": body}
+                    ok = bool(obj.get("ok", resp.status == 200))
+                    return ok, obj
+            except Exception as e2:
+                return False, {"error": str(e2)}
+
+    def _send_telegram_message_from_cfg(self, text: str, cfg: RunConfig) -> bool:
+        """
+        Mục đích: Gửi/thử thông báo Telegram, xử lý chứng chỉ và kết quả phản hồi.
+        Tham số:
+          - text: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: bool
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not cfg.telegram_enabled:
+            return False
+        chat_id = cfg.telegram_chat_id
+        if not chat_id:
+            self.ui_status("Telegram: thiếu Chat ID.")
+            return False
+        max_len = 3900
+        if len(text) > max_len:
+            text = text[:max_len] + "\n… (đã rút gọn)"
+        params = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        ok, payload = self._telegram_api_call_from_cfg(cfg, "sendMessage", params)
+        if not ok:
+            desc = payload.get("description") or payload.get("body") or payload.get("error", "unknown")
+            self.ui_status(f"Telegram lỗi: {desc}")
+            self.ui_message("error", "Telegram", f"Gửi thất bại:\n{desc}")
+        else:
+            self.ui_status("Đã gửi Telegram.")
+        return ok
+
+    def _send_telegram_message(self, text: str) -> bool:
+        """
+        Mục đích: Gửi/thử thông báo Telegram, xử lý chứng chỉ và kết quả phản hồi.
+        Tham số:
+          - text: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: bool
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not self.telegram_enabled_var.get():
+            return False
+        chat_id = self.telegram_chat_id_var.get().strip()
+        if not chat_id:
+            self.ui_status("Telegram: thiếu Chat ID.")
+            return False
+        max_len = 3900
+        if len(text) > max_len:
+            text = text[:max_len] + "\n… (đã rút gọn)"
+        params = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        ok, payload = self._telegram_api_call("sendMessage", params)
+        if not ok:
+            desc = payload.get("description") or payload.get("body") or payload.get("error", "unknown")
+            self.ui_status(f"Telegram lỗi: {desc}")
+            self.ui_message("error", "Telegram", f"Gửi thất bại:\n{desc}")
+        else:
+            self.ui_status("Đã gửi Telegram.")
+
+        return ok
+
+    def _telegram_test(self):
+        """
+        Mục đích: Gửi/thử thông báo Telegram, xử lý chứng chỉ và kết quả phản hồi.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not self.telegram_enabled_var.get():
+            self.ui_message("warning", "Telegram", "Chưa bật Telegram.")
+            return
+        token = self.telegram_token_var.get().strip()
+        chat_id = self.telegram_chat_id_var.get().strip()
+        if not token or not chat_id:
+            self.ui_message("warning", "Telegram", "Hãy nhập Bot Token và Chat ID.")
+            return
+        ok, p = self._telegram_api_call("getMe", {}, use_get_fallback=False)
+        if not ok:
+            desc = p.get("description") or p.get("body") or p.get("error", "unknown")
+            self.ui_message("error", "Telegram", f"getMe lỗi — kiểm tra Token:\n{desc}")
+            return
+        ok, p = self._telegram_api_call("getChat", {"chat_id": chat_id}, use_get_fallback=False)
+        if not ok:
+            desc = p.get("description") or p.get("body") or p.get("error", "unknown")
+            tip = "\n\nGợi ý:\n• Nếu chat cá nhân: phải nhắn /start cho bot trước.\n• Nếu nhóm: chat_id là số âm và bot phải được thêm."
+            self.ui_message("error", "Telegram", f"getChat lỗi — kiểm tra Chat ID:{tip}\n\nChi tiết:\n{desc}")
+            return
+        ok = self._send_telegram_message("🔔 Test từ Gemini Analyzer: kết nối thành công!")
+        if ok:
+            self.ui_message("info", "Telegram", "Đã gửi thử thành công.")
+
+    def _extract_seven_lines(self, combined_text: str):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - combined_text: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not combined_text:
+            return None, None, False
+        lines = [ln.strip() for ln in combined_text.strip().splitlines() if ln.strip()]
+        start_idx = None
+        for i, ln in enumerate(lines[:20]):
+            if re.match(r"^1[\.\)\-–:]?\s*", ln) or ("Lệnh:" in ln and ln.lstrip().startswith("1")):
+                start_idx = i
+                break
+            if "Lệnh:" in ln:
+                start_idx = i
+                break
+        if start_idx is None:
+            return None, None, False
+        block = []
+        j = start_idx
+        while j < len(lines) and len(block) < 10:
+            block.append(lines[j])
+            j += 1
+        picked = []
+        wanted = ["Lệnh:", "Entry", "SL", "TP1", "TP2", "Lý do", "Lưu ý"]
+        used = set()
+        for key in wanted:
+            found = None
+            for ln in block:
+                if ln in used:
+                    continue
+                if key.lower().split(":")[0] in ln.lower():
+                    found = ln
+                    break
+            if found is None:
+                idx = len(picked) + 1
+                for ln in block:
+                    if re.match(rf"^{idx}\s*[\.\)\-–:]", ln):
+                        found = ln
+                        break
+            picked.append(found or f"{len(picked)+1}. (thiếu)")
+            used.add(found)
+        l1 = picked[0].lower()
+        high = ("lệnh:" in l1) and (("mua" in l1) or ("bán" in l1)) and ("không có setup" not in l1) and ("theo dõi lệnh hiện tại" not in l1)
+        sig = hashlib.sha1(("|".join(picked)).encode("utf-8")).hexdigest()
+        return picked, sig, high
+
+    def _maybe_notify_telegram(self, combined_text: str, saved_report_path: Path, cfg: RunConfig):
+        """
+        Mục đích: Gửi/thử thông báo Telegram, xử lý chứng chỉ và kết quả phản hồi.
+        Tham số:
+          - combined_text: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - saved_report_path: Path — (tự suy luận theo ngữ cảnh sử dụng).
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not cfg.telegram_enabled:
+            return
+        lines, sig, high = self._extract_seven_lines(combined_text)
+        if not high or not lines or not sig:
+            return
+        if sig == self._last_telegram_signature:
+            return
+        self._last_telegram_signature = sig
+        msg = self._build_telegram_message(lines, saved_report_path, folder_override=cfg.folder)
+        self._send_telegram_message_from_cfg(msg, cfg)
+
+                                                                        
+                                          
+    def _find_balanced_json_after(self, text: str, start_idx: int):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - text: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - start_idx: int — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if start_idx < 0 or start_idx >= len(text) or text[start_idx] != "{":
+            return None, None
+        depth, i = 0, start_idx
+        while i < len(text):
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start_idx:i+1], i+1
+            i += 1
+        return None, None
+
+    def _extract_json_block_prefer(self, text: str):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - text: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        import re, json
+        if not text:
+            return None
+
+                                       
+        fence = re.findall(r"```json\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
+        for blob in fence:
+            try:
+                return json.loads(blob)
+            except Exception:
+                pass
+
+                                                                          
+        keywords = ["CHECKLIST_JSON", "EXTRACT_JSON", "setup", "trade", "signal"]
+        lowered = text.lower()
+        for kw in keywords:
+            idx = lowered.find(kw.lower())
+            if idx >= 0:
+                brace = text.find("{", idx)
+                if brace >= 0:
+                    js, _ = self._find_balanced_json_after(text, brace)
+                    if js:
+                        try:
+                            return json.loads(js)
+                        except Exception:
+                            pass
+
+                                                                          
+        first_brace = text.find("{")
+        while first_brace >= 0:
+            js, nxt = self._find_balanced_json_after(text, first_brace)
+            if js:
+                try:
+                    import json as _json
+                    return _json.loads(js)
+                except Exception:
+                    pass
+                first_brace = text.find("{", nxt if nxt else first_brace + 1)
+            else:
+                break
+        return None
+
+    def _coerce_setup_from_json(self, obj):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - obj — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        import math
+        if obj is None:
+            return None
+                                      
+        candidates = []
+        if isinstance(obj, dict):
+            candidates.append(obj)
+            for k in ("CHECKLIST_JSON", "EXTRACT_JSON", "setup", "trade", "signal"):
+                v = obj.get(k)
+                if isinstance(v, dict):
+                    candidates.append(v)
+
+        def _num(x):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - x — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if x is None:
+                return None
+            if isinstance(x, (int, float)) and math.isfinite(x):
+                return float(x)
+            if isinstance(x, str):
+                xs = x.strip().replace(",", "")
+                try:
+                    return float(xs)
+                except Exception:
+                    return None
+            return None
+
+        def _dir(x):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - x — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if not x:
+                return None
+            s = str(x).strip().lower()
+                      
+            if s in ("long", "buy", "mua", "bull", "bullish"):
+                return "long"
+            if s in ("short", "sell", "bán", "ban", "bear", "bearish"):
+                return "short"
+            return None
+
+                                   
+        for c in candidates:
+            d = {
+                "direction": _dir(c.get("direction") or c.get("dir") or c.get("side")),
+                "entry": _num(c.get("entry") or c.get("price") or c.get("ep")),
+                "sl":    _num(c.get("sl")    or c.get("stop")  or c.get("stop_loss")),
+                "tp1":   _num(c.get("tp1")   or c.get("tp_1")  or c.get("take_profit_1") or c.get("tp")),
+                "tp2":   _num(c.get("tp2")   or c.get("tp_2")  or c.get("take_profit_2")),
+            }
+                                                                                   
+            if d["tp1"] is None and d["tp2"] is not None:
+                d["tp1"] = d["tp2"]
+            if d["tp1"] is not None and d["sl"] is not None and d["entry"] is not None and d["direction"] in ("long","short"):
+                return d
+        return None
+    def _parse_float(self, s: str):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - s: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if s is None:
+            return None
+        s = s.replace(",", "").strip()
+                                                                  
+        s = re.sub(r"^\s*\d+\s*[\.\)\-–:]\s*", "", s)
+                                                              
+        nums = re.findall(r"[-+]?\d+(?:\.\d+)?", s)
+        return float(nums[-1]) if nums else None
+
+    def _parse_direction_from_line1(self, line1: str):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - line1: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not line1:
+            return None
+        s = line1.lower()
+        if "mua" in s or "long" in s:
+            return "long"
+        if "bán" in s or "short" in s:
+            return "short"
+        return None
+
+    def _parse_setup_from_report(self, text: str):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - text: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        import re, json, math
+        out = {
+            "direction": None, "entry": None, "sl": None, "tp1": None, "tp2": None,
+            "bias_h1": None, "enough": False
+        }
+        if not text:
+            return out
+
+                                                      
+        obj = None
+        if hasattr(self, "_extract_json_block_prefer"):
+            obj = self._extract_json_block_prefer(text)
+                                                              
+        if obj is None:
+            for m in re.finditer(r"\{[\s\S]*?\}", text):
+                try:
+                    obj = json.loads(m.group(0)); break
+                except Exception:
+                    pass
+
+        def _num(x):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - x — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if x is None: return None
+            if isinstance(x, (int, float)) and math.isfinite(x): return float(x)
+            if isinstance(x, str):
+                xs = x.strip().replace(",", "")
+                try: return float(xs)
+                except Exception: return None
+            return None
+
+        def _dir(x):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - x — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if not x: return None
+            s = str(x).strip().lower()
+            if s in ("long","buy","mua","bull","bullish"): return "long"
+            if s in ("short","sell","bán","ban","bear","bearish"): return "short"
+            return None
+
+        def _pick_from_json(root):
+            """
+            Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+            Tham số:
+              - root — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if not isinstance(root, dict): return None
+                                                         
+            chk = root.get("CHECKLIST_JSON") or root.get("checklist") or root
+            if isinstance(chk, dict) and ("setup_status" in chk or "conclusions" in chk):
+                out["bias_h1"] = (chk.get("bias_H1") or chk.get("bias_h1") or "").lower() or out["bias_h1"]
+                concl = (chk.get("conclusions") or "").upper()
+                out["enough"] = out["enough"] or ("ĐỦ" in concl or "DU" in concl)
+                                             
+            cands = []
+            for k in ("proposed_plan","plan","trade","signal","setup"):
+                if isinstance(root.get(k), dict):
+                    cands.append(root[k])
+                                          
+            for v in root.values():
+                if isinstance(v, dict):
+                    for k in ("proposed_plan","plan","trade","signal","setup"):
+                        if isinstance(v.get(k), dict):
+                            cands.append(v[k])
+            for c in cands:
+                d = {
+                    "direction": _dir(c.get("direction") or c.get("dir") or c.get("side")),
+                    "entry": _num(c.get("entry") or c.get("price") or c.get("ep")),
+                    "sl":    _num(c.get("sl")    or c.get("stop")  or c.get("stop_loss")),
+                    "tp1":   _num(c.get("tp1")   or c.get("tp_1")  or c.get("take_profit_1") or c.get("tp")),
+                    "tp2":   _num(c.get("tp2")   or c.get("tp_2")  or c.get("take_profit_2")),
+                }
+                if d["tp1"] is None and d["tp2"] is not None:
+                    d["tp1"] = d["tp2"]
+                if d["direction"] in ("long","short") and all(d[k] is not None for k in ("entry","sl","tp1")):
+                    return d
+            return None
+
+        plan = _pick_from_json(obj) if obj else None
+        if plan:
+            out.update(plan)
+            return out
+
+                                             
+        lines_sig = None
+        try:
+            lines, lines_sig, _ = self._extract_seven_lines(text)
+        except Exception:
+            lines = None
+        if lines:
+            out["direction"] = self._parse_direction_from_line1(lines[0])
+                                                                              
+            def _lastnum(s):
+                """
+                Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+                Tham số:
+                  - s — (tự suy luận theo ngữ cảnh sử dụng).
+                Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+                Ghi chú:
+                  - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+                """
+                if not s: return None
+                s = re.sub(r"^\s*\d+\s*[\.\)\-–:]\s*", "", s.strip())
+                nums = re.findall(r"[-+]?\d+(?:\.\d+)?", s.replace(",", ""))
+                return float(nums[-1]) if nums else None
+            out["entry"] = _lastnum(lines[1] if len(lines)>1 else None)
+            out["sl"]    = _lastnum(lines[2] if len(lines)>2 else None)
+            out["tp1"]   = _lastnum(lines[3] if len(lines)>3 else None)
+            out["tp2"]   = _lastnum(lines[4] if len(lines)>4 else None)
+        return out
+
+    def _auto_trade_if_high_prob(self, combined_text: str, mt5_ctx: dict, cfg: RunConfig):
+        """
+        Mục đích: Tự động hóa xử lý lệnh: tính khối lượng, đặt/huỷ lệnh, trailing/BE, kiểm soát RR.
+        Tham số:
+          - combined_text: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - mt5_ctx: dict — (tự suy luận theo ngữ cảnh sử dụng).
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not cfg.auto_trade_enabled:
+            return
+        if not cfg.mt5_enabled or mt5 is None:
+            self.ui_status("Auto-Trade: MT5 chưa bật/cài.")
+            return
+
+                                
+        setup = self._parse_setup_from_report(combined_text)
+        direction = setup["direction"]
+        entry = setup["entry"]; sl = setup["sl"]; tp1 = setup["tp1"]; tp2 = setup["tp2"]
+        bias = (setup["bias_h1"] or "").lower()
+        enough = bool(setup["enough"])
+
+                       
+        if not enough:
+            self.ui_status("Auto-Trade: không phải thiết lập xác suất cao.")
+            try:
+                self._log_trade_decision({
+                    "stage": "Kiểm_tra_trước-fail", "reason": "Không_có_khả_năng_cao"
+                }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+        if direction not in ("long", "short"):
+            self.ui_status("Auto-Trade: thiếu hướng lệnh.")
+            try:
+                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"Chưa có setup"},
+                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+        if cfg.trade_strict_bias:
+            if (bias == "bullish" and direction == "short") or (bias == "bearish" and direction == "long"):
+                self.ui_status("Auto-Trade: bỏ qua vì NGƯỢC bias H1.")
+                try:
+                    self._log_trade_decision({
+                        "stage":"Kiểm_tra_trước-fail","reason":"Ngược_bias_h1",
+                        "bias_h1": bias, "dir": direction
+                    }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+                except Exception: pass
+                return
+
+                   
+        if mt5_ctx and not self._allowed_session_now(mt5_ctx, cfg):
+            self.ui_status("Auto-Trade: lọc phiên — hiện không nằm trong phiên cho phép.")
+            try:
+                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"Ngoài_phiên_giao_dịch"},
+                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+
+                                                            
+        block, why = self._within_news_block_window_ff_from_cfg(cfg, cfg.trade_news_block_before_min, cfg.trade_news_block_after_min)
+        if block:
+            self.ui_status(f"Auto-Trade: gần giờ tin (High, FF) — {why} — tạm dừng.")
+            return
+
+        sym = (cfg.mt5_symbol or "").strip()
+        if not sym:
+            self.ui_status("Auto-Trade: thiếu Symbol MT5.")
+            try:
+                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"Thiếu_symbol"},
+                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+
+                    
+        if not self.mt5_initialized:
+            self._mt5_connect()
+            if not self.mt5_initialized:
+                self.ui_status("Auto-Trade: không thể kết nối MT5.")
+                try:
+                    self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"mt5_connect_fail"},
+                                             folder_override=(self.mt5_symbol_var.get().strip() or None))
+                except Exception: pass
+                return
+
+        info = mt5.symbol_info(sym)
+        if not info:
+            self.ui_status("Auto-Trade: symbol không hợp lệ.")
+            try:
+                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"Symbol_không_hợp_lệ","sym":sym},
+                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+        if not info.visible:
+            mt5.symbol_select(sym, True)
+
+        acc = mt5.account_info()
+        if not acc:
+            self.ui_status("Auto-Trade: không đọc được account info.")
+            try:
+                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"no_account_info","sym":sym},
+                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+
+        tick = mt5.symbol_info_tick(sym)
+        if not tick:
+            self.ui_status("Auto-Trade: không có tick hiện tại.")
+            try:
+                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"no_tick","sym":sym},
+                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+
+        point = info.point or 0.0001
+        digits = info.digits or 5
+        bid = float(getattr(tick, "bid", 0.0))
+        ask = float(getattr(tick, "ask", 0.0))
+        cp = ask if direction == "long" else bid
+
+                                            
+        if entry is None: entry = cp
+        
+                                                                                  
+                                             
+                                                                  
+        if any(v is None for v in (entry, sl, tp1, tp2)):
+            self.ui_status("Auto-Trade: thiếu giá — bỏ qua.")
+            try:
+                self._log_trade_decision({
+                    "stage": "Kiểm_tra_trước-fail", "reason": "Thiếu_prices",
+                    "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2
+                }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+
+                                      
+        try:
+            if direction == "long":
+                if not (sl < entry < tp1 <= tp2):
+                    self.ui_status("Auto-Trade: giá LONG không hợp lệ (thứ tự).")
+                    try:
+                        self._log_trade_decision({
+                            "stage": "Kiểm_tra_trước-fail", "reason": "giá_LONG_không_hợp_lệ",
+                            "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2
+                        }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+                    except Exception: pass
+                    return
+            else:         
+                if not (tp2 <= tp1 < entry < sl):
+                    self.ui_status("Auto-Trade: giá SHORT không hợp lệ (thứ tự).")
+                    try:
+                        self._log_trade_decision({
+                            "stage": "Kiểm_tra_trước-fail", "reason": "giá_SHORT_không_hợp_lệ",
+                            "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2
+                        }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+                    except Exception: pass
+                    return
+        except Exception:
+            self.ui_status("Auto-Trade: lỗi kiểm tra tính hợp lệ giá.")
+            try:
+                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"Lỗi_xác_thực_giá"},
+                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+
+                                                              
+        try:
+            max_points_away = 10000                                                
+            if point and abs(entry - cp) / point > max_points_away:
+                self.ui_status("Auto-Trade: entry quá xa giá thị trường — nghi ngờ parse sai, bỏ qua.")
+                try:
+                    self._log_trade_decision({
+                        "stage": "Kiểm_tra_trước-fail", "reason": "Entry_quá_xa_giá_thị_trường",
+                        "sym": sym, "dir": direction, "entry": entry, "cp": cp, "point": point,
+                        "max_points_away": max_points_away
+                    }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+                except Exception: pass
+                return
+        except Exception:
+            pass
+        if sl is None or tp1 is None or tp2 is None:
+            self.ui_status("Auto-Trade: thiếu SL/TP — không vào lệnh.")
+            try:
+                self._log_trade_decision({
+                    "stage": "Kiểm_tra_trước-fail", "reason": "Thiếu_SL/TP—không_vào_lệnh",
+                    "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2
+                }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+
+                                               
+        rr2 = self._calc_rr(entry, sl, tp2)
+        if rr2 is not None and rr2 < float(cfg.trade_min_rr_tp2):
+            self.ui_status(f"Auto-Trade: RR TP2 {rr2:.2f} < min.")
+            try:
+                self._log_trade_decision({
+                    "stage": "Kiểm_tra_trước-fail", "reason": "RR_dưới_min",
+                    "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp2": tp2,
+                    "rr_tp2": rr2, "min_rr": float(cfg.trade_min_rr_tp2)
+                }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+        cp0 = cp or ((ask+bid)/2.0)
+        if mt5_ctx and self._near_key_levels_too_close(mt5_ctx, float(cfg.trade_min_dist_keylvl_pips), cp0):
+            self.ui_status("Auto-Trade: quá gần key level — bỏ qua.")
+            try:
+                self._log_trade_decision({
+                    "stage": "Kiểm_tra_trước-fail", "reason": "Quá_gần_key_level",
+                    "sym": sym, "dir": direction, "cp": cp0,
+                    "min_dist_pips": float(cfg.trade_min_dist_keylvl_pips)
+                }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+
+                                       
+        setup_sig = hashlib.sha1(f"{sym}|{direction}|{round(entry,5)}|{round(sl,5)}|{round(tp1,5)}|{round(tp2,5)}".encode("utf-8")).hexdigest()
+        state = self._load_last_trade_state()
+        last_sig = (state.get("sig") or "")
+        last_ts  = float(state.get("time", 0.0))
+        cool_s   = int(cfg.trade_cooldown_min) * 60
+        now_ts   = time.time()
+        if last_sig == setup_sig and (now_ts - last_ts) < cool_s:
+            self.ui_status("Auto-Trade: bỏ qua — trùng setup & còn cooldown.")
+            try:
+                self._log_trade_decision({
+                    "stage": "Kiểm_tra_trước-fail", "reason": "Trùng_setup",
+                    "sym": sym, "dir": direction, "setup_sig": setup_sig,
+                    "last_sig": last_sig, "elapsed_s": (now_ts - last_ts), "cooldown_s": cool_s
+                }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+
+                                         
+        pending_thr = int(cfg.trade_pending_threshold_points)
+        try:
+            atr = (((mt5_ctx.get("volatility") or {}).get("ATR") or {}).get("M5"))
+            pt  = float(((mt5_ctx.get("info") or {}).get("point")) or 0.0)
+            if atr and pt and cfg.trade_dynamic_pending:
+                atr_pts = atr / pt
+                pending_thr = max(pending_thr, int(atr_pts * 0.25))
+        except Exception:
+            pass
+
+                         
+        lots_total = None
+        mode = cfg.trade_size_mode
+        if mode == "lots":
+            lots_total = float(cfg.trade_lots_total)
+        else:
+            dist_points = abs(entry - sl) / point
+            if dist_points <= 0:
+                self.ui_status("Auto-Trade: khoảng SL=0.")
+                try:
+                    self._log_trade_decision({
+                        "stage": "Kiểm_tra_trước-fail", "reason": "sl_bằng_zero",
+                        "sym": sym, "dir": direction, "entry": entry, "sl": sl, "point": point
+                    }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+                except Exception: pass
+                return
+            value_per_point = _value_per_point_safe(sym, info) or 0.0
+            if value_per_point <= 0:
+                self.ui_status("Auto-Trade: không xác định được value per point — bỏ qua.")
+                try:
+                    self._log_trade_decision({
+                        "stage": "Kiểm_tra_trước-fail", "reason": "Không_xác_định_được_giá_trị_mỗi_point",
+                        "sym": sym, "dir": direction
+                    }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+                except Exception: pass
+                return
+
+            if mode == "percent":
+                equity = float(getattr(acc, "equity", 0.0))
+                risk_money = equity * float(cfg.trade_equity_risk_pct) / 100.0
+            else:
+                risk_money = float(cfg.trade_money_risk)
+            if not risk_money or risk_money <= 0:
+                self.ui_status("Auto-Trade: rủi ro không hợp lệ.")
+                try:
+                    self._log_trade_decision({
+                        "stage": "Kiểm_tra_trước-fail", "reason": "Rủi_ro_không_hợp_lệ",
+                        "sym": sym, "dir": direction, "mode": mode,
+                        "equity": float(getattr(acc, "equity", 0.0))
+                    }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+                except Exception: pass
+                return
+            lots_total = risk_money / (dist_points * value_per_point)
+
+                                  
+        vol_min = getattr(info, "volume_min", 0.01) or 0.01
+        vol_max = getattr(info, "volume_max", 100.0) or 100.0
+        vol_step = getattr(info, "volume_step", 0.01) or 0.01
+        def _round_step(v):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - v — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            k = round(v / vol_step)
+            return max(vol_min, min(vol_max, k * vol_step))
+        lots_total = _round_step(lots_total)
+        split1 = max(1, min(99, int(cfg.trade_split_tp1_pct))) / 100.0
+        vol1 = _round_step(lots_total * split1)
+        vol2 = _round_step(lots_total - vol1)                                    
+        if vol1 < vol_min or vol2 < vol_min:
+            self.ui_status("Auto-Trade: khối lượng quá nhỏ sau chia TP.")
+            try:
+                self._log_trade_decision({
+                    "stage": "Kiểm_tra_trước-fail", "reason": "Khối_lượng_quá_nhỏ_sau_chia_TP",
+                    "sym": sym, "dir": direction, "lots_total": lots_total,
+                    "vol1": vol1, "vol2": vol2, "vol_min": vol_min
+                }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+            except Exception: pass
+            return
+
+        deviation = int(cfg.trade_deviation_points)
+        magic = int(cfg.trade_magic)
+        comment_prefix = (cfg.trade_comment_prefix or "AI-ICT").strip()
+
+                                                                            
+        dist_to_entry_pts = abs(entry - cp) / point
+        use_pending = dist_to_entry_pts >= pending_thr
+        if use_pending and dist_to_entry_pts <= deviation:
+            use_pending = False                          
+
+                     
+        from datetime import timedelta
+        exp_time = datetime.now() + timedelta(minutes=int(cfg.trade_pending_ttl_min))
+
+                                        
+        log_base = {
+            "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2,
+            "lots_total": lots_total, "vol1": vol1, "vol2": vol2,
+            "rr_tp2": rr2, "use_pending": use_pending, "pending_thr": pending_thr,
+            "cooldown_s": cool_s, "deviation": deviation, "magic": magic,
+            "dry_run": bool(cfg.auto_trade_dry_run)
+        }
+        self._log_trade_decision({**log_base, "stage": "pre-check"}, folder_override=(self.mt5_symbol_var.get().strip() or None))
+
+        if cfg.auto_trade_dry_run:
+            self.ui_status("Auto-Trade: DRY-RUN — chỉ log, không gửi lệnh.")
+                                         
+            self._save_last_trade_state({"sig": setup_sig, "time": time.time()})
+            return
+
+                     
+        reqs = []
+        if use_pending:
+            if direction == "long":
+                otype = mt5.ORDER_TYPE_BUY_LIMIT if entry < cp else mt5.ORDER_TYPE_BUY_STOP
+            else:
+                otype = mt5.ORDER_TYPE_SELL_LIMIT if entry > cp else mt5.ORDER_TYPE_SELL_STOP
+            common = dict(
+                action=mt5.TRADE_ACTION_PENDING, symbol=sym, type=otype, price=round(entry, digits),
+                sl=round(sl, digits), deviation=deviation, magic=magic,
+                type_time=mt5.ORDER_TIME_SPECIFIED, expiration=exp_time
+            )
+
+            reqs = [
+                dict(**common, volume=vol1, tp=round(tp1, digits), comment=f"{comment_prefix}-TP1"),
+                dict(**common, volume=vol2, tp=round(tp2, digits), comment=f"{comment_prefix}-TP2"),
+            ]
+        else:
+            if direction == "long":
+                otype = mt5.ORDER_TYPE_BUY;  px = round(ask, digits)
+            else:
+                otype = mt5.ORDER_TYPE_SELL; px = round(bid, digits)
+            common = dict(
+                action=mt5.TRADE_ACTION_DEAL, symbol=sym, type=otype, price=px,
+                sl=round(sl, digits), deviation=deviation, magic=magic,
+                type_time=mt5.ORDER_TIME_GTC
+            )
+
+            reqs = [
+                dict(**common, volume=vol1, tp=round(tp1, digits), comment=f"{comment_prefix}-TP1"),
+                dict(**common, volume=vol2, tp=round(tp2, digits), comment=f"{comment_prefix}-TP2"),
+            ]
+
+                                
+        errs = []
+        for req in reqs:
+            prefer = "pending" if req.get("action") == mt5.TRADE_ACTION_PENDING else "market"
+            res = self._order_send_smart(req, prefer=prefer, retry_per_mode=2)
+            if not res or res.retcode != mt5.TRADE_RETCODE_DONE:
+                errs.append(str(getattr(res, "comment", "unknown")))
+
+        if errs:
+            self.ui_status("Auto-Trade: lỗi gửi lệnh: " + "; ".join(errs))
+            self._log_trade_decision({**log_base, "stage": "send", "errors": errs}, folder_override=(self.mt5_symbol_var.get().strip() or None))
+        else:
+            self._save_last_trade_state({"sig": setup_sig, "time": time.time()})
+            self._log_trade_decision({**log_base, "stage": "send", "ok": True}, folder_override=(self.mt5_symbol_var.get().strip() or None))
+            self.ui_status("Auto-Trade: đã gửi 2 lệnh TP1/TP2.")
+
+                                         
+
+    def _order_send_safe(self, req, retry=2):
+        """
+        Mục đích: Tự động hóa xử lý lệnh: tính khối lượng, đặt/huỷ lệnh, trailing/BE, kiểm soát RR.
+        Tham số:
+          - req — (tự suy luận theo ngữ cảnh sử dụng).
+          - retry — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        last = None
+        for i in range(max(1, retry)):
+            result = mt5.order_send(req)
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                return result
+            last = result
+            time.sleep(0.6)
+        return last
+
+                                                                                   
+    def _fill_priority(self, prefer: str):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - prefer: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            IOC = mt5.ORDER_FILLING_IOC
+            FOK = mt5.ORDER_FILLING_FOK
+            RET = mt5.ORDER_FILLING_RETURN
+        except Exception:
+                                             
+            IOC = 1; FOK = 0; RET = 2
+        return ([IOC, FOK, RET] if prefer == "market" else [FOK, IOC, RET])
+
+    def _fill_name(self, val: int) -> str:
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - val: int — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: str
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        names = {
+            getattr(mt5, "ORDER_FILLING_IOC", 1): "IOC",
+            getattr(mt5, "ORDER_FILLING_FOK", 0): "FOK",
+            getattr(mt5, "ORDER_FILLING_RETURN", 2): "RETURN",
+        }
+        return names.get(val, str(val))
+
+    def _order_send_smart(self, req: dict, prefer: str = "market", retry_per_mode: int = 2):
+        """
+        Mục đích: Tự động hóa xử lý lệnh: tính khối lượng, đặt/huỷ lệnh, trailing/BE, kiểm soát RR.
+        Tham số:
+          - req: dict — (tự suy luận theo ngữ cảnh sử dụng).
+          - prefer: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - retry_per_mode: int — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        last_res = None
+        tried = []
+        for fill in self._fill_priority(prefer):
+            r = dict(req)
+            r["type_filling"] = fill
+            res = self._order_send_safe(r, retry=retry_per_mode)
+            tried.append(self._fill_name(fill))
+
+                                      
+            if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                if len(tried) > 1:
+                    self.ui_status(f"Order OK sau khi đổi filling → {tried[-1]}.")
+                return res
+
+                                                                                             
+                                                                          
+            last_res = res
+
+                                                    
+        cmt = getattr(last_res, "comment", "unknown") if last_res else "no result"
+        self.ui_status(f"Order FAIL với các filling: {', '.join(tried)} — {cmt}")
+        return last_res
+
+    def _calc_rr(self, entry, sl, tp):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - entry — (tự suy luận theo ngữ cảnh sử dụng).
+          - sl — (tự suy luận theo ngữ cảnh sử dụng).
+          - tp — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            risk = abs(entry - sl)
+            reward = abs(tp - entry)
+            return (reward / risk) if risk > 0 else None
+        except Exception:
+            return None
+
+    def _allowed_session_now(self, mt5_ctx: dict, cfg: RunConfig) -> bool:
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - mt5_ctx: dict — (tự suy luận theo ngữ cảnh sử dụng).
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: bool
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        ss = (mt5_ctx.get("sessions_today") or {})
+        now = datetime.now().strftime("%H:%M")
+        ok = False
+        def _in(r): 
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - r — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            return bool(r and r.get("start") and r.get("end") and r["start"] <= now < r["end"])
+        if cfg.trade_allow_session_asia   and _in(ss.get("asia")): ok = True
+        if cfg.trade_allow_session_london and _in(ss.get("london")): ok = True
+        if cfg.trade_allow_session_ny     and ( _in(ss.get("newyork_pre")) or _in(ss.get("newyork_post")) ): 
+            ok = True
+                                                           
+        if not (cfg.trade_allow_session_asia or cfg.trade_allow_session_london or cfg.trade_allow_session_ny):
+            ok = True
+        return ok
+
+    def _open_path(self, path: Path):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số:
+          - path: Path — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            sysname = platform.system()
+            if sysname == "Windows":
+                os.startfile(str(path))
+            elif sysname == "Darwin":
+                subprocess.run(["open", str(path)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(path)], check=False)
+        except Exception as e:
+            self.ui_message("error", "Mở tệp", str(e))
+
+                                                                                    
+                                    
+    def _ff_event_currency(self, ev: dict) -> str | None:
+        """
+        Mục đích: Lọc sự kiện tin tức (ForexFactory), cache cục bộ và áp dụng chặn giao dịch.
+        Tham số:
+          - ev: dict — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: str | None
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        for k in ("currency", "country", "countryCode", "country_code"):
+            c = ev.get(k)
+            if isinstance(c, str):
+                c = c.strip().upper()
+                if len(c) == 3 and c.isalpha():
+                    return c
+        return None
+
+    def _symbol_currencies(self, sym: str) -> set[str]:
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - sym: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: set[str]
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not sym:
+            return set()
+        s = sym.upper()
+        tokens = set(re.findall(r"[A-Z]{3}", s))
+
+                
+        if "XAU" in s or "GOLD" in s:
+            tokens.update({"XAU", "USD"})
+        if "XAG" in s or "SILVER" in s:
+            tokens.update({"XAG", "USD"})
+
+             
+        if any(k in s for k in ("USOIL", "WTI", "BRENT", "UKOIL")):
+            tokens.update({"USD"})
+
+                    
+        if any(k in s for k in ("US30", "US500", "US100", "DJI", "SPX", "NAS100", "NDX")):
+            tokens.update({"USD"})
+
+                                               
+        if any(k in s for k in ("DE40", "GER40", "DAX")):
+            tokens.update({"EUR"})
+        if any(k in s for k in ("UK100", "FTSE")):
+            tokens.update({"GBP"})
+        if any(k in s for k in ("JP225", "NIK", "NKY")):
+            tokens.update({"JPY"})
+
+        return {t for t in tokens if len(t) == 3 and t.isalpha()}
+
+
+    def _ff_http_get(self, url: str, timeout: int = 20) -> str:
+        """
+        Mục đích: Lọc sự kiện tin tức (ForexFactory), cache cục bộ và áp dụng chặn giao dịch.
+        Tham số:
+          - url: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - timeout: int — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: str
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        ctx = self._build_ssl_context()
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (AI-ICT)"})
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="ignore")
+        
+                                          
+    def _ff_http_get_from_cfg(self, url: str, cfg: RunConfig, timeout: int = 20) -> str:
+        """
+        Mục đích: Lọc sự kiện tin tức (ForexFactory), cache cục bộ và áp dụng chặn giao dịch.
+        Tham số:
+          - url: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+          - timeout: int — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: str
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        ctx = self._build_ssl_context_from_cfg(cfg)
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (AI-ICT)"})
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="ignore")
+
+    def _ff_fetch_high_events_local(self):
+        """
+        Mục đích: Lọc sự kiện tin tức (ForexFactory), cache cục bộ và áp dụng chặn giao dịch.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        urls = [
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
+        ]
+        datasets = []
+        for url in urls:
+            try:
+                body = self._ff_http_get(url, timeout=20)
+                datasets.append(json.loads(body))
+            except Exception as e:
+                self.ui_status(f"News: không fetch được FF ({url.split('/')[-1]}) — {e}")
+        def _parse_dataset(data):
+                                                
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - data — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            items = []
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                for key in ("events", "thisWeek", "week", "items", "result"):
+                    if isinstance(data.get(key), list):
+                        items = data[key]; break
+                if not items:
+                    for v in data.values():
+                        if isinstance(v, list) and v and isinstance(v[0], dict):
+                            items = v; break
+            out = []
+            for ev in items or []:
+                try:
+                    impact = (ev.get("impact") or ev.get("impactLabel") or ev.get("impact_text") or "").strip().lower()
+                    if not (("high" in impact) or ("red" in impact) or ("độ cao" in impact)):
+                        continue
+                    title = (ev.get("title") or ev.get("event") or ev.get("name") or "").strip()
+                    tlow = title.lower()
+                    if any(k in tlow for k in ("bank holiday","holiday","tentative","all day","daylight","speaks","speech")):
+                        continue
+                    ts = ev.get("timestamp") or ev.get("dateEventUnix") or ev.get("unixTime") or ev.get("timeUnix")
+                    dt_local = None
+                    if isinstance(ts, (int, float)) and ts > 0:
+                        dt_local = datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone()
+                    if not dt_local:
+                        continue
+                    cur = self._ff_event_currency(ev)
+                    out.append({"when": dt_local, "title": title or "High-impact event", "curr": cur})
+                except Exception:
+                    continue
+            return out
+        all_events = []
+        for ds in datasets:
+            all_events.extend(_parse_dataset(ds))
+        now_local = datetime.now().astimezone()
+        keep = [x for x in all_events if abs((x["when"] - now_local).total_seconds()) <= 7*24*3600]
+        keep.sort(key=lambda x: x["when"])
+        seen, dedup = set(), []
+        for x in keep:
+            key = (x["title"], int(x["when"].timestamp())//60)
+            if key in seen:
+                continue
+            seen.add(key); dedup.append(x)
+        return dedup
+
+    def _ff_fetch_high_events_local_from_cfg(self, cfg: RunConfig):
+        """
+        Mục đích: Lọc sự kiện tin tức (ForexFactory), cache cục bộ và áp dụng chặn giao dịch.
+        Tham số:
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        urls = [
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
+        ]
+        datasets = []
+        for url in urls:
+            try:
+                body = self._ff_http_get_from_cfg(url, cfg, timeout=20)
+                datasets.append(json.loads(body))
+            except Exception as e:
+                self.ui_status(f"News: không fetch được FF ({url.split('/')[-1]}) — {e}")
+        def _parse_dataset(data):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - data — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            items = []
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                for key in ("events", "thisWeek", "week", "items", "result"):
+                    if isinstance(data.get(key), list):
+                        items = data[key]; break
+                if not items:
+                    for v in data.values():
+                        if isinstance(v, list) and v and isinstance(v[0], dict):
+                            items = v; break
+            out = []
+            for ev in items or []:
+                try:
+                    impact = (ev.get("impact") or ev.get("impactLabel") or ev.get("impact_text") or "").strip().lower()
+                    if not (("high" in impact) or ("red" in impact) or ("độ cao" in impact)):
+                        continue
+                    title = (ev.get("title") or ev.get("event") or ev.get("name") or "").strip()
+                    tlow = title.lower()
+                    if any(k in tlow for k in ("bank holiday","holiday","tentative","all day","daylight","speaks","speech")):
+                        continue
+                    ts = ev.get("timestamp") or ev.get("dateEventUnix") or ev.get("unixTime") or ev.get("timeUnix")
+                    dt_local = datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone() if isinstance(ts, (int, float)) and ts > 0 else None
+                    if not dt_local:
+                        continue
+                    cur = self._ff_event_currency(ev)
+                    out.append({"when": dt_local, "title": title or "High-impact event", "curr": cur})
+                except Exception:
+                    continue
+            return out
+        all_events = []
+        for ds in datasets:
+            all_events.extend(_parse_dataset(ds))
+        now_local = datetime.now().astimezone()
+        keep = [x for x in all_events if abs((x["when"] - now_local).total_seconds()) <= 7*24*3600]
+        keep.sort(key=lambda x: x["when"])
+        seen, dedup = set(), []
+        for x in keep:
+            key = (x["title"], int(x["when"].timestamp())//60)
+            if key in seen:
+                continue
+            seen.add(key); dedup.append(x)
+        return dedup
+
+    def _within_news_block_window_ff(self, minutes_before: int, minutes_after: int):
+        """
+        Mục đích: Lọc sự kiện tin tức (ForexFactory), cache cục bộ và áp dụng chặn giao dịch.
+        Tham số:
+          - minutes_before: int — (tự suy luận theo ngữ cảnh sử dụng).
+          - minutes_after: int — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            now = datetime.now().astimezone()
+                                      
+            if (time.time() - float(self.ff_cache_fetch_time or 0.0)) > 300 or not self.ff_cache_events_local:
+                evs = self._ff_fetch_high_events_local()
+                self.ff_cache_events_local = evs
+                self.ff_cache_fetch_time = time.time()
+            else:
+                evs = self.ff_cache_events_local
+
+                                                             
+            allowed = self._symbol_currencies(self.mt5_symbol_var.get().strip())
+
+            bef = max(0, int(minutes_before)); aft = max(0, int(minutes_after))
+            for ev in evs:
+                                                                         
+                if allowed and ev.get("curr") and ev["curr"] not in allowed:
+                    continue
+
+                t = ev["when"]
+                if (t - timedelta(minutes=bef)) <= now <= (t + timedelta(minutes=aft)):
+                    why = f"{ev['title']}" + (f" [{ev['curr']}]" if ev.get("curr") else "")
+                    return True, f"{why} @ {t.strftime('%Y-%m-%d %H:%M')}"
+            return False, None
+        except Exception:
+            return False, None
+
+    def _within_news_block_window_ff_from_cfg(self, cfg: RunConfig, minutes_before: int, minutes_after: int):
+        """
+        Mục đích: Lọc sự kiện tin tức (ForexFactory), cache cục bộ và áp dụng chặn giao dịch.
+        Tham số:
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+          - minutes_before: int — (tự suy luận theo ngữ cảnh sử dụng).
+          - minutes_after: int — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            now = datetime.now().astimezone()
+            if (time.time() - float(self.ff_cache_fetch_time or 0.0)) > 300 or not self.ff_cache_events_local:
+                evs = self._ff_fetch_high_events_local_from_cfg(cfg)
+                self.ff_cache_events_local = evs
+                self.ff_cache_fetch_time = time.time()
+            else:
+                evs = self.ff_cache_events_local
+
+                                                         
+            allowed = self._symbol_currencies(cfg.mt5_symbol)
+
+            bef = max(0, int(minutes_before)); aft = max(0, int(minutes_after))
+            for ev in evs:
+                if allowed and ev.get("curr") and ev["curr"] not in allowed:
+                    continue
+
+                t = ev["when"]
+                if (t - timedelta(minutes=bef)) <= now <= (t + timedelta(minutes=aft)):
+                    why = f"{ev['title']}" + (f" [{ev['curr']}]" if ev.get("curr") else "")
+                    return True, f"{why} @ {t.strftime('%Y-%m-%d %H:%M')}"
+            return False, None
+        except Exception:
+            return False, None
+
+    def _near_key_levels_too_close(self, mt5_ctx: dict, min_pips: float, cp: float) -> bool:
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - mt5_ctx: dict — (tự suy luận theo ngữ cảnh sử dụng).
+          - min_pips: float — (tự suy luận theo ngữ cảnh sử dụng).
+          - cp: float — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: bool
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            lst = (mt5_ctx.get("key_levels_nearby") or [])
+            for lv in lst:
+                dist = float(lv.get("distance_pips") or 0.0)
+                if dist and dist < float(min_pips):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _log_trade_decision(self, data: dict, folder_override: str | None = None):
+        """
+        Mục đích: Tự động hóa xử lý lệnh: tính khối lượng, đặt/huỷ lệnh, trailing/BE, kiểm soát RR.
+        Tham số:
+          - data: dict — (tự suy luận theo ngữ cảnh sử dụng).
+          - folder_override: str | None — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            d = self._get_reports_dir(folder_override=folder_override)
+            if not d:
+                return
+
+            p = d / f"trade_log_{datetime.now().strftime('%Y%m%d')}.jsonl"
+            line = (json.dumps(data, ensure_ascii=False, separators=(',', ':')) + "\n").encode("utf-8")
+
+                                     
+            p.parent.mkdir(parents=True, exist_ok=True)
+
+            with self._trade_log_lock:
+                need_leading_newline = False
+                if p.exists():
+                    try:
+                        sz = p.stat().st_size
+                        if sz > 0:
+                            with open(p, "rb") as fr:
+                                fr.seek(-1, os.SEEK_END)
+                                need_leading_newline = (fr.read(1) != b"\n")
+                    except Exception:
+                                                                     
+                        need_leading_newline = False
+
+                with open(p, "ab") as f:
+                    if need_leading_newline:
+                        f.write(b"\n")
+                    f.write(line)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())                                           
+                    except Exception:
+                        pass
+        except Exception:
+                                                  
+            pass
+
+    def _load_last_trade_state(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        f = APP_DIR / "last_trade_state.json"
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _save_last_trade_state(self, state: dict):
+        """
+        Mục đích: Ghi/Xuất dữ liệu (báo cáo .md, JSON tóm tắt, cache...).
+        Tham số:
+          - state: dict — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        f = APP_DIR / "last_trade_state.json"
+        try:
+            f.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _mt5_manage_be_trailing(self, mt5_ctx: dict, cfg: RunConfig):
+        """
+        Mục đích: Tương tác với MetaTrader 5 (kết nối, lấy dữ liệu nến, tính toán chỉ số, snapshot...).
+        Tham số:
+          - mt5_ctx: dict — (tự suy luận theo ngữ cảnh sử dụng).
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not (cfg.mt5_enabled and mt5 and cfg.auto_trade_enabled):
+            return
+        try:
+            info = mt5.account_info()
+            if not info:
+                return
+            magic = int(cfg.trade_magic)
+                        
+            atr = None
+            point = None
+            try:
+                point = float(((mt5_ctx.get("info") or {}).get("point")) or 0.0)
+                atr = (((mt5_ctx.get("volatility") or {}).get("ATR") or {}).get("M5"))
+            except Exception:
+                pass
+            atr_pts = (atr / point) if (atr and point) else None
+            atr_mult = float(cfg.trade_trailing_atr_mult or 0.0)
+
+            positions = mt5.positions_get()
+            if not positions:
+                return
+
+                                                      
+            from datetime import timedelta
+            now = datetime.now()
+            deals = mt5.history_deals_get(now - timedelta(days=2), now) or []
+            tp1_closed = set()
+            for d in deals:
+                try:
+                    if int(getattr(d, "magic", 0)) == magic and "-TP1" in str(getattr(d, "comment", "")):
+                        tp1_closed.add((getattr(d, "symbol", ""), int(getattr(d, "position_id", 0))))
+                except Exception:
+                    pass
+
+            for p in positions:
+                try:
+                    if int(p.magic) != magic:
+                        continue
+                    if "-TP2" not in p.comment:
+                        continue
+                    sym = p.symbol
+                    entry = float(p.price_open)
+                    sl    = float(p.sl) if p.sl else None
+                    pos_id = int(p.ticket)
+
+                    tick = mt5.symbol_info_tick(sym)
+                    if not tick:
+                        continue
+                    bid = float(getattr(tick, "bid", 0.0))
+                    ask = float(getattr(tick, "ask", 0.0))
+                    cur = ask if p.type == mt5.POSITION_TYPE_BUY else bid
+                    if not cur:
+                        continue
+
+                                  
+                    move_to_be = False
+                    if cfg.trade_move_to_be_after_tp1:
+                                                    
+                        if (sym, pos_id) in tp1_closed:
+                            move_to_be = True
+                        else:
+                                                       
+                            if sl is not None and point:
+                                half = abs(entry - sl) * 0.5
+                                if (p.type == mt5.POSITION_TYPE_BUY and cur - entry >= half) or\
+                                (p.type == mt5.POSITION_TYPE_SELL and entry - cur >= half):
+                                    move_to_be = True
+
+                    new_sl = sl
+                    if move_to_be:
+                                                      
+                        buf = (point * 2)
+                        new_sl = entry - buf if p.type == mt5.POSITION_TYPE_BUY else entry + buf
+
+                                  
+                    if atr_pts and atr_mult > 0 and point:
+                        trail = atr_pts * atr_mult * point
+                        if p.type == mt5.POSITION_TYPE_BUY:
+                            cand = cur - trail
+                            if new_sl is None or cand > new_sl:
+                                new_sl = cand
+                        else:
+                            cand = cur + trail
+                            if new_sl is None or cand < new_sl:
+                                new_sl = cand
+
+                    if new_sl and (sl is None or abs(new_sl - sl) > point*1.5):
+                                
+                        req = dict(action=mt5.TRADE_ACTION_SLTP, position=pos_id, symbol=sym,
+                                sl=round(new_sl, mt5.symbol_info(sym).digits),
+                                tp=p.tp)
+                        _ = self._order_send_safe(req, retry=2)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+                                                              
+    def _maybe_delete(self, uploaded_file):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - uploaded_file — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            genai.delete_file(uploaded_file.name)
+        except Exception:
+            pass
+
+    def _update_progress(self, done_steps, total_steps):
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số:
+          - done_steps — (tự suy luận theo ngữ cảnh sử dụng).
+          - total_steps — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        pct = (done_steps / max(total_steps, 1)) * 100.0
+        self._enqueue(lambda: (self.progress_var.set(pct), self.status_var.set(f"Tiến độ: {pct:.1f}%")))
+
+    def _update_tree_row(self, idx, status):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - idx — (tự suy luận theo ngữ cảnh sử dụng).
+          - status — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        def action():
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số: (không)
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            iid = str(idx)
+            if self.tree.exists(iid):
+                vals = list(self.tree.item(iid, "values"))
+                vals = [idx + 1, self.results[idx]["name"], status] if len(vals) < 3 else [vals[0], vals[1], status]
+                self.tree.item(iid, values=vals)
+        self._enqueue(action)
+
+    def _finalize_done(self):
+                          
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            self._log_trade_decision({
+                "stage": "run-end",
+                "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+        except Exception:
+            pass
+                                           
+        self.is_running = False
+        self.stop_flag = False
+        self.stop_btn.configure(state="disabled")
+        self.export_btn.configure(state="normal")
+        self.ui_status("Đã hoàn tất phân tích toàn bộ thư mục.")
+        self._schedule_next_autorun()
+
+    def _finalize_stopped(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self.is_running = False
+        self.stop_flag = False
+        self.stop_btn.configure(state="disabled")
+        self.export_btn.configure(state="normal")
+        self.ui_status("Đã dừng.")
+        self._schedule_next_autorun()
+
+    def _on_tree_select(self, _evt):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - _evt — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self.detail_text.delete("1.0", "end")
+        if self.combined_report_text.strip():
+            self.detail_text.insert("1.0", self.combined_report_text)
+        else:
+            self.detail_text.insert("1.0", "Chưa có báo cáo. Hãy bấm 'Bắt đầu'.")
+
+                                                              
+    def export_markdown(self):
+        """
+        Mục đích: Ghi/Xuất dữ liệu (báo cáo .md, JSON tóm tắt, cache...).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        report_text = self.combined_report_text or ""
+        folder = self.folder_path.get()
+        files = [r["name"] for r in self.results if r.get("path")]
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        md = [
+            f"# Báo cáo phân tích toàn bộ thư mục",
+            f"- Thời gian: {ts}",
+            f"- Model: {self.model_var.get()}",
+            f"- Thư mục: {folder}",
+            f"- Số ảnh: {len(files)}",
+            "",
+            "## Danh sách ảnh",
+        ]
+        md += [f"- {name}" for name in files]
+        md += ["", "## Kết quả phân tích tổng hợp", report_text or "_(trống)_"]
+        out_path = filedialog.asksaveasfilename(
+            title="Lưu báo cáo Markdown",
+            defaultextension=".md",
+            filetypes=[("Markdown", "*.md")],
+            initialfile="bao_cao_gemini_folder.md",
+        )
+        if not out_path:
+            return
+        try:
+            Path(out_path).write_text("\n".join(md), encoding="utf-8")
+            self.ui_message("info", "Thành công", f"Đã lưu: {out_path}")
+        except Exception as e:
+            self.ui_message("error", "Lỗi ghi file", str(e))
+
+    def _auto_save_report(self, combined_text: str, cfg: RunConfig) -> Path:
+        """
+        Mục đích: Ghi/Xuất dữ liệu (báo cáo .md, JSON tóm tắt, cache...).
+        Tham số:
+          - combined_text: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: Path
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        d = self._get_reports_dir(cfg.folder)
+        if not d:
+            return None
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = d / f"report_{ts}.md"
+        out.write_text(combined_text or "", encoding="utf-8")
+        return out
+
+    def clear_results(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self.results.clear()
+        self.combined_report_text = ""
+        if hasattr(self, "tree"):
+            self.tree.delete(*self.tree.get_children())
+        if hasattr(self, "detail_text"):
+            self.ui_detail_replace("Báo cáo tổng hợp sẽ hiển thị tại đây sau khi phân tích.")
+        self.ui_progress(0)
+        self.ui_status("Đã xoá kết quả khỏi giao diện.")
+
+                                                        
+    def _enqueue(self, func):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - func — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self.ui_queue.put(func)
+
+                                                                        
+    def ui_status(self, text: str):
+                                                               
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số:
+          - text: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self._enqueue(lambda: self.status_var.set(text))
+
+    def ui_detail_replace(self, text: str):
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số:
+          - text: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self._enqueue(lambda: (
+            self.detail_text.config(state="normal"),
+            self.detail_text.delete("1.0", "end"),
+            self.detail_text.insert("1.0", text)
+        ))
+
+    def ui_message(self, kind: str, title: str, text: str, auto_close_ms: int = 60000, log: bool = True):
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số:
+          - kind: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - title: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - text: str — (tự suy luận theo ngữ cảnh sử dụng).
+          - auto_close_ms: int — (tự suy luận theo ngữ cảnh sử dụng).
+          - log: bool — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        def _show():
+                                                     
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số: (không)
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if log:
+                try:
+                    self._log_ui_message({"t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                          "kind": kind, "title": title, "text": text})
+                except Exception:
+                    pass
+
+                                               
+            top = tk.Toplevel(self.root)
+            try:
+                top.transient(self.root)
+            except Exception:
+                pass
+            top.resizable(False, False)
+            top.title(title or {"info": "Thông báo", "warning": "Cảnh báo", "error": "Lỗi"}.get(kind, "Thông báo"))
+            try:
+                top.attributes("-topmost", True)
+            except Exception:
+                pass
+
+            frm = ttk.Frame(top, padding=12)
+            frm.pack(fill="both", expand=True)
+
+                                        
+            ttk.Label(frm, text=title or "", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 4))
+            ttk.Label(frm, text=text or "", justify="left", wraplength=480).pack(anchor="w")
+            ttk.Label(frm, text=f"Sẽ tự đóng trong {auto_close_ms//1000}s", foreground="#666").pack(anchor="w", pady=(8, 0))
+            ttk.Button(frm, text="Đóng", command=top.destroy).pack(anchor="e", pady=(8, 0))
+
+                                                                    
+            try:
+                top.update_idletasks()
+                x = self.root.winfo_rootx() + self.root.winfo_width() - top.winfo_width() - 24
+                y = self.root.winfo_rooty() + 24
+                x = max(0, x); y = max(0, y)
+                top.geometry(f"+{x}+{y}")
+                                                                          
+                def _drop_topmost():
+                    """
+                    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+                    Tham số: (không)
+                    Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+                    Ghi chú:
+                      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+                    """
+                    try: top.attributes("-topmost", False)
+                    except Exception: pass
+                top.after(200, _drop_topmost)
+            except Exception:
+                pass
+
+                                                        
+            def _safe_destroy():
+                """
+                Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+                Tham số: (không)
+                Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+                Ghi chú:
+                  - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+                """
+                try: top.destroy()
+                except Exception: pass
+            top.after(max(1000, int(auto_close_ms)), _safe_destroy)
+
+        self._enqueue(_show)
+
+    def _log_ui_message(self, data: dict, folder_override: str | None = None):
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số:
+          - data: dict — (tự suy luận theo ngữ cảnh sử dụng).
+          - folder_override: str | None — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            d = self._get_reports_dir(folder_override=folder_override)
+            if not d:
+                d = APP_DIR / "Logs"
+                d.mkdir(parents=True, exist_ok=True)
+
+            p = d / f"ui_log_{datetime.now().strftime('%Y%m%d')}.jsonl"
+            line = (json.dumps(data, ensure_ascii=False, separators=(',', ':')) + "\n").encode("utf-8")
+
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with self._ui_log_lock:
+                need_leading_newline = False
+                if p.exists():
+                    try:
+                        sz = p.stat().st_size
+                        if sz > 0:
+                            with open(p, "rb") as fr:
+                                fr.seek(-1, os.SEEK_END)
+                                need_leading_newline = (fr.read(1) != b"\n")
+                    except Exception:
+                        need_leading_newline = False
+                with open(p, "ab") as f:
+                    if need_leading_newline:
+                        f.write(b"\n")
+                    f.write(line)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+        except Exception:
+                                                  
+            pass
+
+    def ui_widget_state(self, widget, state: str):
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số:
+          - widget — (tự suy luận theo ngữ cảnh sử dụng).
+          - state: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self._enqueue(lambda: widget.configure(state=state))
+
+    def ui_progress(self, pct: float, status: str = None):
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số:
+          - pct: float — (tự suy luận theo ngữ cảnh sử dụng).
+          - status: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        def _act():
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số: (không)
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            self.progress_var.set(pct)
+            if status is not None:
+                self.status_var.set(status)
+        self._enqueue(_act)
+
+    def ui_detail_clear(self, placeholder: str = None):
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số:
+          - placeholder: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self._enqueue(lambda: (
+            self.detail_text.delete("1.0", "end"),
+            self.detail_text.insert("1.0", placeholder or "")
+        ))
+
+                                                                                    
+    def ui_refresh_history_list(self):
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self._enqueue(self._refresh_history_list)
+
+    def ui_refresh_json_list(self):
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self._enqueue(self._refresh_json_list)
+
+
+    def _poll_ui_queue(self):
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            while True:
+                func = self.ui_queue.get_nowait()
+                try:
+                    func()
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_ui_queue)
+
+                                                      
+    def ui_set_var(self, tk_var, value):
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số:
+          - tk_var — (tự suy luận theo ngữ cảnh sử dụng).
+          - value — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self._enqueue(lambda v=tk_var, val=value: v.set(val))
+
+    def ui_set_text(self, widget, text: str):
+        """
+        Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
+        Tham số:
+          - widget — (tự suy luận theo ngữ cảnh sử dụng).
+          - text: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self._enqueue(lambda w=widget, t=text: (
+            w.config(state="normal"),
+            w.delete("1.0", "end"),
+            w.insert("1.0", t)
+        ))
+
+                                                           
+    def _refresh_history_list(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not hasattr(self, "history_list"):
+            return
+        self.history_list.delete(0, "end")
+        d = self._get_reports_dir()
+        files = sorted(d.glob("report_*.md"), reverse=True) if d else []
+        self._history_files = list(files)
+        for p in files:
+            self.history_list.insert("end", p.name)
+
+    def _preview_history_selected(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        sel = getattr(self, "history_list", None).curselection() if hasattr(self, "history_list") else None
+        if not sel:
+            return
+        p = self._history_files[sel[0]]
+        try:
+            txt = p.read_text(encoding="utf-8", errors="ignore")
+            self.detail_text.config(state="normal")
+            self.detail_text.delete("1.0", "end")
+            self.detail_text.insert("1.0", txt)
+            self.ui_status(f"Xem: {p.name}")
+        except Exception as e:
+            self.ui_message("error", "History", str(e))
+
+    def _open_history_selected(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        sel = self.history_list.curselection()
+        if not sel:
+            return
+        p = self._history_files[sel[0]]
+        try:
+            self._open_path(p)
+        except Exception as e:
+            self.ui_message("error", "History", str(e))
+
+    def _delete_history_selected(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        sel = self.history_list.curselection()
+        if not sel:
+            return
+        p = self._history_files[sel[0]]
+        try:
+            p.unlink()
+            self._refresh_history_list()
+            self.detail_text.delete("1.0", "end")                               
+        except Exception as e:
+            self.ui_message("error", "History", str(e))
+
+    def _open_reports_folder(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        d = self._get_reports_dir()
+        if d:
+            self._open_path(d)
+
+                                                        
+    def _refresh_json_list(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not hasattr(self, "json_list"):
+            return
+        self.json_list.delete(0, "end")
+        d = self._get_reports_dir()
+        files = sorted(d.glob("ctx_*.json"), reverse=True) if d else []
+        self.json_files = list(files)
+        for p in files:
+            self.json_list.insert("end", p.name)
+
+    def _preview_json_selected(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        sel = getattr(self, "json_list", None).curselection() if hasattr(self, "json_list") else None
+        if not sel:
+            return
+        p = self.json_files[sel[0]]
+        try:
+            txt = p.read_text(encoding="utf-8", errors="ignore")
+            self.detail_text.config(state="normal")
+            self.detail_text.delete("1.0", "end")
+            self.detail_text.insert("1.0", txt)
+            self.ui_status(f"Xem JSON: {p.name}")
+        except Exception as e:
+            self.ui_message("error", "JSON", str(e))
+
+    def _load_json_selected(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        sel = self.json_list.curselection()
+        if not sel:
+            return
+        p = self.json_files[sel[0]]
+        try:
+            self._open_path(p)
+        except Exception as e:
+            self.ui_message("error", "JSON", str(e))
+
+    def _delete_json_selected(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        sel = self.json_list.curselection()
+        if not sel:
+            return
+        p = self.json_files[sel[0]]
+        try:
+            p.unlink()
+            self._refresh_json_list()
+            self.detail_text.delete("1.0", "end")                           
+        except Exception as e:
+            self.ui_message("error", "JSON", str(e))
+
+    def _open_json_folder(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        d = self._get_reports_dir()
+        if d:
+            self._open_path(d)
+
+                                                                
+    def _detect_timeframe_from_name(self, name: str) -> str:
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - name: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: str
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        s = Path(name).stem.lower()
+
+                                                                         
+                                                                      
+        patterns = [
+            ("MN1", r"(?<![a-z0-9])(?:mn1|1mo|monthly)(?![a-z0-9])"),
+            ("W1",  r"(?<![a-z0-9])(?:w1|1w|weekly)(?![a-z0-9])"),
+            ("D1",  r"(?<![a-z0-9])(?:d1|1d|daily)(?![a-z0-9])"),
+            ("H4",  r"(?<![a-z0-9])(?:h4|4h)(?![a-z0-9])"),
+            ("H1",  r"(?<![a-z0-9])(?:h1|1h)(?![a-z0-9])"),
+            ("M30", r"(?<![a-z0-9])(?:m30|30m)(?![a-z0-9])"),
+            ("M15", r"(?<![a-z0-9])(?:m15|15m)(?![a-z0-9])"),
+            ("M5",  r"(?<![a-z0-9])(?:m5|5m)(?![a-z0-9])"),
+                                                                           
+            ("M1",  r"(?<![a-z0-9])(?:m1|1m)(?![a-z0-9])"),
+        ]
+
+        for tf, pat in patterns:
+            if re.search(pat, s):
+                return tf
+        return "?"
+
+    def _build_timeframe_section(self, names):
+        """
+        Mục đích: Khởi tạo/cấu hình thành phần giao diện hoặc cấu trúc dữ liệu nội bộ.
+        Tham số:
+          - names — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        lines = []
+        for n in names:
+            tf = self._detect_timeframe_from_name(n)
+            lines.append(f"- {n} ⇒ {tf}")
+        return "\n".join(lines)
+
+                                                       
+    def _toggle_autorun(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if self.autorun_var.get():
+            self._schedule_next_autorun()
+        else:
+            if self._autorun_job:
+                self.root.after_cancel(self._autorun_job)
+                self._autorun_job = None
+            self.ui_status("Đã tắt auto-run.")
+
+    def _autorun_interval_changed(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if self.autorun_var.get():
+            self._schedule_next_autorun()
+
+    def _schedule_next_autorun(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not self.autorun_var.get():
+            return
+        if self._autorun_job:
+            self.root.after_cancel(self._autorun_job)
+        secs = max(5, int(self.autorun_seconds_var.get()))
+        self._autorun_job = self.root.after(secs * 1000, self._autorun_tick)
+        self.ui_status(f"Tự động chạy sau {secs}s.")
+
+    def _autorun_tick(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self._autorun_job = None
+        if not self.is_running:
+            self.start_analysis()
+        else:
+                                                                 
+            if self.mt5_enabled_var.get() and self.auto_trade_enabled_var.get():
+                                                                        
+                cfg_snapshot = self._snapshot_config()
+                def _sweep(c):
+                    """
+                    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+                    Tham số:
+                      - c — (tự suy luận theo ngữ cảnh sử dụng).
+                    Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+                    Ghi chú:
+                      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+                    """
+                    try:
+                        ctx = self._mt5_build_context(plan=None, cfg=c) or ""
+                        if ctx:
+                            data = json.loads(ctx).get("MT5_DATA", {})
+                            if data:
+                                self._mt5_manage_be_trailing(data, c)
+                    except Exception:
+                        pass
+                threading.Thread(target=_sweep, args=(cfg_snapshot,), daemon=True).start()
+            self._schedule_next_autorun()
+
+                                                              
+    def _pick_mt5_terminal(self):
+        """
+        Mục đích: Tương tác với MetaTrader 5 (kết nối, lấy dữ liệu nến, tính toán chỉ số, snapshot...).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        p = filedialog.askopenfilename(
+            title="Chọn terminal64.exe hoặc terminal.exe",
+            filetypes=[("MT5 terminal", "terminal*.exe"), ("Tất cả", "*.*")],
+        )
+        if p:
+            self.mt5_term_path_var.set(p)
+
+    def _mt5_guess_symbol(self):
+        """
+        Mục đích: Tương tác với MetaTrader 5 (kết nối, lấy dữ liệu nến, tính toán chỉ số, snapshot...).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            tfs = {"M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"}
+            names = [r["name"] for r in self.results]
+            cands = []
+            for n in names:
+                base = Path(n).stem
+                parts = base.split("_")
+                if len(parts) >= 2 and parts[-1].upper() in tfs:
+                    cands.append("_".join(parts[:-1]))
+            if not cands:
+                for n in names:
+                    s = Path(n).stem
+                    head = "".join([ch for ch in s if ch.isalpha()])
+                    if head:
+                        cands.append(head)
+            if cands:
+                from collections import Counter
+                self.mt5_symbol_var.set(Counter(cands).most_common(1)[0][0])
+                self.ui_status(f"Đã đoán symbol: {self.mt5_symbol_var.get()}")
+            else:
+                self.ui_message("info", "MT5", "Không đoán được symbol từ tên file.")
+        except Exception:
+            pass
+
+    def _mt5_connect(self):
+        """
+        Mục đích: Tương tác với MetaTrader 5 (kết nối, lấy dữ liệu nến, tính toán chỉ số, snapshot...).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if mt5 is None:
+            self.ui_message("error", "MT5", "Chưa cài thư viện MetaTrader5.\nHãy chạy: pip install MetaTrader5")
+            return
+        term = self.mt5_term_path_var.get().strip() or None
+        try:
+            ok = mt5.initialize(path=term) if term else mt5.initialize()
+            self.mt5_initialized = bool(ok)
+            if not ok:
+                err = f"MT5: initialize() thất bại: {mt5.last_error()}"
+                self._enqueue(lambda: self.mt5_status_var.set(err))
+                self.ui_message("error", "MT5", f"initialize() lỗi: {mt5.last_error()}")
+            else:
+                v = mt5.version()
+                self._enqueue(lambda: self.mt5_status_var.set(f"MT5: đã kết nối (build {v[0]})"))
+                self.ui_message("info", "MT5", "Kết nối thành công.")
+        except Exception as e:
+            self._enqueue(lambda: self.mt5_status_var.set(f"MT5: lỗi kết nối: {e}"))
+            self.ui_message("error", "MT5", f"Lỗi kết nối: {e}")
+
+    def _mt5_build_context(self, plan=None, cfg: RunConfig | None = None):
+        """
+        Mục đích: Tương tác với MetaTrader 5 (kết nối, lấy dữ liệu nến, tính toán chỉ số, snapshot...).
+        Tham số:
+          - plan — (tự suy luận theo ngữ cảnh sử dụng).
+          - cfg: RunConfig | None — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        sym = (cfg.mt5_symbol if cfg else (self.mt5_symbol_var.get() or "").strip())
+        if not ((cfg.mt5_enabled if cfg else self.mt5_enabled_var.get()) and sym) or mt5 is None:
+            return ""
+        if not self.mt5_initialized:
+            self._mt5_connect()
+            if not self.mt5_initialized:
+                return ""
+
+                                            
+        def _value_per_point(info_obj):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - info_obj — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            return _value_per_point_safe(sym, info_obj) or 0.0
+
+        def _points_per_pip(info_obj):
+                                                                                 
+                                                                 
+                                                                       
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - info_obj — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            d = int(info_obj.get("digits", 5) or 5)
+            if d >= 3:
+                return 10
+            return 1
+
+        def _quantiles(vals, q_list):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - vals — (tự suy luận theo ngữ cảnh sử dụng).
+              - q_list — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if not vals:
+                return {q: None for q in q_list}
+            arr = sorted(vals)
+            out = {}
+            for q in q_list:
+                if q <= 0: out[q] = arr[0]; continue
+                if q >= 1: out[q] = arr[-1]; continue
+                pos = (len(arr)-1) * q
+                lo = int(math.floor(pos)); hi = int(math.ceil(pos))
+                if lo == hi:
+                    out[q] = arr[lo]
+                else:
+                    out[q] = arr[lo] + (arr[hi] - arr[lo]) * (pos - lo)
+            return out
+
+        def _adr_stats(symbol, n=20):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - symbol — (tự suy luận theo ngữ cảnh sử dụng).
+              - n — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            bars = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 0, max(25, n+2))
+            if bars is None or len(bars) < 5:
+                return None
+            ranges = [float(b["high"] - b["low"]) for b in bars[-(n+1):-1]]
+            if not ranges:
+                return None
+            def _avg(m): 
+                """
+                Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+                Tham số:
+                  - m — (tự suy luận theo ngữ cảnh sử dụng).
+                Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+                Ghi chú:
+                  - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+                """
+                return sum(ranges[-m:]) / max(1, m) if len(ranges) >= m else None
+            return {"d5": _avg(5), "d10": _avg(10), "d20": _avg(20)}
+
+        def _position_in_day_range(cp, day):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - cp — (tự suy luận theo ngữ cảnh sử dụng).
+              - day — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            hi = day.get("high"); lo = day.get("low")
+            if not cp or not hi or not lo or hi <= lo:
+                return None
+            return max(0.0, min(1.0, (cp - lo) / (hi - lo)))
+
+        def _round_levels_near(cp, point, points_per_pip, steps=(0, 25, 50, 75)):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - cp — (tự suy luận theo ngữ cảnh sử dụng).
+              - point — (tự suy luận theo ngữ cảnh sử dụng).
+              - points_per_pip — (tự suy luận theo ngữ cảnh sử dụng).
+              - steps — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if not cp or not point:
+                return []
+            pip = points_per_pip * point
+            base = round(cp / (0.01 * pip)) * (0.01 * pip)                  
+            lv = []
+                                            
+            piv = [int(math.floor((cp / pip))) * pip + (s * pip / 100.0) for s in (0,25,50,75)]
+            for price in piv:
+                dist_pips = abs(cp - price) / (point * points_per_pip)
+                lv.append({"level": f"{int(round((price % 1)/pip*100)):02d}" if pip>0 else "xx",
+                        "price": round(price, info.digits), "distance_pips": round(dist_pips, 2)})
+                             
+            seen = set(); out=[]
+            for x in lv:
+                if x["price"] in seen: 
+                    continue
+                seen.add(x["price"]); out.append(x)
+            return out
+
+        def _fib_from_h1_swing(h1_rates):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - h1_rates — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if not h1_rates:
+                return None
+            hi = max(r["high"] for r in h1_rates)
+            lo = min(r["low"]  for r in h1_rates)
+            if hi is None or lo is None or hi <= lo:
+                return None
+            eq50 = (hi + lo) / 2.0
+            ote62 = lo + (hi - lo) * 0.62
+            ote79 = lo + (hi - lo) * 0.79
+            return {"lo": lo, "hi": hi, "eq50": eq50, "ote_62": ote62, "ote_79": ote79}
+
+                                                   
+        info = mt5.symbol_info(sym)
+        if not info:
+            return ""
+        if not info.visible:
+            mt5.symbol_select(sym, True)
+        acc = mt5.account_info()
+        tick = mt5.symbol_info_tick(sym)
+
+        info_obj = {
+            "digits": getattr(info, "digits", None), 
+            "point": getattr(info, "point", None),
+            "contract_size": getattr(info, "trade_contract_size", None),
+            "spread_current": getattr(info, "spread", None),
+            "swap_long": getattr(info, "swap_long", None),
+            "swap_short": getattr(info, "swap_short", None),
+        }
+        account_obj = None
+        if acc:
+            account_obj = {
+                "balance": float(getattr(acc, "balance", 0.0)),
+                "equity": float(getattr(acc, "equity", 0.0)),
+                "free_margin": float(getattr(acc, "margin_free", 0.0)),
+                "currency": getattr(acc, "currency", None),
+                "leverage": int(getattr(acc, "leverage", 0)) or None
+            }
+        rules_obj = {
+            "volume_min": getattr(info, "volume_min", None),
+            "volume_max": getattr(info, "volume_max", None),
+            "volume_step": getattr(info, "volume_step", None),
+            "trade_tick_value": getattr(info, "trade_tick_value", None),
+            "trade_tick_size": getattr(info, "trade_tick_size", None),
+            "stop_level_points": getattr(info, "trade_stops_level", None),
+            "freeze_level_points": getattr(info, "trade_freeze_level", None),
+            "margin_initial": getattr(info, "margin_initial", None),
+            "margin_maintenance": getattr(info, "margin_maintenance", None),
+        }
+
+        tick_obj = {}
+        if tick:
+            tick_obj = {
+                "bid": float(getattr(tick, "bid", 0.0)),
+                "ask": float(getattr(tick, "ask", 0.0)),
+                "last": float(getattr(tick, "last", 0.0)),
+                "time": int(getattr(tick, "time", 0)),
+            }
+        cp = float(tick_obj.get("bid") or tick_obj.get("last") or 0.0)
+
+                                                 
+        tick_stats_5m = {}
+        tick_stats_30m = {}
+        try:
+            now_ts = int(time.time())
+            for minutes, holder in ((5, "short"), (30, "long")):
+                frm = now_ts - minutes * 60
+                ticks = mt5.copy_ticks_range(sym, frm, now_ts, mt5.COPY_TICKS_INFO)
+                if ticks is None or len(ticks) < 5 or not info:
+                    if minutes == 5:   tick_stats_5m = {}
+                    else:              tick_stats_30m = {}
+                    continue
+                spreads = []
+                for t in ticks:
+                    b, a = float(t["bid"]), float(t["ask"])
+                    if a > 0 and b > 0:
+                        spreads.append(int(round((a - b) / (info.point or 0.01))))
+                if minutes == 5:
+                    med = median(spreads) if spreads else None
+                    p90 = sorted(spreads)[int(len(spreads)*0.9)] if spreads else None
+                    tick_stats_5m = {"ticks_per_min": int(len(ticks)/5), "median_spread": med, "p90_spread": p90}
+                else:
+                    med = median(spreads) if spreads else None
+                    p90 = sorted(spreads)[int(len(spreads)*0.9)] if spreads else None
+                    tick_stats_30m = {"ticks_per_min": int(len(ticks)/30), "median_spread": med, "p90_spread": p90}
+        except Exception:
+            pass
+
+                                                   
+        def _series(tfcode, bars):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - tfcode — (tự suy luận theo ngữ cảnh sử dụng).
+              - bars — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            arr = mt5.copy_rates_from_pos(sym, tfcode, 0, max(50, int(bars)))
+            rows = []
+            if arr is not None:
+                for r in arr:
+                    rows.append({
+                        "time": datetime.fromtimestamp(int(r["time"])).strftime("%Y-%m-%d %H:%M:%S"),
+                        "open": float(r["open"]), "high": float(r["high"]),
+                        "low": float(r["low"]), "close": float(r["close"]),
+                        "vol": int(r["tick_volume"])
+                    })
+            return rows
+
+        series = {
+            "M1":  _series(mt5.TIMEFRAME_M1,  cfg.mt5_n_M1 if cfg else self.mt5_n_M1.get()),
+            "M5":  _series(mt5.TIMEFRAME_M5,  cfg.mt5_n_M5 if cfg else self.mt5_n_M5.get()),
+            "M15": _series(mt5.TIMEFRAME_M15, cfg.mt5_n_M15 if cfg else self.mt5_n_M15.get()),
+            "H1":  _series(mt5.TIMEFRAME_H1,  cfg.mt5_n_H1 if cfg else self.mt5_n_H1.get()),
+        }
+
+                                                            
+        def _hl_from(tfcode, bars):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - tfcode — (tự suy luận theo ngữ cảnh sử dụng).
+              - bars — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            data = mt5.copy_rates_from_pos(sym, tfcode, 0, bars)
+            if data is None or len(data) == 0:
+                return None
+            hi = max([float(x["high"]) for x in data])
+            lo = min([float(x["low"])  for x in data])
+            op = float(data[0]["open"])
+            return {"open": op, "high": hi, "low": lo}
+
+        daily = _hl_from(mt5.TIMEFRAME_D1, 2) or {}
+        prev_day = {}
+        try:
+            d2 = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_D1, 1, 1)
+            if d2 is not None and len(d2) == 1:
+                prev_day = {"high": float(d2[0]["high"]), "low": float(d2[0]["low"])}
+        except Exception:
+            pass
+        weekly = _hl_from(mt5.TIMEFRAME_W1, 1) or {}
+        prev_week = {}
+        try:
+            w2 = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_W1, 1, 1)
+            if w2 is not None and len(w2) == 1:
+                prev_week = {"high": float(w2[0]["high"]), "low": float(w2[0]["low"])}
+        except Exception:
+            pass
+        monthly = _hl_from(mt5.TIMEFRAME_MN1, 1) or {}
+
+        midnight_open = None
+        if series["M1"]:
+            for r in series["M1"]:
+                if r["time"].endswith("00:00:00"):
+                    midnight_open = r["open"]
+                    break
+        if daily:
+            eq50 = (daily.get("high", None) + daily.get("low", None)) / 2.0 if daily.get("high") and daily.get("low") else None
+            daily["eq50"] = eq50
+            daily["midnight_open"] = midnight_open
+
+                                             
+        sessions_today = _session_ranges(series["M1"]) if series["M1"] else {}
+        def _vwap(rates):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - rates — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if not rates:
+                return None
+            s_pv = 0.0; s_v = 0.0
+            for r in rates:
+                tp = (r["high"] + r["low"] + r["close"]) / 3.0
+                v = max(1, r["vol"])
+                s_pv += tp * v; s_v += v
+            return s_pv / s_v if s_v > 0 else None
+
+        vwap_day = _vwap([r for r in series["M1"] if r["time"][:10] == datetime.now().strftime("%Y-%m-%d")])
+        vwaps = {"day": vwap_day}
+        for ss in ["asia", "london", "newyork_pre","newyork_post"]:
+            rng = sessions_today.get(ss, {})
+            if rng and rng.get("start") and rng.get("end"):
+                sub = []
+                for r in series["M1"]:
+                    hh = r["time"][11:16]
+                    if r["time"][:10] == datetime.now().strftime("%Y-%m-%d") and rng["start"] <= hh < rng["end"]:
+                        sub.append(r)
+                vwaps[ss] = _vwap(sub) if sub else None
+            else:
+                vwaps[ss] = None
+
+                                                          
+        def _ema(values, period):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - values — (tự suy luận theo ngữ cảnh sử dụng).
+              - period — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if not values or period <= 1:
+                return None
+            alpha = 2.0 / (period + 1.0)
+            ema = values[0]
+            for v in values[1:]:
+                ema = alpha * v + (1 - alpha) * ema
+            return float(ema)
+
+        def _atr_series(rates, period=14):
+                                                                 
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - rates — (tự suy luận theo ngữ cảnh sử dụng).
+              - period — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if not rates or len(rates) < period + 1:
+                return None, []
+            trs = []
+            prev_close = rates[0]["close"]
+            for r in rates[1:]:
+                tr = max(r["high"] - r["low"], abs(r["high"] - prev_close), abs(r["low"] - prev_close))
+                trs.append(tr)
+                prev_close = r["close"]
+            if len(trs) < period:
+                return None, trs
+            alpha = 1.0 / period
+            atr = sum(trs[:period]) / period
+            out = [atr]
+            for tr in trs[period:]:
+                atr = (1 - alpha) * atr + alpha * tr
+                out.append(atr)
+            return (out[-1] if out else None), trs
+
+        ema_block = {}
+        atr_block = {}
+        for k in ["M1", "M5", "M15", "H1"]:
+            closes = [r["close"] for r in series.get(k, [])]
+            ema_block[k] = {"ema50": _ema(closes, 50) if closes else None, "ema200": _ema(closes, 200) if closes else None}
+        atr_m5_now, tr_m5 = _atr_series(series.get("M5", []), period=14)
+        atr_block["M5"]  = atr_m5_now
+        atr_block["M1"]  = _atr_series(series.get("M1", []), period=14)[0]
+        atr_block["M15"] = _atr_series(series.get("M15", []), period=14)[0]
+        atr_block["H1"]  = _atr_series(series.get("H1", []), period=14)[0]
+
+                                      
+        q = _quantiles(tr_m5, [0.33, 0.66]) if tr_m5 else {0.33: None, 0.66: None}
+        if atr_m5_now and q[0.33] and q[0.66]:
+            if atr_m5_now <= q[0.33]:
+                vol_regime = "low"
+            elif atr_m5_now >= q[0.66]:
+                vol_regime = "high"
+            else:
+                vol_regime = "normal"
+        else:
+            vol_regime = None
+
+                                                       
+        kills = _killzones_vn_for_date()
+        now_hhmm = datetime.now().strftime("%H:%M")
+        kill_active = None
+        mins_to_next = None
+        try:
+            def _mins(t1, t2):
+                """
+                Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+                Tham số:
+                  - t1 — (tự suy luận theo ngữ cảnh sử dụng).
+                  - t2 — (tự suy luận theo ngữ cảnh sử dụng).
+                Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+                Ghi chú:
+                  - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+                """
+                h1,m1=map(int,t1.split(":")); h2,m2=map(int,t2.split(":"))
+                return (h2-h1)*60 + (m2-m1)
+            order = ["london","newyork_pre","newyork_post"]
+            for k in order:
+                st, ed = kills[k]["start"], kills[k]["end"]
+                if st <= now_hhmm < ed:
+                    kill_active = k
+                    break
+            if kill_active is None:
+                                    
+                for k in order:
+                    st = kills[k]["start"]
+                    if now_hhmm < st:
+                        mins_to_next = _mins(now_hhmm, st)
+                        break
+        except Exception:
+            pass
+
+                                                    
+        def _nearby_levels(cp):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - cp — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            lv = []
+            if prev_day:
+                lv += [{"name": "PDH", "price": prev_day["high"]}, {"name": "PDL", "price": prev_day["low"]}]
+            if daily:
+                if daily.get("eq50") is not None:
+                    lv.append({"name": "EQ50_D", "price": daily["eq50"]})
+                if daily.get("open") is not None:
+                    lv.append({"name": "DO", "price": daily["open"]})
+            out = []
+            for x in lv:
+                rel = "ABOVE" if x["price"] > cp else ("BELOW" if x["price"] < cp else "INSIDE")
+                dist = abs(x["price"] - cp) / (info.point or 0.01) if cp and info else None
+                out.append({"name": x["name"], "price": x["price"], "relation": rel, "distance_pips": dist})
+            return out
+
+        key_near = _nearby_levels(cp) if cp > 0 else []
+
+        points_per_pip = _points_per_pip(info_obj)
+        value_per_point = _value_per_point(info)
+        round_levels = _round_levels_near(cp, (info.point or 0.01), points_per_pip)
+        fib_h1 = _fib_from_h1_swing(series.get("H1", []))
+
+                                             
+        adr = _adr_stats(sym, n=20)
+        day_open = daily.get("open") if daily else None
+        prev_close = None
+        try:
+            d1_prev_close_arr = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_D1, 1, 1)
+            if d1_prev_close_arr is not None and len(d1_prev_close_arr)==1:
+                prev_close = float(d1_prev_close_arr[0]["close"])
+        except Exception:
+            pass
+        day_range = None
+        day_range_pct = None
+        if daily and adr and adr.get("d20"):
+            day_range = (daily["high"] - daily["low"]) if (daily.get("high") and daily.get("low")) else None
+            if day_range:
+                day_range_pct = (day_range / adr["d20"]) * 100.0
+
+        pos_in_day = _position_in_day_range(cp, daily) if daily else None
+        spread_points = None
+        if tick and info and getattr(info, "point", None):
+            b = float(getattr(tick, "bid", 0.0)); a=float(getattr(tick,"ask",0.0))
+            spread_points = (a - b) / (info.point or 0.01) if (a>0 and b>0) else None
+        atr_norm = {"spread_as_pct_of_atr_m5": None}
+        if spread_points and atr_m5_now and atr_m5_now > 0:
+            atr_norm["spread_as_pct_of_atr_m5"] = (spread_points / (atr_m5_now/(info.point or 0.01))) * 100.0
+
+                                                      
+        risk_model = None
+        rr_projection = None
+        if plan and info and points_per_pip and value_per_point > 0:
+            entry = plan.get("entry"); sl = plan.get("sl")
+            tp1  = plan.get("tp1");  tp2 = plan.get("tp2")
+            if entry and sl and entry != sl:
+                dist_points = abs(entry - sl) / (info.point or 0.01)
+                pip_value_per_lot = value_per_point * points_per_pip
+                risk_model = {
+                    "given_entry": entry, "given_sl": sl,
+                    "pip_value_per_lot": pip_value_per_lot,
+                    "value_per_point": value_per_point,
+                    "points_per_pip": points_per_pip
+                }
+                def _rr(tp):
+                    """
+                    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+                    Tham số:
+                      - tp — (tự suy luận theo ngữ cảnh sử dụng).
+                    Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+                    Ghi chú:
+                      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+                    """
+                    if not tp: return None
+                    return abs(tp - entry) / abs(entry - sl)
+                rr_projection = {
+                    "tp1": {"price": tp1, "rr": _rr(tp1)},
+                    "tp2": {"price": tp2, "rr": _rr(tp2)},
+                }
+
+                                                      
+        open_positions, pending_orders = [], []
+        try:
+            poss = mt5.positions_get(symbol=sym) or []
+            for p in poss:
+                open_positions.append({
+                    "ticket": int(getattr(p, "ticket", 0)),
+                    "type": int(getattr(p, "type", 0)),
+                    "lots": float(getattr(p, "volume", 0.0)),
+                    "price": float(getattr(p, "price_open", 0.0)),
+                    "sl": float(getattr(p, "sl", 0.0)) or None,
+                    "tp": float(getattr(p, "tp", 0.0)) or None,
+                    "pnl": float(getattr(p, "profit", 0.0)),
+                })
+            ords = mt5.orders_get(symbol=sym) or []
+            for o in ords:
+                pending_orders.append({
+                    "ticket": int(getattr(o, "ticket", 0)),
+                    "type": int(getattr(o, "type", 0)),
+                    "lots": float(getattr(o, "volume_current", 0.0)),
+                    "price": float(getattr(o, "price_open", 0.0)) or float(getattr(o, "price_current", 0.0)),
+                    "sl": float(getattr(o, "sl", 0.0)) or None,
+                    "tp": float(getattr(o, "tp", 0.0)) or None,
+                    "expiration": int(getattr(o, "expiration_time", 0)) or None
+                })
+        except Exception:
+            pass
+                                                                      
+        def _ema50_slope_10(closes):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - closes — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if not closes or len(closes) <= 60:                                
+                return None
+            now = _ema(closes, 50)
+            prev = _ema(closes[:-10], 50) if len(closes) > 10 else None
+            return (now - prev) if (now is not None and prev is not None) else None
+
+        m5_closes = [r["close"] for r in series.get("M5", [])]
+        h1_closes = [r["close"] for r in series.get("H1", [])]
+
+        ema_slope_block = {
+            "M5": {"ema50_per_10bars": _ema50_slope_10(m5_closes)},
+            "H1": {"ema50_per_10bars": _ema50_slope_10(h1_closes)}
+        }
+
+        payload = {
+            "MT5_DATA": {
+                "symbol": sym,
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "broker_time": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00","Z"),
+                "account": account_obj,
+                "info": info_obj,
+                "symbol_rules": rules_obj,
+                "pip": {
+                    "points_per_pip": points_per_pip,
+                    "value_per_point": value_per_point,
+                    "pip_value_per_lot": (value_per_point * points_per_pip if value_per_point else None)
+                },
+                "tick": tick_obj,
+                "tick_stats_5m": tick_stats_5m or None,
+                "tick_stats_30m": tick_stats_30m or None,
+                "levels": {
+                    "daily": daily or None,
+                    "prev_day": prev_day or None,
+                    "weekly": weekly or None,
+                    "prev_week": prev_week or None,
+                    "monthly": monthly or None
+                },
+                "day_open": daily.get("open") if daily else None,
+                "prev_day_close": prev_close,
+                "adr": adr or None,
+                "day_range": day_range,
+                "day_range_pct_of_adr20": (float(day_range_pct) if day_range_pct is not None else None),
+                "position_in_day_range": (float(pos_in_day) if pos_in_day is not None else None),
+                "sessions_today": sessions_today or None,
+                "volatility": {"ATR": atr_block},
+                "volatility_regime": vol_regime,
+                "trend_refs": {"EMA": ema_block},
+                "ema_slope": ema_slope_block,
+                "vwap": vwaps,
+                "kills": kills,
+                "killzone_active": kill_active,
+                "mins_to_next_killzone": mins_to_next,
+                "key_levels_nearby": key_near,
+                "round_levels": round_levels or None,
+                "fib_h1_last_swing": fib_h1 or None,
+                "atr_norm": atr_norm,
+                "risk_model": risk_model,
+                "rr_projection": rr_projection,
+                "open_positions": open_positions or [],
+                "pending_orders": pending_orders or []
+            }
+        }
+        try:
+            return json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            return str(payload)
+
+    def _mt5_snapshot_popup(self):
+        """
+        Mục đích: Tương tác với MetaTrader 5 (kết nối, lấy dữ liệu nến, tính toán chỉ số, snapshot...).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        txt = self._mt5_build_context(plan=None)
+        if not txt:
+            self.ui_message("warning", "MT5", "Không thể lấy dữ liệu. Kiểm tra kết nối/biểu tượng (Symbol).")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("MT5 snapshot")
+        win.geometry("760x520")
+        st = ScrolledText(win, wrap="none")
+        st.pack(fill="both", expand=True)
+        st.insert("1.0", txt)
+    
+                                           
+    def _extract_text_from_obj(self, obj):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - obj — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        parts = []
+
+        def walk(x):
+            """
+            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+            Tham số:
+              - x — (tự suy luận theo ngữ cảnh sử dụng).
+            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+            Ghi chú:
+              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+            """
+            if isinstance(x, str):
+                parts.append(x)
+                return
+            if isinstance(x, dict):
+                                               
+                for k in ("text", "content", "prompt", "body", "value"):
+                    v = x.get(k)
+                    if isinstance(v, str) and v.strip():
+                        parts.append(v)
+                for v in x.values():
+                    if v is not None and not isinstance(v, str):
+                        walk(v)
+            elif isinstance(x, list):
+                for v in x:
+                    walk(v)
+
+        walk(obj)
+        text = "\n\n".join(t.strip() for t in parts if t and t.strip())
+                                        
+        if text and text.count("\\n") > 0 and text.count("\n") <= text.count("\\n"):
+            text = (text.replace("\\n", "\n")
+                        .replace("\\t", "\t")
+                        .replace('\\"', '"')
+                        .replace("\\'", "'"))
+        return text or json.dumps(obj, ensure_ascii=False, indent=2)
+
+    def _normalize_prompt_text(self, raw: str) -> str:
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - raw: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: str
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        s = raw.strip()
+
+                           
+        try:
+            obj = json.loads(s)
+            return self._extract_text_from_obj(obj)
+        except Exception:
+            pass
+
+                                                                   
+        try:
+            obj = ast.literal_eval(s)
+            return self._extract_text_from_obj(obj)
+        except Exception:
+            pass
+
+                                                        
+        if s.count("\\n") >= 3 and s.count("\n") <= s.count("\\n"):
+            s = (s.replace("\\n", "\n")
+                 .replace("\\t", "\t")
+                 .replace('\\"', '"')
+                 .replace("\\'", "'"))
+        return s
+
+    def _reformat_prompt_area(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        raw = self.prompt_text.get("1.0", "end")
+        pretty = self._normalize_prompt_text(raw)
+        self.prompt_text.delete("1.0", "end")
+        self.prompt_text.insert("1.0", pretty)
+
+                                                                  
+    def _find_prompt_file(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        cand = []
+        pfp = self.prompt_file_path_var.get().strip()
+        if pfp:
+            cand.append(Path(pfp))
+        folder = self.folder_path.get().strip()
+        if folder:
+            for name in ("PROMPT.txt", "Prompt.txt", "prompt.txt"):
+                cand.append(Path(folder) / name)
+        cand.append(APP_DIR / "PROMPT.txt")
+        for p in cand:
+            try:
+                if p and p.exists() and p.is_file():
+                    return p
+            except Exception:
+                pass
+        return None
+
+    def _load_prompt_from_file(self, path=None, silent=False):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số:
+          - path — (tự suy luận theo ngữ cảnh sử dụng).
+          - silent — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            p = Path(path) if path else self._find_prompt_file()
+            if not p:
+                if not silent:
+                    self.ui_message("warning", "Prompt", "Không tìm thấy PROMPT.txt trong thư mục đã chọn hoặc APP_DIR.")
+                return False
+            raw = p.read_text(encoding="utf-8", errors="ignore")
+            text = self._normalize_prompt_text(raw)                       
+            self.prompt_text.delete("1.0", "end")
+            self.prompt_text.insert("1.0", text)
+            self.prompt_file_path_var.set(str(p))
+            self.ui_status(f"Đã nạp prompt từ: {p.name}")
+            return True
+        except Exception as e:
+            if not silent:
+                self.ui_message("error", "Prompt", f"Lỗi nạp PROMPT.txt: {e}")
+            return False
+
+    def _pick_prompt_file(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        path = filedialog.askopenfilename(
+            title="Chọn PROMPT.txt",
+            filetypes=[("Text", "*.txt"), ("Tất cả", "*.*")]
+        )
+        if not path:
+            return
+        self._load_prompt_from_file(path)
+
+    def _auto_load_prompt_for_current_folder(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if self.auto_load_prompt_txt_var.get():
+            self._load_prompt_from_file(silent=True)
+                                                     
+    def _save_workspace(self):
+        """
+        Mục đích: Ghi/Xuất dữ liệu (báo cáo .md, JSON tóm tắt, cache...).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        data = {
+            "prompt_file_path": self.prompt_file_path_var.get().strip(),
+            "auto_load_prompt_txt": bool(self.auto_load_prompt_txt_var.get()),
+            "folder_path": self.folder_path.get().strip(),
+            "model": self.model_var.get(),
+            "delete_after": bool(self.delete_after_var.get()),
+            "max_files": int(self.max_files_var.get()),
+            "autorun": bool(self.autorun_var.get()),
+            "autorun_secs": int(self.autorun_seconds_var.get()),
+            "remember_ctx": bool(self.remember_context_var.get()),
+            "ctx_n_reports": int(self.context_n_reports_var.get()),
+            "ctx_limit_chars": int(self.context_limit_chars_var.get()),
+            "create_ctx_json": bool(self.create_ctx_json_var.get()),
+            "prefer_ctx_json": bool(self.prefer_ctx_json_var.get()),
+            "ctx_json_n": int(self.ctx_json_n_var.get()),
+                      
+            "telegram_enabled": bool(self.telegram_enabled_var.get()),
+            "telegram_token_enc": obfuscate_text(self.telegram_token_var.get().strip())
+            if self.telegram_token_var.get().strip()
+            else "",
+            "telegram_chat_id": self.telegram_chat_id_var.get().strip(),
+            "telegram_skip_verify": bool(self.telegram_skip_verify_var.get()),
+            "telegram_ca_path": self.telegram_ca_path_var.get().strip(),
+                 
+            "mt5_enabled": bool(self.mt5_enabled_var.get()),
+            "mt5_term_path": self.mt5_term_path_var.get().strip(),
+            "mt5_symbol": self.mt5_symbol_var.get().strip(),
+            "mt5_n_M1": int(self.mt5_n_M1.get()),
+            "mt5_n_M5": int(self.mt5_n_M5.get()),
+            "mt5_n_M15": int(self.mt5_n_M15.get()),
+            "mt5_n_H1": int(self.mt5_n_H1.get()),
+                      
+            "no_trade_enabled": bool(self.no_trade_enabled_var.get()),
+            "nt_spread_factor": float(self.nt_spread_factor_var.get()),
+            "nt_min_atr_m5_pips": float(self.nt_min_atr_m5_pips_var.get()),
+            "nt_min_ticks_per_min": int(self.nt_min_ticks_per_min_var.get()),
+                         
+            "upload_workers": int(self.upload_workers_var.get()),
+            "cache_enabled": bool(self.cache_enabled_var.get()),
+            "opt_lossless": bool(self.optimize_lossless_var.get()),
+            "only_generate_if_changed": bool(self.only_generate_if_changed_var.get()),
+                        
+            "auto_trade_enabled": bool(self.auto_trade_enabled_var.get()),
+            "trade_strict_bias": bool(self.trade_strict_bias_var.get()),
+            "trade_size_mode": self.trade_size_mode_var.get(),
+            "trade_lots_total": float(self.trade_lots_total_var.get()),
+            "trade_equity_risk_pct": float(self.trade_equity_risk_pct_var.get()),
+            "trade_money_risk": float(self.trade_money_risk_var.get()),
+            "trade_split_tp1_pct": int(self.trade_split_tp1_pct_var.get()),
+            "trade_deviation_points": int(self.trade_deviation_points_var.get()),
+            "trade_pending_threshold_points": int(self.trade_pending_threshold_points_var.get()),
+            "trade_magic": int(self.trade_magic_var.get()),
+            "trade_comment_prefix": self.trade_comment_prefix_var.get(),
+                                         
+            "trade_pending_ttl_min": int(self.trade_pending_ttl_min_var.get()),
+            "trade_min_rr_tp2": float(self.trade_min_rr_tp2_var.get()),
+            "trade_min_dist_keylvl_pips": float(self.trade_min_dist_keylvl_pips_var.get()),
+            "trade_cooldown_min": int(self.trade_cooldown_min_var.get()),
+            "trade_dynamic_pending": bool(self.trade_dynamic_pending_var.get()),
+            "auto_trade_dry_run": bool(self.auto_trade_dry_run_var.get()),
+            "trade_move_to_be_after_tp1": bool(self.trade_move_to_be_after_tp1_var.get()),
+            "trade_trailing_atr_mult": float(self.trade_trailing_atr_mult_var.get()),
+            "trade_allow_session_asia": bool(self.trade_allow_session_asia_var.get()),
+            "trade_allow_session_london": bool(self.trade_allow_session_london_var.get()),
+            "trade_allow_session_ny": bool(self.trade_allow_session_ny_var.get()),
+            "news_block_before_min": int(self.trade_news_block_before_min_var.get()),
+            "news_block_after_min": int(self.trade_news_block_after_min_var.get()),
+
+
+        }
+        try:
+            WORKSPACE_JSON.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.ui_message("info", "Workspace", "Đã lưu workspace.")
+        except Exception as e:
+            self.ui_message("error", "Workspace", str(e))
+
+    def _load_workspace(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not WORKSPACE_JSON.exists():
+            return
+        try:
+            data = json.loads(WORKSPACE_JSON.read_text(encoding="utf-8"))
+        except Exception:
+            return
+
+                         
+        self.prompt_file_path_var.set(data.get("prompt_file_path", ""))
+        self.auto_load_prompt_txt_var.set(bool(data.get("auto_load_prompt_txt", True)))
+        folder = data.get("folder_path", "")
+        if folder and Path(folder).exists():
+            self.folder_path.set(folder)
+            self._load_files(folder)
+            self._refresh_history_list()
+            self._refresh_json_list()
+
+                     
+        self.model_var.set(data.get("model", DEFAULT_MODEL))
+        self.delete_after_var.set(bool(data.get("delete_after", True)))
+        self.max_files_var.set(int(data.get("max_files", 0)))
+        self.autorun_var.set(bool(data.get("autorun", False)))
+        self.autorun_seconds_var.set(int(data.get("autorun_secs", 60)))
+
+                 
+        self.remember_context_var.set(bool(data.get("remember_ctx", True)))
+        self.context_n_reports_var.set(int(data.get("ctx_n_reports", 1)))
+        self.context_limit_chars_var.set(int(data.get("ctx_limit_chars", 2000)))
+        self.create_ctx_json_var.set(bool(data.get("create_ctx_json", True)))
+        self.prefer_ctx_json_var.set(bool(data.get("prefer_ctx_json", True)))
+        self.ctx_json_n_var.set(int(data.get("ctx_json_n", 5)))
+
+                  
+        self.telegram_enabled_var.set(bool(data.get("telegram_enabled", False)))
+        self.telegram_token_var.set(deobfuscate_text(data.get("telegram_token_enc", "")))
+        self.telegram_chat_id_var.set(data.get("telegram_chat_id", ""))
+        self.telegram_skip_verify_var.set(bool(data.get("telegram_skip_verify", False)))
+        self.telegram_ca_path_var.set(data.get("telegram_ca_path", ""))
+
+             
+        self.mt5_enabled_var.set(bool(data.get("mt5_enabled", False)))
+        self.mt5_term_path_var.set(data.get("mt5_term_path", ""))
+        self.mt5_symbol_var.set(data.get("mt5_symbol", ""))
+        self.mt5_n_M1.set(int(data.get("mt5_n_M1", 120)))
+        self.mt5_n_M5.set(int(data.get("mt5_n_M5", 180)))
+        self.mt5_n_M15.set(int(data.get("mt5_n_M15", 96)))
+        self.mt5_n_H1.set(int(data.get("mt5_n_H1", 120)))
+
+                  
+        self.no_trade_enabled_var.set(bool(data.get("no_trade_enabled", True)))
+        self.nt_spread_factor_var.set(float(data.get("nt_spread_factor", 1.2)))
+        self.nt_min_atr_m5_pips_var.set(float(data.get("nt_min_atr_m5_pips", 3.0)))
+        self.nt_min_ticks_per_min_var.set(int(data.get("nt_min_ticks_per_min", 5)))
+
+                       
+        self.upload_workers_var.set(int(data.get("upload_workers", 4)))
+        self.cache_enabled_var.set(bool(data.get("cache_enabled", True)))
+        self.optimize_lossless_var.set(bool(data.get("opt_lossless", False)))
+        self.only_generate_if_changed_var.set(bool(data.get("only_generate_if_changed", False)))
+
+                    
+        self.auto_trade_enabled_var.set(bool(data.get("auto_trade_enabled", False)))
+        self.trade_strict_bias_var.set(bool(data.get("trade_strict_bias", True)))
+        self.trade_size_mode_var.set(data.get("trade_size_mode", "lots"))
+        self.trade_lots_total_var.set(float(data.get("trade_lots_total", 0.10)))
+        self.trade_equity_risk_pct_var.set(float(data.get("trade_equity_risk_pct", 1.0)))
+        self.trade_money_risk_var.set(float(data.get("trade_money_risk", 10.0)))
+        self.trade_split_tp1_pct_var.set(int(data.get("trade_split_tp1_pct", 50)))
+        self.trade_deviation_points_var.set(int(data.get("trade_deviation_points", 20)))
+        self.trade_pending_threshold_points_var.set(int(data.get("trade_pending_threshold_points", 60)))
+        self.trade_magic_var.set(int(data.get("trade_magic", 26092025)))
+        self.trade_comment_prefix_var.set(data.get("trade_comment_prefix", "AI-ICT"))
+
+                                                         
+                                                                        
+                                                                                              
+        before_val = data.get("news_block_before_min")
+        after_val  = data.get("news_block_after_min")
+        legacy_val = data.get("trade_news_block_min")
+
+        try:
+            before = int(before_val) if before_val is not None else None
+        except Exception:
+            before = None
+        try:
+            after = int(after_val) if after_val is not None else None
+        except Exception:
+            after = None
+        try:
+            legacy = int(legacy_val) if legacy_val is not None else None
+        except Exception:
+            legacy = None
+
+        if before is None and legacy is not None:
+            before = legacy
+        if after is None and legacy is not None:
+            after = legacy
+
+        if before is None:
+            before = 15
+        if after is None:
+            after = 15
+
+        self.trade_news_block_before_min_var.set(before)
+        self.trade_news_block_after_min_var.set(after)
+
+
+    def _delete_workspace(self):
+        """
+        Mục đích: Đọc/ghi cấu hình workspace, cache upload và các trạng thái phiên làm việc.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            if WORKSPACE_JSON.exists():
+                WORKSPACE_JSON.unlink()
+            self.ui_message("info", "Workspace", "Đã xoá workspace.")
+        except Exception as e:
+            self.ui_message("error", "Workspace", str(e))
+
+    def _load_workspace(self):
+        """
+        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not WORKSPACE_JSON.exists():
+            return
+        try:
+            data = json.loads(WORKSPACE_JSON.read_text(encoding="utf-8"))
+        except Exception:
+            return
+
+                         
+        self.prompt_file_path_var.set(data.get("prompt_file_path", ""))
+        self.auto_load_prompt_txt_var.set(bool(data.get("auto_load_prompt_txt", True)))
+        folder = data.get("folder_path", "")
+        if folder and Path(folder).exists():
+            self.folder_path.set(folder)
+            self._load_files(folder)
+            self._refresh_history_list()
+            self._refresh_json_list()
+
+                     
+        self.model_var.set(data.get("model", DEFAULT_MODEL))
+        self.delete_after_var.set(bool(data.get("delete_after", True)))
+        self.max_files_var.set(int(data.get("max_files", 0)))
+        self.autorun_var.set(bool(data.get("autorun", False)))
+        self.autorun_seconds_var.set(int(data.get("autorun_secs", 60)))
+
+                 
+        self.remember_context_var.set(bool(data.get("remember_ctx", True)))
+        self.context_n_reports_var.set(int(data.get("ctx_n_reports", 1)))
+        self.context_limit_chars_var.set(int(data.get("ctx_limit_chars", 2000)))
+        self.create_ctx_json_var.set(bool(data.get("create_ctx_json", True)))
+        self.prefer_ctx_json_var.set(bool(data.get("prefer_ctx_json", True)))
+        self.ctx_json_n_var.set(int(data.get("ctx_json_n", 5)))
+
+                  
+        self.telegram_enabled_var.set(bool(data.get("telegram_enabled", False)))
+        self.telegram_token_var.set(deobfuscate_text(data.get("telegram_token_enc", "")))
+        self.telegram_chat_id_var.set(data.get("telegram_chat_id", ""))
+        self.telegram_skip_verify_var.set(bool(data.get("telegram_skip_verify", False)))
+        self.telegram_ca_path_var.set(data.get("telegram_ca_path", ""))
+
+             
+        self.mt5_enabled_var.set(bool(data.get("mt5_enabled", False)))
+        self.mt5_term_path_var.set(data.get("mt5_term_path", ""))
+        self.mt5_symbol_var.set(data.get("mt5_symbol", ""))
+        self.mt5_n_M1.set(int(data.get("mt5_n_M1", 120)))
+        self.mt5_n_M5.set(int(data.get("mt5_n_M5", 180)))
+        self.mt5_n_M15.set(int(data.get("mt5_n_M15", 96)))
+        self.mt5_n_H1.set(int(data.get("mt5_n_H1", 120)))
+
+                  
+        self.no_trade_enabled_var.set(bool(data.get("no_trade_enabled", True)))
+        self.nt_spread_factor_var.set(float(data.get("nt_spread_factor", 1.2)))
+        self.nt_min_atr_m5_pips_var.set(float(data.get("nt_min_atr_m5_pips", 3.0)))
+        self.nt_min_ticks_per_min_var.set(int(data.get("nt_min_ticks_per_min", 5)))
+
+                       
+        self.upload_workers_var.set(int(data.get("upload_workers", 4)))
+        self.cache_enabled_var.set(bool(data.get("cache_enabled", True)))
+        self.optimize_lossless_var.set(bool(data.get("opt_lossless", False)))
+        self.only_generate_if_changed_var.set(bool(data.get("only_generate_if_changed", False)))
+
+                    
+        self.auto_trade_enabled_var.set(bool(data.get("auto_trade_enabled", False)))
+        self.trade_strict_bias_var.set(bool(data.get("trade_strict_bias", True)))
+        self.trade_size_mode_var.set(data.get("trade_size_mode", "lots"))
+        self.trade_lots_total_var.set(float(data.get("trade_lots_total", 0.10)))
+        self.trade_equity_risk_pct_var.set(float(data.get("trade_equity_risk_pct", 1.0)))
+        self.trade_money_risk_var.set(float(data.get("trade_money_risk", 10.0)))
+        self.trade_split_tp1_pct_var.set(int(data.get("trade_split_tp1_pct", 50)))
+        self.trade_deviation_points_var.set(int(data.get("trade_deviation_points", 20)))
+        self.trade_pending_threshold_points_var.set(int(data.get("trade_pending_threshold_points", 60)))
+        self.trade_magic_var.set(int(data.get("trade_magic", 26092025)))
+        self.trade_comment_prefix_var.set(data.get("trade_comment_prefix", "AI-ICT"))
+
+                                                         
+                                                                        
+                                                                                              
+        before_val = data.get("news_block_before_min")
+        after_val  = data.get("news_block_after_min")
+        legacy_val = data.get("trade_news_block_min")
+
+        try:
+            before = int(before_val) if before_val is not None else None
+        except Exception:
+            before = None
+        try:
+            after = int(after_val) if after_val is not None else None
+        except Exception:
+            after = None
+        try:
+            legacy = int(legacy_val) if legacy_val is not None else None
+        except Exception:
+            legacy = None
+
+        if before is None and legacy is not None:
+            before = legacy
+        if after is None and legacy is not None:
+            after = legacy
+
+        if before is None:
+            before = 15
+        if after is None:
+            after = 15
+
+        self.trade_news_block_before_min_var.set(before)
+        self.trade_news_block_after_min_var.set(after)
+
+
+    def _delete_workspace(self):
+        """
+        Mục đích: Đọc/ghi cấu hình workspace, cache upload và các trạng thái phiên làm việc.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            if WORKSPACE_JSON.exists():
+                WORKSPACE_JSON.unlink()
+            self.ui_message("info", "Workspace", "Đã xoá workspace.")
+        except Exception as e:
+            self.ui_message("error", "Workspace", str(e))
+
+                                                        
+class ChartTabTV:
+    """
+    Lớp "ChartTabTV" đại diện cho một thành phần chính của ứng dụng.
+    Trách nhiệm chính:
+      - Khởi tạo UI (Notebook: Report/Prompt/Options, v.v.).
+      - Đọc/ghi workspace, cache, prompt.
+      - Quy trình phân tích 1 lần: nạp ảnh → (tối ưu/cache) upload → gọi Gemini → gom báo cáo.
+      - (Tuỳ chọn) Lấy dữ liệu MT5, tạo JSON ngữ cảnh, lọc NO-TRADE, gửi Telegram.
+      - Quản trị thread an toàn với Tkinter thông qua hàng đợi UI.
+    """
+    def __init__(self, app, notebook):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - app — (tự suy luận theo ngữ cảnh sử dụng).
+          - notebook — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self.app = app
+        self.root = app.root
+
+                             
+        self.symbol_var = tk.StringVar(value="XAUUSD")                       
+        self.tf_var = tk.StringVar(value="M1")
+        self.n_candles_var = tk.IntVar(value=100)
+        self.refresh_secs_var = tk.IntVar(value=1)
+
+        self._after_job = None
+        self._running = False
+
+                           
+        self.tab = ttk.Frame(notebook, padding=8)
+        notebook.add(self.tab, text="Chart")
+
+        self.tab.rowconfigure(1, weight=1)
+        self.tab.columnconfigure(0, weight=2)
+        self.tab.columnconfigure(1, weight=1)
+
+                                      
+        ctrl = ttk.Frame(self.tab)
+        ctrl.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        for i in range(10):
+            ctrl.columnconfigure(i, weight=0)
+        ctrl.columnconfigure(9, weight=1)
+
+        ttk.Label(ctrl, text="Symbol:").grid(row=0, column=0, sticky="w")
+
+                                        
+        self.cbo_symbol = ttk.Combobox(
+            ctrl, width=16, textvariable=self.symbol_var, state="normal", values=[]
+        )
+        self.cbo_symbol.grid(row=0, column=1, sticky="w", padx=(4, 10))
+        self.cbo_symbol.bind("<<ComboboxSelected>>", lambda e: self._redraw_safe())
+        self._populate_symbol_list()                                        
+
+        ttk.Label(ctrl, text="TF:").grid(row=0, column=2, sticky="w")
+        self.cbo_tf = ttk.Combobox(
+            ctrl, width=6, state="readonly",
+            values=["M1", "M5", "M15", "H1", "H4", "D1"], textvariable=self.tf_var
+        )
+        self.cbo_tf.grid(row=0, column=3, sticky="w", padx=(4, 10))
+        self.cbo_tf.bind("<<ComboboxSelected>>", lambda e: self._redraw_safe())
+
+        ttk.Label(ctrl, text="Số nến:").grid(row=0, column=4, sticky="w")
+        ttk.Spinbox(ctrl, from_=50, to=5000, textvariable=self.n_candles_var, width=8,
+                    command=self._redraw_safe).grid(row=0, column=5, sticky="w", padx=(4, 10))
+
+        ttk.Label(ctrl, text="Làm mới (s):").grid(row=0, column=6, sticky="w")
+        ttk.Spinbox(ctrl, from_=1, to=3600, textvariable=self.refresh_secs_var, width=6)\
+            .grid(row=0, column=7, sticky="w", padx=(4, 10))
+
+                                                               
+                                                                                 
+        self.btn_start = ttk.Button(ctrl, text="► Start", command=self.start)
+        self.btn_start.grid(row=0, column=8, sticky="w")
+        self.btn_stop = ttk.Button(ctrl, text="□ Stop", command=self.stop, state="disabled")
+        self.btn_stop.grid(row=0, column=9, sticky="w", padx=(6, 10))
+        try:
+            self.btn_start.grid_remove()
+            self.btn_stop.grid_remove()
+        except Exception:
+            pass
+
+                                                                  
+                                                                         
+        self.root.after(200, self.start)
+
+                                                                 
+
+                                                            
+        chart_wrap = ttk.Frame(self.tab)
+        chart_wrap.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        chart_wrap.rowconfigure(1, weight=1)
+        chart_wrap.columnconfigure(0, weight=1)
+
+                                                                                                               
+        self.fig = Figure(figsize=(6, 4), dpi=100, constrained_layout=False)
+        self.ax_price = self.fig.add_subplot(1, 1, 1)
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=chart_wrap)
+        self.canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew")
+
+                            
+        try:
+            from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
+            tb_frame = ttk.Frame(chart_wrap)
+            tb_frame.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+            self.toolbar = NavigationToolbar2Tk(self.canvas, tb_frame)
+            self.toolbar.update()
+        except Exception:
+            self.toolbar = None
+
+                       
+        acc_box = ttk.LabelFrame(self.tab, text="Account info", padding=8)
+        acc_box.grid(row=1, column=1, sticky="nsew")
+        for i in range(2):
+            acc_box.columnconfigure(i, weight=1)
+
+        self.acc_balance = tk.StringVar(value="-")
+        self.acc_equity = tk.StringVar(value="-")
+        self.acc_margin = tk.StringVar(value="-")
+        self.acc_leverage = tk.StringVar(value="-")
+        self.acc_currency = tk.StringVar(value="-")
+        self.acc_status = tk.StringVar(value="Chưa kết nối MT5")
+
+        ttk.Label(acc_box, text="Balance:").grid(row=0, column=0, sticky="w")
+        ttk.Label(acc_box, textvariable=self.acc_balance).grid(row=0, column=1, sticky="e")
+        ttk.Label(acc_box, text="Equity:").grid(row=1, column=0, sticky="w")
+        ttk.Label(acc_box, textvariable=self.acc_equity).grid(row=1, column=1, sticky="e")
+        ttk.Label(acc_box, text="Free margin:").grid(row=2, column=0, sticky="w")
+        ttk.Label(acc_box, textvariable=self.acc_margin).grid(row=2, column=1, sticky="e")
+        ttk.Label(acc_box, text="Leverage:").grid(row=3, column=0, sticky="w")
+        ttk.Label(acc_box, textvariable=self.acc_leverage).grid(row=3, column=1, sticky="e")
+        ttk.Label(acc_box, text="Currency:").grid(row=4, column=0, sticky="w")
+        ttk.Label(acc_box, textvariable=self.acc_currency).grid(row=4, column=1, sticky="e")
+        ttk.Separator(acc_box, orient="horizontal").grid(row=5, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Label(acc_box, textvariable=self.acc_status, foreground="#666").grid(row=6, column=0, columnspan=2, sticky="w")
+
+                                                  
+        grids = ttk.Frame(self.tab)
+        grids.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
+        grids.columnconfigure(0, weight=1)
+        grids.columnconfigure(1, weight=1)
+        grids.rowconfigure(0, weight=1)
+
+                                              
+        pos_box = ttk.LabelFrame(grids, text="Open positions", padding=6)
+        pos_box.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        pos_box.rowconfigure(0, weight=1)
+        pos_box.columnconfigure(0, weight=1)
+
+        self.pos_cols = ("ticket", "type", "lots", "price", "sl", "tp", "pnl")
+        self.tree_pos = ttk.Treeview(pos_box, columns=self.pos_cols, show="headings", height=6)
+        for c, w in zip(self.pos_cols, (90, 110, 70, 110, 110, 110, 100)):
+            self.tree_pos.heading(c, text=c.upper())
+            self.tree_pos.column(c, width=w, anchor="e" if c in ("lots", "price", "sl", "tp", "pnl") else "w")
+        self.tree_pos.grid(row=0, column=0, sticky="nsew")
+        scr1 = ttk.Scrollbar(pos_box, orient="vertical", command=self.tree_pos.yview)
+        self.tree_pos.configure(yscrollcommand=scr1.set)
+        scr1.grid(row=0, column=1, sticky="ns")
+
+                 
+        his_box = ttk.LabelFrame(grids, text="History (deals gần nhất)", padding=6)
+        his_box.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        his_box.rowconfigure(0, weight=1)
+        his_box.columnconfigure(0, weight=1)
+        self.his_cols = ("time", "ticket", "type", "volume", "price", "profit")
+        self.tree_his = ttk.Treeview(his_box, columns=self.his_cols, show="headings", height=6)
+        for c, w in zip(self.his_cols, (140, 90, 70, 80, 110, 100)):
+            self.tree_his.heading(c, text=c.upper())
+            self.tree_his.column(c, width=w, anchor="e" if c in ("volume", "price", "profit") else "w")
+        self.tree_his.grid(row=0, column=0, sticky="nsew")
+        scr2 = ttk.Scrollbar(his_box, orient="vertical", command=self.tree_his.yview)
+        self.tree_his.configure(yscrollcommand=scr2.set)
+        scr2.grid(row=0, column=1, sticky="ns")
+
+                    
+        self._redraw_safe()
+
+                                 
+    def start(self):
+        """
+        Mục đích: Bắt đầu quy trình chính (khởi tạo trạng thái, đọc cấu hình, chạy tác vụ nền).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if self._running:
+            return
+        self._running = True
+        self.btn_start.configure(state="disabled")
+        self.btn_stop.configure(state="normal")
+        self._tick()
+
+    def stop(self):
+        """
+        Mục đích: Dừng quy trình đang chạy một cách an toàn (đặt cờ, giải phóng tài nguyên, cập nhật UI).
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self._running = False
+        if self._after_job:
+            self.root.after_cancel(self._after_job)
+            self._after_job = None
+        self.btn_start.configure(state="normal")
+        self.btn_stop.configure(state="disabled")
+
+                         
+    def _populate_symbol_list(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            if not self._ensure_mt5(want_account=False):
+                return
+            import MetaTrader5 as mt5
+            syms = mt5.symbols_get()
+            names = sorted([s.name for s in syms]) if syms else []
+            if names:
+                self.cbo_symbol["values"] = names
+                                                                                 
+                if "XAUUSD" in names:
+                    self.symbol_var.set("XAUUSD")
+        except Exception:
+            pass
+
+
+    def _mt5_tf(self, tf_str: str):
+        """
+        Mục đích: Tương tác với MetaTrader 5 (kết nối, lấy dữ liệu nến, tính toán chỉ số, snapshot...).
+        Tham số:
+          - tf_str: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            import MetaTrader5 as mt5
+        except Exception:
+            return None
+        mapping = {
+            "M1": mt5.TIMEFRAME_M1,
+            "M5": mt5.TIMEFRAME_M5,
+            "M15": mt5.TIMEFRAME_M15,
+            "H1": mt5.TIMEFRAME_H1,
+            "H4": mt5.TIMEFRAME_H4,
+            "D1": mt5.TIMEFRAME_D1,
+        }
+        return mapping.get(tf_str.upper(), mt5.TIMEFRAME_M5)
+
+    def _ensure_mt5(self, *, want_account: bool = True) -> bool:
+        """
+        Mục đích: Tương tác với MetaTrader 5 (kết nối, lấy dữ liệu nến, tính toán chỉ số, snapshot...).
+        Tham số: (không)
+        Trả về: bool
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            import MetaTrader5 as mt5
+        except Exception:
+            self.acc_status.set("Chưa cài MetaTrader5 (pip install MetaTrader5)")
+            return False
+
+                                                         
+        if getattr(self.app, "mt5_initialized", False):
+            if want_account and mt5.account_info() is None:
+                self.acc_status.set("MT5: chưa đăng nhập (account_info=None)")
+                return False
+            return True
+
+                                                             
+        if getattr(self.app, "mt5_enabled_var", None) and self.app.mt5_enabled_var.get():
+            try:
+                self.app._mt5_connect()
+            except Exception:
+                pass
+            if getattr(self.app, "mt5_initialized", False):
+                if want_account and mt5.account_info() is None:
+                    self.acc_status.set("MT5: chưa đăng nhập (account_info=None)")
+                    return False
+                return True
+
+                                
+        if not mt5.initialize():
+            code, msg = mt5.last_error()
+            self.acc_status.set(f"MT5 init fail: {code} {msg}")
+            return False
+
+        if want_account and mt5.account_info() is None:
+            code, msg = mt5.last_error()
+            self.acc_status.set(f"MT5: chưa đăng nhập (account_info=None). last_error={code} {msg}")
+            return False
+
+        return True
+
+
+    def _rates_to_df(self, symbol, tf_code, count: int):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - symbol — (tự suy luận theo ngữ cảnh sử dụng).
+          - tf_code — (tự suy luận theo ngữ cảnh sử dụng).
+          - count: int — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not self._ensure_mt5():
+            return pd.DataFrame()
+        import MetaTrader5 as mt5
+        try:
+            if not symbol:
+                self.acc_status.set("Symbol rỗng")
+                return pd.DataFrame()
+
+            info = mt5.symbol_info(symbol)
+            if info is None:
+                self.acc_status.set(f"Symbol không tồn tại trong MT5: {symbol}")
+                return pd.DataFrame()
+            if not info.visible:
+                mt5.symbol_select(symbol, True)
+
+            count = max(50, int(count or 300))
+            arr = mt5.copy_rates_from_pos(symbol, tf_code, 0, count)
+            if arr is None or len(arr) == 0:
+                code, msg = mt5.last_error()
+                self.acc_status.set(f"Không lấy được rates ({symbol}). last_error={code} {msg}")
+                return pd.DataFrame()
+
+            df = pd.DataFrame(arr)
+            df["time"] = pd.to_datetime(df["time"], unit="s")
+            df.set_index("time", inplace=True)
+            df.rename(columns={
+                "open": "Open", "high": "High", "low": "Low", "close": "Close",
+                "tick_volume": "Volume"
+            }, inplace=True)
+            if "Volume" not in df.columns:
+                df["Volume"] = df.get("real_volume", 0) if "real_volume" in df.columns else 0
+            for c in ("Open", "High", "Low", "Close", "Volume"):
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+            df.dropna(subset=["Open", "High", "Low", "Close"], inplace=True)
+            return df.tail(count)
+        except Exception as e:
+            self.acc_status.set(f"Lỗi xử lý rates: {e}")
+            return pd.DataFrame()
+
+    def _style(self):
+                                          
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            return mpf.make_mpf_style(base_mpf_style="yahoo")
+        except Exception:
+            return mpf.make_mpf_style(base_mpf_style="classic")
+
+    def _fmt(self, x, digits=5):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - x — (tự suy luận theo ngữ cảnh sử dụng).
+          - digits — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            return f"{float(x):.{digits}f}"
+        except Exception:
+            return str(x)
+
+    def _update_account_info(self, symbol: str):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - symbol: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not self._ensure_mt5():
+            return
+        import MetaTrader5 as mt5
+        try:
+            acc = mt5.account_info()
+            if acc:
+                self.acc_balance.set(self._fmt(acc.balance, 2))
+                self.acc_equity.set(self._fmt(acc.equity, 2))
+                self.acc_margin.set(self._fmt(acc.margin_free, 2))
+                self.acc_leverage.set(str(getattr(acc, "leverage", "")))
+                self.acc_currency.set(getattr(acc, "currency", "") or "-")
+                self.acc_status.set(f"OK • {symbol} • {self.tf_var.get()}")
+            else:
+                self.acc_status.set("Không đọc được account info")
+        except Exception:
+            self.acc_status.set("Lỗi đọc account info")
+
+    def _fill_positions_table(self, symbol: str):
+                                       
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - symbol: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        for i in self.tree_pos.get_children():
+            self.tree_pos.delete(i)
+        if not self._ensure_mt5():
+            return
+        import MetaTrader5 as mt5
+        try:
+            info = mt5.symbol_info(symbol)
+            digits = getattr(info, "digits", 5) if info else 5
+            rows = []
+
+                                
+            poss = mt5.positions_get(symbol=symbol) or []
+            for p in poss:
+                typ = "BUY" if int(getattr(p, "type", 0)) == 0 else "SELL"
+                lots = float(getattr(p, "volume", 0.0))
+                price = float(getattr(p, "price_open", 0.0))
+                sl = float(getattr(p, "sl", 0.0)) or 0.0
+                tp = float(getattr(p, "tp", 0.0)) or 0.0
+                pnl = float(getattr(p, "profit", 0.0))
+                rows.append((
+                    int(getattr(p, "ticket", 0)),
+                    typ, f"{lots:.2f}", self._fmt(price, digits),
+                    (self._fmt(sl, digits) if sl else ""),
+                    (self._fmt(tp, digits) if tp else ""),
+                    f"{pnl:.2f}",
+                ))
+
+                            
+            ords = mt5.orders_get(symbol=symbol) or []
+            type_map = {
+                getattr(mt5, "ORDER_TYPE_BUY_LIMIT", 2):        "BUY LIMIT",
+                getattr(mt5, "ORDER_TYPE_SELL_LIMIT", 3):       "SELL LIMIT",
+                getattr(mt5, "ORDER_TYPE_BUY_STOP", 4):         "BUY STOP",
+                getattr(mt5, "ORDER_TYPE_SELL_STOP", 5):        "SELL STOP",
+                getattr(mt5, "ORDER_TYPE_BUY_STOP_LIMIT", 6):   "BUY STOP LIMIT",
+                getattr(mt5, "ORDER_TYPE_SELL_STOP_LIMIT", 7):  "SELL STOP LIMIT",
+            }
+            for o in ords:
+                otype = int(getattr(o, "type", 0))
+                typ = type_map.get(otype, f"TYPE {otype}")
+                lots = float(getattr(o, "volume_current", 0.0))
+                price = float(getattr(o, "price_open", 0.0)) or float(getattr(o, "price_current", 0.0))
+                sl = float(getattr(o, "sl", 0.0)) or 0.0
+                tp = float(getattr(o, "tp", 0.0)) or 0.0
+                rows.append((
+                    int(getattr(o, "ticket", 0)),
+                    typ, f"{lots:.2f}", self._fmt(price, digits),
+                    (self._fmt(sl, digits) if sl else ""),
+                    (self._fmt(tp, digits) if tp else ""),
+                    "",                       
+                ))
+
+            try:
+                rows.sort(key=lambda r: r[0], reverse=True)
+            except Exception:
+                pass
+
+            for r in rows:
+                self.tree_pos.insert("", "end", values=r)
+        except Exception:
+            pass
+
+    def _fill_history_table(self, symbol: str):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - symbol: str — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        for i in self.tree_his.get_children():
+            self.tree_his.delete(i)
+        if not self._ensure_mt5():
+            return
+        import MetaTrader5 as mt5
+        try:
+            from datetime import datetime, timedelta
+            now = datetime.now()
+            deals = mt5.history_deals_get(now - timedelta(days=1), now) or []
+            info = mt5.symbol_info(symbol)
+            digits = getattr(info, "digits", 5) if info else 5
+            rows = []
+            for d in deals:
+                try:
+                    if getattr(d, "symbol", "") != symbol:
+                        continue
+                    t = datetime.fromtimestamp(int(getattr(d, "time", 0))).strftime("%Y-%m-%d %H:%M:%S")
+                    ticket = int(getattr(d, "ticket", 0))
+                    typ_val = int(getattr(d, "type", 0))
+                    _typ_map = {
+                        getattr(mt5, "DEAL_TYPE_BUY", 0): "BUY",
+                        getattr(mt5, "DEAL_TYPE_SELL", 1): "SELL",
+                    }
+                    typ = _typ_map.get(typ_val, str(typ_val))
+                    vol = float(getattr(d, "volume", 0.0))
+                    price = float(getattr(d, "price", 0.0))
+                    profit = float(getattr(d, "profit", 0.0))
+                    rows.append((t, ticket, typ, f"{vol:.2f}", self._fmt(price, digits), f"{profit:.2f}"))
+                except Exception:
+                    continue
+            rows = sorted(rows, key=lambda x: x[0], reverse=True)[:100]
+            for r in rows:
+                self.tree_his.insert("", "end", values=r)
+        except Exception:
+            pass
+
+                      
+    def _draw_chart(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        sym = (self.symbol_var.get() or "").strip()
+        tf_code = self._mt5_tf(self.tf_var.get())
+        self.ax_price.clear()
+
+        if not sym or tf_code is None:
+            self.ax_price.set_title("Nhập Symbol và chọn TF")
+            self.canvas.draw_idle()
+            return
+
+        df = self._rates_to_df(sym, tf_code, self.n_candles_var.get())
+
+        if df.empty or len(df) < 5:
+                                                                             
+            self.ax_price.set_title(f"{sym} {self.tf_var.get()} — không có dữ liệu")
+            self.canvas.draw_idle()
+            self._update_account_info(sym)
+            self._fill_positions_table(sym)
+            self._fill_history_table(sym)
+            return
+
+        st = self._style()
+        try:
+                                      
+            mpf.plot(df, type="candle", ax=self.ax_price, style=st, show_nontrading=False)
+        except Exception:
+            self.ax_price.plot(df.index, df["Close"])
+            self.ax_price.set_title(f"{sym} {self.tf_var.get()} (simple)")
+
+                       
+        if self._ensure_mt5():
+            try:
+                import MetaTrader5 as mt5
+                info = mt5.symbol_info(sym)
+                digits = getattr(info, "digits", 5) if info else 5
+
+                poss = mt5.positions_get(symbol=sym) or []
+                for p in poss:
+                    typ_i = int(getattr(p, "type", 0))
+                    entry = float(getattr(p, "price_open", 0.0))
+                    sl = float(getattr(p, "sl", 0.0)) or None
+                    tp = float(getattr(p, "tp", 0.0)) or None
+                    col = "#22c55e" if typ_i == 0 else "#ef4444"
+                    self.ax_price.axhline(entry, color=col, ls="--", lw=1.0, alpha=0.95)
+                    if sl:
+                        self.ax_price.axhline(sl, color="#ef4444", ls=":", lw=1.0, alpha=0.85)
+                    if tp:
+                        self.ax_price.axhline(tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
+                    label = f"{'BUY' if typ_i==0 else 'SELL'} {getattr(p,'volume',0):.2f} @{self._fmt(entry, digits)}"
+                    self.ax_price.text(df.index[-1], entry, "  " + label, va="center", color=col, fontsize=8)
+
+                ords = mt5.orders_get(symbol=sym) or []
+                def _otype_txt(t):
+                    """
+                    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+                    Tham số:
+                      - t — (tự suy luận theo ngữ cảnh sử dụng).
+                    Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+                    Ghi chú:
+                      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+                    """
+                    m = {
+                        getattr(mt5, "ORDER_TYPE_BUY_LIMIT", 2):  "BUY LIMIT",
+                        getattr(mt5, "ORDER_TYPE_BUY_STOP", 4):   "BUY STOP",
+                        getattr(mt5, "ORDER_TYPE_SELL_LIMIT", 3): "SELL LIMIT",
+                        getattr(mt5, "ORDER_TYPE_SELL_STOP", 5):  "SELL STOP",
+                    }
+                    return m.get(int(t), f"TYPE {t}")
+                for o in ords:
+                    otype = int(getattr(o, "type", 0))
+                    lots  = float(getattr(o, "volume_current", 0.0))
+                    px    = float(getattr(o, "price_open", 0.0)) or float(getattr(o, "price_current", 0.0))
+                    sl    = float(getattr(o, "sl", 0.0)) or None
+                    tp    = float(getattr(o, "tp", 0.0)) or None
+                    pend_col = "#8b5cf6"
+                    self.ax_price.axhline(px, color=pend_col, ls="--", lw=1.1, alpha=0.95)
+                    txt = f"PEND {_otype_txt(otype)} {lots:.2f} @{self._fmt(px, digits)}"
+                    self.ax_price.text(df.index[-1], px, "  " + txt, va="center", color=pend_col, fontsize=8)
+                    if sl:
+                        self.ax_price.axhline(sl, color="#ef4444", ls=":", lw=1.0, alpha=0.85)
+                        self.ax_price.text(df.index[-1], sl, "  SL", va="center", color="#ef4444", fontsize=7)
+                    if tp:
+                        self.ax_price.axhline(tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
+                        self.ax_price.text(df.index[-1], tp, "  TP", va="center", color="#22c55e", fontsize=7)
+            except Exception:
+                pass
+
+        self.ax_price.set_title(f"{sym}  •  {self.tf_var.get()}  •  {len(df)} bars")
+        self.canvas.draw_idle()
+
+        self._update_account_info(sym)
+        self._fill_positions_table(sym)
+        self._fill_history_table(sym)
+
+    def _redraw_safe(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        try:
+            self._draw_chart()
+        except Exception as e:
+            try:
+                self.ax_price.clear()
+                self.ax_price.set_title(f"Chart error: {e}")
+                self.canvas.draw_idle()
+            except Exception:
+                pass
+
+    def _tick(self):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số: (không)
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        if not self._running:
+            return
+        self._redraw_safe()
+        secs = max(1, int(self.refresh_secs_var.get() or 5))
+        self._after_job = self.root.after(secs * 1000, self._tick)
+
+def main():
+    """
+    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+    Tham số: (không)
+    Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+    Ghi chú:
+      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+    """
+    root = tk.Tk()
+    app = GeminiFolderOnceApp(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
