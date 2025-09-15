@@ -78,147 +78,24 @@ except Exception:
 
 
                                                              
-SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".tif"}
-DEFAULT_MODEL = "gemini-2.5-flash"
+from gemini_folder_once.constants import (
+    SUPPORTED_EXTS,
+    DEFAULT_MODEL,
+    APP_DIR,
+    WORKSPACE_JSON,
+    API_KEY_ENC,
+    UPLOAD_CACHE_JSON,
+)
 
-APP_DIR = Path.home() / ".gemini_folder_analyze"
-APP_DIR.mkdir(parents=True, exist_ok=True)
-WORKSPACE_JSON = APP_DIR / "workspace.json"
-API_KEY_ENC = APP_DIR / "api_key.enc"
-UPLOAD_CACHE_JSON = APP_DIR / "upload_cache.json"
-
-def _xor_bytes(data: bytes, key: bytes) -> bytes:
-    """
-    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-    Tham số:
-      - data: bytes — (tự suy luận theo ngữ cảnh sử dụng).
-      - key: bytes — (tự suy luận theo ngữ cảnh sử dụng).
-    Trả về: bytes
-    Ghi chú:
-      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-    """
-    if not key:
-        return data
-    return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
-
-def _machine_key() -> bytes:
-    """
-    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-    Tham số: (không)
-    Trả về: bytes
-    Ghi chú:
-      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-    """
-    base = (os.name + os.getenv("USERNAME", "") + os.getenv("COMPUTERNAME", "") + sys.executable).encode("utf-8")
-    return hashlib.sha256(base).digest()
-
-def obfuscate_text(s: str) -> str:
-    """
-    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-    Tham số:
-      - s: str — (tự suy luận theo ngữ cảnh sử dụng).
-    Trả về: str
-    Ghi chú:
-      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-    """
-    raw = s.encode("utf-8")
-    key = _machine_key()
-    enc = _xor_bytes(raw, key)
-    return base64.urlsafe_b64encode(enc).decode("ascii")
-
-def deobfuscate_text(s: str) -> str:
-    """
-    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-    Tham số:
-      - s: str — (tự suy luận theo ngữ cảnh sử dụng).
-    Trả về: str
-    Ghi chú:
-      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-    """
-    if not s:
-        return ""
-    try:
-        enc = base64.urlsafe_b64decode(s.encode("ascii"))
-        raw = _xor_bytes(enc, _machine_key())
-        return raw.decode("utf-8")
-    except Exception:
-        return ""
+from gemini_folder_once.utils import (
+    _xor_bytes,
+    _machine_key,
+    obfuscate_text,
+    deobfuscate_text,
+)
 
                                                                          
-@dataclass(frozen=True)
-class RunConfig:
-    """
-    Lớp "RunConfig" đại diện cho một thành phần chính của ứng dụng.
-    Trách nhiệm chính:
-      - Khởi tạo UI (Notebook: Report/Prompt/Options, v.v.).
-      - Đọc/ghi workspace, cache, prompt.
-      - Quy trình phân tích 1 lần: nạp ảnh → (tối ưu/cache) upload → gọi Gemini → gom báo cáo.
-      - (Tuỳ chọn) Lấy dữ liệu MT5, tạo JSON ngữ cảnh, lọc NO-TRADE, gửi Telegram.
-      - Quản trị thread an toàn với Tkinter thông qua hàng đợi UI.
-    """
-                      
-    folder: str
-    delete_after: bool
-    max_files: int
-
-                   
-    upload_workers: int
-    cache_enabled: bool
-    optimize_lossless: bool
-    only_generate_if_changed: bool
-
-             
-    ctx_limit: int
-    create_ctx_json: bool
-    prefer_ctx_json: bool
-    ctx_json_n: int
-
-              
-    telegram_enabled: bool
-    telegram_token: str
-    telegram_chat_id: str
-    telegram_skip_verify: bool
-    telegram_ca_path: str
-
-         
-    mt5_enabled: bool
-    mt5_symbol: str
-    mt5_n_M1: int
-    mt5_n_M5: int
-    mt5_n_M15: int
-    mt5_n_H1: int
-
-              
-    nt_enabled: bool
-    nt_spread_factor: float
-    nt_min_atr_m5_pips: float
-    nt_min_ticks_per_min: int
-
-                
-    auto_trade_enabled: bool
-    trade_strict_bias: bool
-    trade_size_mode: str
-    trade_lots_total: float
-    trade_equity_risk_pct: float
-    trade_money_risk: float
-    trade_split_tp1_pct: int
-    trade_deviation_points: int
-    trade_pending_threshold_points: int
-    trade_magic: int
-    trade_comment_prefix: str
-    trade_pending_ttl_min: int
-    trade_min_rr_tp2: float
-    trade_min_dist_keylvl_pips: float
-    trade_cooldown_min: int
-    trade_dynamic_pending: bool
-    auto_trade_dry_run: bool
-    trade_move_to_be_after_tp1: bool
-    trade_trailing_atr_mult: float
-    trade_allow_session_asia: bool
-    trade_allow_session_london: bool
-    trade_allow_session_ny: bool
-    trade_news_block_before_min: int
-    trade_news_block_after_min: int                                                                              
+from gemini_folder_once.config import RunConfig
                                                                                 
 def _session_ranges(
     m1_rates,
@@ -463,18 +340,7 @@ def _value_per_point_safe(symbol: str, info_obj=None) -> float | None:
     except Exception:
         return None
 
-def _tg_html_escape(s: str) -> str:
-    """
-    Mục đích: Gửi/thử thông báo Telegram, xử lý chứng chỉ và kết quả phản hồi.
-    Tham số:
-      - s: str — (tự suy luận theo ngữ cảnh sử dụng).
-    Trả về: str
-    Ghi chú:
-      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-    """
-    if s is None:
-        return ""
-    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+from gemini_folder_once.utils import _tg_html_escape
 
                                                     
 class GeminiFolderOnceApp:
