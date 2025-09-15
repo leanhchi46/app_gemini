@@ -14,7 +14,6 @@ import base64
 import hashlib
 import queue
 import threading
-import mimetypes
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -36,17 +35,10 @@ from tkinter.scrolledtext import ScrolledText
                                                 
 HAS_MPL = False
 try:
-    import pandas as pd
-    import mplfinance as mpf
-    from matplotlib.figure import Figure
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+    import matplotlib  # type: ignore
+    import mplfinance  # type: ignore
     HAS_MPL = True
 except Exception:
-    pd = None
-    mpf = None
-    Figure = None
-    FigureCanvasTkAgg = None
-    NavigationToolbar2Tk = None
     HAS_MPL = False
 
                                        
@@ -94,8 +86,13 @@ from gemini_folder_once.utils import (
     deobfuscate_text,
 )
 
+from gemini_folder_once.telegram_client import TelegramClient, build_ssl_context
+
                                                                          
 from gemini_folder_once.config import RunConfig
+from gemini_folder_once import context_builder, report_parser
+from gemini_folder_once.chart_tab import ChartTabTV
+from gemini_folder_once import uploader
                                                                                 
 def _session_ranges(
     m1_rates,
@@ -1181,12 +1178,8 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        try:
-            if UPLOAD_CACHE_JSON.exists():
-                return json.loads(UPLOAD_CACHE_JSON.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-        return {}
+        from gemini_folder_once import uploader as _up
+        return _up.UploadCache.load()
 
     def _save_upload_cache(self, cache: dict):
         """
@@ -1197,10 +1190,8 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        try:
-            UPLOAD_CACHE_JSON.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        from gemini_folder_once import uploader as _up
+        _up.UploadCache.save(cache)
 
     def _file_sig(self, path: str) -> str:
         """
@@ -1211,17 +1202,8 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        p = Path(path)
-        try:
-            size = p.stat().st_size
-            mtime = int(p.stat().st_mtime)
-            h = hashlib.sha1()
-            with open(p, "rb") as f:
-                for chunk in iter(lambda: f.read(65536), b""):
-                    h.update(chunk)
-            return f"{size}:{mtime}:{h.hexdigest()[:16]}"
-        except Exception:
-            return ""
+        from gemini_folder_once import uploader as _up
+        return _up.UploadCache.file_sig(path)
 
     def _cache_lookup(self, cache: dict, path: str) -> str:
         """
@@ -1233,11 +1215,8 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        rec = cache.get(path)
-        if not rec:
-            return ""
-        sig_now = self._file_sig(path)
-        return rec["remote_name"] if sig_now and rec.get("sig") == sig_now else ""
+        from gemini_folder_once import uploader as _up
+        return _up.UploadCache.lookup(cache, path)
 
     def _cache_put(self, cache: dict, path: str, remote_name: str):
         """
@@ -1250,7 +1229,8 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        cache[path] = {"sig": self._file_sig(path), "remote_name": remote_name}
+        from gemini_folder_once import uploader as _up
+        _up.UploadCache.put(cache, path, remote_name)
 
                                                                      
     def _prepare_image_for_upload(self, path: str) -> str:
@@ -1262,7 +1242,8 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        return self._prepare_image_for_upload_cfg(path, optimize=bool(self.optimize_lossless_var.get()))
+        from gemini_folder_once import uploader as _up
+        return _up.prepare_image(path, optimize=bool(self.optimize_lossless_var.get()), app_dir=APP_DIR)
 
     def _prepare_image_for_upload_cfg(self, path: str, optimize: bool) -> str:
         """
@@ -1274,84 +1255,11 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        if not optimize or Image is None:
-            return path
-
-        try:
-            src = Path(path)
-            tmpdir = APP_DIR / "tmp_upload"
-            tmpdir.mkdir(parents=True, exist_ok=True)
-            out = tmpdir / (src.stem + "_opt.png")
-
-                                                                               
-            with Image.open(src) as im:
-                im.load()                                
-                                                              
-                has_alpha = (im.mode in ("RGBA", "LA")) or ("transparency" in im.info)
-                work = im.convert("RGBA") if has_alpha else im.convert("RGB")
-
-                                                                          
-            work.save(out, format="PNG", optimize=True)
-            work.close()                                     
-
-                                                                                
-            try:
-                if out.stat().st_size >= src.stat().st_size:
-                    try:
-                        out.unlink()
-                    except Exception:
-                        pass
-                    return str(src)
-            except Exception:
-                                                                          
-                try:
-                    out.unlink()
-                except Exception:
-                    pass
-                return str(src)
-
-                                          
-            return str(out)
-
-        except Exception:
-                                                  
-            return path
+        from gemini_folder_once import uploader as _up
+        return _up.prepare_image(path, optimize=bool(optimize), app_dir=APP_DIR)
 
 
                                                                   
-    def _as_inline_media_part(self, path: str) -> dict:
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số:
-          - path: str — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: dict
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        mime, _ = mimetypes.guess_type(path)
-        with open(path, "rb") as f:
-            data = f.read()
-        return {"mime_type": mime or "application/octet-stream", "data": data}
-
-    def _file_or_inline_for_model(self, file_obj, prepared_path: str | None, original_path: str) -> object:
-        """
-        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
-        Tham số:
-          - file_obj — (tự suy luận theo ngữ cảnh sử dụng).
-          - prepared_path: str | None — (tự suy luận theo ngữ cảnh sử dụng).
-          - original_path: str — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: object
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        try:
-            st = getattr(getattr(file_obj, "state", None), "name", None)
-            if st == "ACTIVE":
-                return file_obj
-        except Exception:
-            pass
-        use_path = prepared_path or original_path
-        return self._as_inline_media_part(use_path)
 
                                                                      
     def _parse_ctx_json_files(self, max_n=5, folder: str | None = None):
@@ -1426,11 +1334,8 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        names = [Path(r["path"]).name for r in self.results if r.get("path")]
-        out = {}
-        for n in names:
-            out[n] = self._detect_timeframe_from_name(n)
-        return out
+        names = [Path(r.get("path")).name for r in self.results if r.get("path")]
+        return context_builder.images_tf_map(names, self._detect_timeframe_from_name)
 
     def _folder_signature(self):
         """
@@ -1440,9 +1345,8 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        names = sorted([Path(r["path"]).name for r in self.results if r.get("path")])
-        sig = hashlib.sha1("\n".join(names).encode("utf-8")).hexdigest() if names else ""
-        return f"sha1:{sig}" if sig else ""
+        names = [Path(r.get("path")).name for r in self.results if r.get("path")]
+        return context_builder.folder_signature(names)
 
     def compose_context(self, cfg: RunConfig, budget_chars=1800):
                                                                         
@@ -1455,175 +1359,8 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        mt5_ctx_lite: dict | None = {}
-        mt5_flags: dict | None = {}
-        mt5full = None                                     
-        ctx_items = self._parse_ctx_json_files(cfg.ctx_json_n, folder=cfg.folder)
-        trend = self._summarize_checklist_trend(ctx_items)
+        return context_builder.compose_context(self, cfg, budget_chars)
 
-                                         
-        latest_7 = None
-        plan = None
-        latest_blocks = None
-        if ctx_items:
-            latest = ctx_items[0]
-            latest_7 = latest.get("seven_lines")
-            latest_blocks = latest.get("blocks") or []
-            for blk in latest_blocks:
-                try:
-                    o = json.loads(blk)
-                    if isinstance(o, dict) and "proposed_plan" in o:
-                        plan = o.get("proposed_plan")
-                        break
-                except Exception:
-                    pass
-
-                                                                                           
-        mt5_ctx_full_text = ""
-        if cfg.mt5_enabled:
-            try:
-                mt5_ctx_full_text = self._mt5_build_context(plan=plan, cfg=cfg)
-                if mt5_ctx_full_text:
-                    mt5full = (json.loads(mt5_ctx_full_text) or {}).get("MT5_DATA", {})
-                                  
-                    info = (mt5full.get("info") or {})
-                    tick = (mt5full.get("tick") or {})
-                    volATR = ((mt5full.get("volatility") or {}).get("ATR") or {})
-                    stats5 = (mt5full.get("tick_stats_5m") or {})
-                    key_near = mt5full.get("key_levels_nearby") or []
-                    pip_size = _pip_size_from_info(info)
-                    cp = tick.get("bid") or tick.get("last")
-                    atr_m5 = volATR.get("M5")
-                    tpm = stats5.get("ticks_per_min")
-                    dist_pdh = next((x.get("distance_pips") for x in key_near if x.get("name") == "PDH"), None)
-                    dist_pdl = next((x.get("distance_pips") for x in key_near if x.get("name") == "PDL"), None)
-                    dist_eq  = next((x.get("distance_pips") for x in key_near if x.get("name") == "EQ50_D"), None)
-                    session_name = None
-                    ss = mt5full.get("sessions_today") or {}
-                    now_hhmm = datetime.now().strftime("%H:%M")
-                    for k in ["asia","london","newyork_pre","newyork_post"]:
-                        rng = ss.get(k) or {}
-                        if rng.get("start") and rng.get("end") and rng["start"] <= now_hhmm < rng["end"]:
-                            session_name = k
-                            break
-                    mt5_ctx_lite = {
-                        "symbol": mt5full.get("symbol"),
-                        "current_price": cp,
-                        "spread_points": info.get("spread_current"),                                                
-                        "atr_m5_pips": (atr_m5 / pip_size) if (atr_m5 and pip_size) else None,
-                        "ticks_per_min": tpm,
-                        "pdh_pdl_distance_pips": {"PDH": dist_pdh, "PDL": dist_pdl},
-                        "eq50_d_distance_pips": dist_eq,
-                        "session_active": session_name,
-                        "mins_to_next_killzone": mt5full.get("mins_to_next_killzone"),
-                    }
-                               
-                    spread_cur = info.get("spread_current")
-                    p90 = stats5.get("p90_spread")
-                    low_liq_thr = int(cfg.nt_min_ticks_per_min)
-                    high_spread = (spread_cur is not None and p90 is not None and spread_cur > p90 * float(cfg.nt_spread_factor))
-                    low_liquidity = (tpm is not None and tpm < low_liq_thr)
-                    vol_reg = mt5full.get("volatility_regime")
-                    emaM5 = (((mt5full.get("trend_refs") or {}).get("EMA") or {}).get("M5") or {})
-                    ema50 = emaM5.get("ema50")
-                    ema200 = emaM5.get("ema200")
-                    atr_m5_safe = atr_m5 if atr_m5 is not None else 0
-                    trending = (ema50 is not None and ema200 is not None and atr_m5_safe) and (abs(ema50 - ema200) > (atr_m5_safe * 0.2))
-                                                                      
-                    mt5_flags = {
-                        "news_soon": False,
-                        "high_spread": bool(high_spread),
-                        "low_liquidity": bool(low_liquidity),
-                        "volatility_regime": vol_reg,
-                        "trend_regime": "trending" if trending else "choppy",
-                    }
-            except Exception:
-                mt5_ctx_full_text = ""
-
-                  
-        images_map = self._images_tf_map()
-        run_meta = {
-            "analysis_id": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00","Z"),
-            "folder_signature": self._folder_signature(),
-            "images_tf_map": images_map
-        }
-
-                                                         
-                                                                        
-        pass_cnt = 0; total = 0
-        for it in ctx_items:
-            blks = it.get("blocks") or []
-            for blk in blks:
-                try:
-                    o = json.loads(blk)
-                    if isinstance(o, dict) and "setup_status" in o:
-                        concl = (o.get("conclusions") or "").upper()
-                        total += 1
-                        pass_cnt += 1 if ("ĐỦ" in concl or "DU" in concl) else 0
-                        break
-                except Exception:
-                    continue
-        stats5 = (mt5full.get("tick_stats_5m") if mt5full else None) or {}
-        running_stats = {
-            "checklist_pass_ratio": (pass_cnt/total if total else None),
-            "hit_rate_high_prob": None,
-            "avg_rr_tp1": None,
-            "median_spread": stats5.get("median_spread"),
-            "median_ticks_per_min": stats5.get("ticks_per_min"),
-        }
-
-                            
-        risk_rules = {
-            "max_risk_per_trade_pct": float(cfg.trade_equity_risk_pct),
-            "daily_loss_limit_pct": 3.0,
-            "max_trades_per_day": 3,
-            "allowed_killzones": ["london", "newyork_pre", "newyork_post"],
-            "news_blackout_min_before_after": 15
-        }
-
-        composed = {
-            "CONTEXT_COMPOSED": {
-                "cycle": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "session": mt5_ctx_lite.get("session_active") if isinstance(mt5_ctx_lite, dict) else None,
-                "trend_checklist": trend,
-                "latest_plan": plan,
-                "latest_7_lines": latest_7,
-                "run_meta": run_meta,
-                "running_stats": running_stats,
-                "risk_rules": risk_rules,
-                "environment_flags": mt5_flags or None,
-                "mt5": (mt5full if mt5full else None),
-                "mt5_lite": (mt5_ctx_lite or None),
-            }
-        }
-
-                                                            
-        try:
-            self._log_trade_decision({
-                "stage": "run-start",
-                "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                                                       
-                **(composed.get("CONTEXT_COMPOSED") or {})
-            }, folder_override=(self.mt5_symbol_var.get().strip() or None))
-        except Exception:
-            pass
-
-        text = json.dumps(composed, ensure_ascii=False)
-        if len(text) <= budget_chars:
-            return text
-                                           
-        try:
-            slim = composed["CONTEXT_COMPOSED"]
-                                     
-            slim["mt5"] = None
-            text = json.dumps(composed, ensure_ascii=False)
-            if len(text) > budget_chars:
-                                         
-                slim["latest_7_lines"] = (slim.get("latest_7_lines") or [])[:3]
-                text = json.dumps(composed, ensure_ascii=False)
-        except Exception:
-            pass
-        return text[:budget_chars]
 
                                                                 
     def _pretrade_hard_filters(self, mt5_ctx: dict, cfg: RunConfig):
@@ -1819,7 +1556,7 @@ class GeminiFolderOnceApp:
                 max_workers = max(1, min(len(to_upload), int(cfg.upload_workers)))
                 with ThreadPoolExecutor(max_workers=max_workers) as ex:
                     futs = {
-                        ex.submit(self._upload_one_file_for_worker, (p, n, upath)): (i, p)
+                        ex.submit(uploader.upload_one_file_for_worker, (p, n, upath)): (i, p)
                         for (i, p, n, upath) in to_upload
                     }
                     done_cnt = 0
@@ -1875,9 +1612,9 @@ class GeminiFolderOnceApp:
                 f = file_slots[i]
                 if f is None:
                                                                                
-                    all_media.append(self._as_inline_media_part(prepared_map.get(i) or paths[i]))
+                    all_media.append(uploader.as_inline_media_part(prepared_map.get(i) or paths[i]))
                 else:
-                    all_media.append(self._file_or_inline_for_model(
+                    all_media.append(uploader.file_or_inline_for_model(
                         f,
                         prepared_map.get(i),
                         paths[i]
@@ -2061,32 +1798,10 @@ class GeminiFolderOnceApp:
 
     def _upload_one_file_for_worker(self, item):
         """
-        Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
-        Tham số:
-          - item — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        Wrapper: delegate to uploader.upload_one_file_for_worker
         """
-        p, n, upath = item
-        mime, _ = mimetypes.guess_type(upath)
-        uf = genai.upload_file(path=upath, mime_type=mime or "application/octet-stream", display_name=n)
-        retries, delay = 10, 0.6
-        while retries > 0:
-            try:
-                f = genai.get_file(uf.name)
-                st = getattr(getattr(f, "state", None), "name", None)
-                if st == "ACTIVE":
-                    return (p, f)
-                if st == "FAILED":
-                    raise RuntimeError("File ở trạng thái FAILED.")
-            except Exception:
-                if retries <= 1:
-                    raise
-            time.sleep(delay)
-            retries -= 1
-            delay = min(delay * 1.5, 3.0)
-                                                                          
+        from gemini_folder_once import uploader as _up
+        return _up.upload_one_file_for_worker(item)
         return (p, uf)
 
     def _quick_be_trailing_sweep(self, cfg: RunConfig):
@@ -2166,9 +1881,9 @@ class GeminiFolderOnceApp:
         """
         Mục đích: Khởi tạo SSLContext (UI-based) qua helper hợp nhất.
         """
-        cafile = (self.telegram_ca_path_var.get() or "").strip()
+        cafile = (self.telegram_ca_path_var.get() or "").strip() or None
         skip = bool(self.telegram_skip_verify_var.get())
-        return self._create_ssl_context(cafile or None, skip)
+        return build_ssl_context(cafile, skip)
     def _create_ssl_context(self, cafile: str | None, skip_verify: bool) -> ssl.SSLContext:
         """
         Mục đích: Tạo SSLContext hợp nhất (dùng chung cho Telegram/FF), giảm trùng lặp.
@@ -2177,19 +1892,7 @@ class GeminiFolderOnceApp:
         - skip_verify: bool — bỏ kiểm chứng chứng chỉ.
         Trả về: ssl.SSLContext
         """
-        try:
-            if cafile:
-                ctx = ssl.create_default_context(cafile=cafile)
-            elif certifi is not None:
-                ctx = ssl.create_default_context(cafile=certifi.where())
-            else:
-                ctx = ssl.create_default_context()
-        except Exception:
-            ctx = ssl.create_default_context()
-        if skip_verify:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-        return ctx
+        return build_ssl_context(cafile, skip_verify)
 
     def _telegram_api_call(self, method: str, params: dict, use_get_fallback: bool = True, timeout: int = 15):
         """
@@ -2203,57 +1906,14 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        token = self.telegram_token_var.get().strip()
-        if not token:
-            return False, {"error": "missing_token"}
-        base = f"https://api.telegram.org/bot{token}/{method}"
-        data = urllib.parse.urlencode(params).encode("utf-8")
-        ctx = self._build_ssl_context()
-        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
-        try:
-            req = urllib.request.Request(base, data=data)
-            with opener.open(req, timeout=timeout) as resp:
-                body = resp.read().decode("utf-8", errors="ignore")
-                obj = None
-                if body.startswith("{"):
-                    try:
-                        obj = json.loads(body)
-                    except json.JSONDecodeError:
-                        obj = None
-                if obj is None:
-                    obj = {"ok": resp.status == 200, "body": body}
-                ok = bool(obj.get("ok", resp.status == 200))
-                return ok, obj
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else str(e)
-            if not use_get_fallback:
-                return False, {"error": f"HTTP {e.code}", "body": body}
-        except urllib.error.URLError as e:
-            if not use_get_fallback:
-                return False, {"error": f"URLError: {getattr(e, 'reason', e)}"}
-        except json.JSONDecodeError as e:
-            if not use_get_fallback:
-                return False, {"error": f"JSONDecodeError: {e}"}
-                      
-        try:
-            url = base + "?" + urllib.parse.urlencode(params)
-            with opener.open(url, timeout=timeout) as resp:
-                body = resp.read().decode("utf-8", errors="ignore")
-                obj = None
-                if body.startswith("{"):
-                    try:
-                        obj = json.loads(body)
-                    except json.JSONDecodeError:
-                        obj = None
-                if obj is None:
-                    obj = {"ok": resp.status == 200, "body": body}
-                ok = bool(obj.get("ok", resp.status == 200))
-                return ok, obj
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else str(e)
-            return False, {"error": f"HTTP {e.code}", "body": body}
-        except Exception as e:
-            return False, {"error": str(e)}
+        client = TelegramClient(
+            token=(self.telegram_token_var.get() or "").strip(),
+            chat_id=(self.telegram_chat_id_var.get() or "").strip() or None,
+            ca_path=(self.telegram_ca_path_var.get() or "").strip() or None,
+            skip_verify=bool(self.telegram_skip_verify_var.get()),
+            timeout=timeout,
+        )
+        return client.api_call(method, params, use_get_fallback=use_get_fallback)
 
     def _build_telegram_message(self, seven_lines, saved_report_path, folder_override: str | None = None):
         """
@@ -2308,19 +1968,9 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        try:
-            if cfg.telegram_ca_path:
-                ctx = ssl.create_default_context(cafile=cfg.telegram_ca_path)
-            elif certifi is not None:
-                ctx = ssl.create_default_context(cafile=certifi.where())
-            else:
-                ctx = ssl.create_default_context()
-        except Exception:
-            ctx = ssl.create_default_context()
-        if cfg.telegram_skip_verify:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-        return ctx
+        cafile = cfg.telegram_ca_path or None
+        skip = bool(getattr(cfg, "telegram_skip_verify", False))
+        return build_ssl_context(cafile, skip)
 
     def _telegram_api_call_from_cfg(self, cfg: RunConfig, method: str, params: dict, timeout: int = 15):
         """
@@ -2334,44 +1984,8 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        token = cfg.telegram_token
-        if not token:
-            return False, {"error": "missing_token"}
-        base = f"https://api.telegram.org/bot{token}/{method}"
-        data = urllib.parse.urlencode(params).encode("utf-8")
-        ctx = self._build_ssl_context_from_cfg(cfg)
-        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
-        try:
-            req = urllib.request.Request(base, data=data)
-            with opener.open(req, timeout=timeout) as resp:
-                body = resp.read().decode("utf-8", errors="ignore")
-                obj = None
-                if body.startswith("{"):
-                    try:
-                        obj = json.loads(body)
-                    except json.JSONDecodeError:
-                        obj = None
-                if obj is None:
-                    obj = {"ok": resp.status == 200, "body": body}
-                ok = bool(obj.get("ok", resp.status == 200))
-                return ok, obj
-        except Exception:
-            try:
-                url = base + "?" + urllib.parse.urlencode(params)
-                with opener.open(url, timeout=timeout) as resp:
-                    body = resp.read().decode("utf-8", errors="ignore")
-                    obj = None
-                if body.startswith("{"):
-                    try:
-                        obj = json.loads(body)
-                    except json.JSONDecodeError:
-                        obj = None
-                if obj is None:
-                    obj = {"ok": resp.status == 200, "body": body}
-                    ok = bool(obj.get("ok", resp.status == 200))
-                    return ok, obj
-            except Exception as e2:
-                return False, {"error": str(e2)}
+        client = TelegramClient.from_config(cfg, timeout=timeout)
+        return client.api_call(method, params)
 
     def _send_telegram_message_from_cfg(self, text: str, cfg: RunConfig) -> bool:
         """
@@ -2402,6 +2016,22 @@ class GeminiFolderOnceApp:
             self.ui_status("Đã gửi Telegram.")
         return ok
 
+    def _send_telegram_message_from_cfg2(self, text: str, cfg: RunConfig) -> bool:
+        """
+        Gửi Telegram dùng TelegramClient (module), kèm phản hồi UI.
+        """
+        if not cfg.telegram_enabled:
+            return False
+        client = TelegramClient.from_config(cfg)
+        ok, payload = client.send_message(text)
+        if not ok:
+            desc = payload.get("description") or payload.get("body") or payload.get("error", "unknown")
+            self.ui_status(f"Telegram lỗi: {desc}")
+            self.ui_message("error", "Telegram", f"Gửi thất bại:\n{desc}")
+        else:
+            self.ui_status("Đã gửi Telegram.")
+        return ok
+
     def _send_telegram_message(self, text: str) -> bool:
         """
         Mục đích: Gửi/thử thông báo Telegram, xử lý chứng chỉ và kết quả phản hồi.
@@ -2421,7 +2051,13 @@ class GeminiFolderOnceApp:
         if len(text) > max_len:
             text = text[:max_len] + "\n… (đã rút gọn)"
         params = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-        ok, payload = self._telegram_api_call("sendMessage", params)
+        client = TelegramClient(
+            token=(self.telegram_token_var.get() or "").strip(),
+            chat_id=(self.telegram_chat_id_var.get() or "").strip() or None,
+            ca_path=(self.telegram_ca_path_var.get() or "").strip() or None,
+            skip_verify=bool(self.telegram_skip_verify_var.get()),
+        )
+        ok, payload = client.send_message(text)
         if not ok:
             desc = payload.get("description") or payload.get("body") or payload.get("error", "unknown")
             self.ui_status(f"Telegram lỗi: {desc}")
@@ -2447,18 +2083,24 @@ class GeminiFolderOnceApp:
         if not token or not chat_id:
             self.ui_message("warning", "Telegram", "Hãy nhập Bot Token và Chat ID.")
             return
-        ok, p = self._telegram_api_call("getMe", {}, use_get_fallback=False)
+        client = TelegramClient(
+            token=token,
+            chat_id=chat_id,
+            ca_path=(self.telegram_ca_path_var.get() or "").strip() or None,
+            skip_verify=bool(self.telegram_skip_verify_var.get()),
+        )
+        ok, p = client.api_call("getMe", {}, use_get_fallback=False)
         if not ok:
             desc = p.get("description") or p.get("body") or p.get("error", "unknown")
             self.ui_message("error", "Telegram", f"getMe lỗi — kiểm tra Token:\n{desc}")
             return
-        ok, p = self._telegram_api_call("getChat", {"chat_id": chat_id}, use_get_fallback=False)
+        ok, p = client.api_call("getChat", {"chat_id": chat_id}, use_get_fallback=False)
         if not ok:
             desc = p.get("description") or p.get("body") or p.get("error", "unknown")
             tip = "\n\nGợi ý:\n• Nếu chat cá nhân: phải nhắn /start cho bot trước.\n• Nếu nhóm: chat_id là số âm và bot phải được thêm."
             self.ui_message("error", "Telegram", f"getChat lỗi — kiểm tra Chat ID:{tip}\n\nChi tiết:\n{desc}")
             return
-        ok = self._send_telegram_message("🔔 Test từ Gemini Analyzer: kết nối thành công!")
+        ok, _ = client.send_message("🔔 Test từ Gemini Analyzer: kết nối thành công!")
         if ok:
             self.ui_message("info", "Telegram", "Đã gửi thử thành công.")
 
@@ -2471,8 +2113,7 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        if not combined_text:
-            return None, None, False
+        return report_parser.extract_seven_lines(combined_text)
         lines = [ln.strip() for ln in combined_text.strip().splitlines() if ln.strip()]
         start_idx = None
         for i, ln in enumerate(lines[:20]):
@@ -2532,8 +2173,8 @@ class GeminiFolderOnceApp:
         if sig == self._last_telegram_signature:
             return
         self._last_telegram_signature = sig
-        msg = self._build_telegram_message(lines, saved_report_path, folder_override=cfg.folder)
-        self._send_telegram_message_from_cfg(msg, cfg)
+        msg = TelegramClient.build_message(lines, saved_report_path, folder=cfg.folder)
+        self._send_telegram_message_from_cfg2(msg, cfg)
 
                                                                         
                                           
@@ -2547,8 +2188,7 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        if start_idx < 0 or start_idx >= len(text) or text[start_idx] != "{":
-            return None, None
+        return report_parser.find_balanced_json_after(text, start_idx)
         depth, i = 0, start_idx
         while i < len(text):
             ch = text[i]
@@ -2570,9 +2210,7 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        import re, json
-        if not text:
-            return None
+        return report_parser.extract_json_block_prefer(text)
 
                                        
         fence = re.findall(r"```json\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
@@ -2621,7 +2259,7 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        import math
+        return report_parser.coerce_setup_from_json(obj)
         if obj is None:
             return None
                                       
@@ -2697,14 +2335,7 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        if s is None:
-            return None
-        s = s.replace(",", "").strip()
-                                                                  
-        s = re.sub(r"^\s*\d+\s*[\.\)\-–:]\s*", "", s)
-                                                              
-        nums = re.findall(r"[-+]?\d+(?:\.\d+)?", s)
-        return float(nums[-1]) if nums else None
+        return report_parser.parse_float(s)
 
     def _parse_direction_from_line1(self, line1: str):
         """
@@ -2715,14 +2346,7 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        if not line1:
-            return None
-        s = line1.lower()
-        if "mua" in s or "long" in s:
-            return "long"
-        if "bán" in s or "short" in s:
-            return "short"
-        return None
+        return report_parser.parse_direction_from_line1(line1)
 
     def _parse_setup_from_report(self, text: str):
         """
@@ -2733,7 +2357,7 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        import re, json, math
+        return report_parser.parse_setup_from_report(text)
         out = {
             "direction": None, "entry": None, "sl": None, "tp1": None, "tp2": None,
             "bias_h1": None, "enough": False
@@ -2884,14 +2508,6 @@ class GeminiFolderOnceApp:
         enough = bool(setup["enough"])
 
                        
-        if not enough:
-            self.ui_status("Auto-Trade: không phải thiết lập xác suất cao.")
-            try:
-                self._log_trade_decision({
-                    "stage": "Kiểm_tra_trước-fail", "reason": "Không_có_khả_năng_cao"
-                }, folder_override=(self.mt5_symbol_var.get().strip() or None))
-            except Exception: pass
-            return
         if direction not in ("long", "short"):
             self.ui_status("Auto-Trade: thiếu hướng lệnh.")
             try:
@@ -2904,154 +2520,12 @@ class GeminiFolderOnceApp:
                 self.ui_status("Auto-Trade: bỏ qua vì NGƯỢC bias H1.")
                 try:
                     self._log_trade_decision({
-                        "stage":"Kiểm_tra_trước-fail","reason":"Ngược_bias_h1",
+                        "stage":"Ki?m_tra_tru?c-fail","reason":"Ngu?c_bias_h1",
                         "bias_h1": bias, "dir": direction
                     }, folder_override=(self.mt5_symbol_var.get().strip() or None))
-                except Exception: pass
+                except Exception:
+                    pass
                 return
-
-                   
-        if mt5_ctx and not self._allowed_session_now(mt5_ctx, cfg):
-            self.ui_status("Auto-Trade: lọc phiên — hiện không nằm trong phiên cho phép.")
-            try:
-                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"Ngoài_phiên_giao_dịch"},
-                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
-            except Exception: pass
-            return
-
-                                                            
-        block, why = self._within_news_block_window_ff_from_cfg(cfg, cfg.trade_news_block_before_min, cfg.trade_news_block_after_min)
-        if block:
-            self.ui_status(f"Auto-Trade: gần giờ tin (High, FF) — {why} — tạm dừng.")
-            return
-
-        sym = (cfg.mt5_symbol or "").strip()
-        if not sym:
-            self.ui_status("Auto-Trade: thiếu Symbol MT5.")
-            try:
-                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"Thiếu_symbol"},
-                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
-            except Exception: pass
-            return
-
-                    
-        if not self.mt5_initialized:
-            self._mt5_connect()
-            if not self.mt5_initialized:
-                self.ui_status("Auto-Trade: không thể kết nối MT5.")
-                try:
-                    self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"mt5_connect_fail"},
-                                             folder_override=(self.mt5_symbol_var.get().strip() or None))
-                except Exception: pass
-                return
-
-        info = mt5.symbol_info(sym)
-        if not info:
-            self.ui_status("Auto-Trade: symbol không hợp lệ.")
-            try:
-                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"Symbol_không_hợp_lệ","sym":sym},
-                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
-            except Exception: pass
-            return
-        if not info.visible:
-            mt5.symbol_select(sym, True)
-
-        acc = mt5.account_info()
-        if not acc:
-            self.ui_status("Auto-Trade: không đọc được account info.")
-            try:
-                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"no_account_info","sym":sym},
-                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
-            except Exception: pass
-            return
-
-        tick = mt5.symbol_info_tick(sym)
-        if not tick:
-            self.ui_status("Auto-Trade: không có tick hiện tại.")
-            try:
-                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"no_tick","sym":sym},
-                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
-            except Exception: pass
-            return
-
-        point = info.point or 0.0001
-        digits = info.digits or 5
-        bid = float(getattr(tick, "bid", 0.0))
-        ask = float(getattr(tick, "ask", 0.0))
-        cp = ask if direction == "long" else bid
-
-                                            
-        if entry is None: entry = cp
-        
-                                                                                  
-                                             
-                                                                  
-        if any(v is None for v in (entry, sl, tp1, tp2)):
-            self.ui_status("Auto-Trade: thiếu giá — bỏ qua.")
-            try:
-                self._log_trade_decision({
-                    "stage": "Kiểm_tra_trước-fail", "reason": "Thiếu_prices",
-                    "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2
-                }, folder_override=(self.mt5_symbol_var.get().strip() or None))
-            except Exception: pass
-            return
-
-                                      
-        try:
-            if direction == "long":
-                if not (sl < entry < tp1 <= tp2):
-                    self.ui_status("Auto-Trade: giá LONG không hợp lệ (thứ tự).")
-                    try:
-                        self._log_trade_decision({
-                            "stage": "Kiểm_tra_trước-fail", "reason": "giá_LONG_không_hợp_lệ",
-                            "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2
-                        }, folder_override=(self.mt5_symbol_var.get().strip() or None))
-                    except Exception: pass
-                    return
-            else:         
-                if not (tp2 <= tp1 < entry < sl):
-                    self.ui_status("Auto-Trade: giá SHORT không hợp lệ (thứ tự).")
-                    try:
-                        self._log_trade_decision({
-                            "stage": "Kiểm_tra_trước-fail", "reason": "giá_SHORT_không_hợp_lệ",
-                            "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2
-                        }, folder_override=(self.mt5_symbol_var.get().strip() or None))
-                    except Exception: pass
-                    return
-        except Exception:
-            self.ui_status("Auto-Trade: lỗi kiểm tra tính hợp lệ giá.")
-            try:
-                self._log_trade_decision({"stage":"Kiểm_tra_trước-fail","reason":"Lỗi_xác_thực_giá"},
-                                         folder_override=(self.mt5_symbol_var.get().strip() or None))
-            except Exception: pass
-            return
-
-                                                              
-        try:
-            max_points_away = 10000                                                
-            if point and abs(entry - cp) / point > max_points_away:
-                self.ui_status("Auto-Trade: entry quá xa giá thị trường — nghi ngờ parse sai, bỏ qua.")
-                try:
-                    self._log_trade_decision({
-                        "stage": "Kiểm_tra_trước-fail", "reason": "Entry_quá_xa_giá_thị_trường",
-                        "sym": sym, "dir": direction, "entry": entry, "cp": cp, "point": point,
-                        "max_points_away": max_points_away
-                    }, folder_override=(self.mt5_symbol_var.get().strip() or None))
-                except Exception: pass
-                return
-        except Exception:
-            pass
-        if sl is None or tp1 is None or tp2 is None:
-            self.ui_status("Auto-Trade: thiếu SL/TP — không vào lệnh.")
-            try:
-                self._log_trade_decision({
-                    "stage": "Kiểm_tra_trước-fail", "reason": "Thiếu_SL/TP—không_vào_lệnh",
-                    "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2
-                }, folder_override=(self.mt5_symbol_var.get().strip() or None))
-            except Exception: pass
-            return
-
-                                               
         rr2 = self._calc_rr(entry, sl, tp2)
         if rr2 is not None and rr2 < float(cfg.trade_min_rr_tp2):
             self.ui_status(f"Auto-Trade: RR TP2 {rr2:.2f} < min.")
@@ -5971,668 +5445,6 @@ class GeminiFolderOnceApp:
         except Exception as e:
             self.ui_message("error", "Workspace", str(e))
 
-                                                        
-class ChartTabTV:
-    """
-    Lớp "ChartTabTV" đại diện cho một thành phần chính của ứng dụng.
-    Trách nhiệm chính:
-      - Khởi tạo UI (Notebook: Report/Prompt/Options, v.v.).
-      - Đọc/ghi workspace, cache, prompt.
-      - Quy trình phân tích 1 lần: nạp ảnh → (tối ưu/cache) upload → gọi Gemini → gom báo cáo.
-      - (Tuỳ chọn) Lấy dữ liệu MT5, tạo JSON ngữ cảnh, lọc NO-TRADE, gửi Telegram.
-      - Quản trị thread an toàn với Tkinter thông qua hàng đợi UI.
-    """
-    def __init__(self, app, notebook):
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số:
-          - app — (tự suy luận theo ngữ cảnh sử dụng).
-          - notebook — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        self.app = app
-        self.root = app.root
-
-                             
-        self.symbol_var = tk.StringVar(value="XAUUSD")                       
-        self.tf_var = tk.StringVar(value="M1")
-        self.n_candles_var = tk.IntVar(value=100)
-        self.refresh_secs_var = tk.IntVar(value=1)
-
-        self._after_job = None
-        self._running = False
-
-                           
-        self.tab = ttk.Frame(notebook, padding=8)
-        notebook.add(self.tab, text="Chart")
-
-        self.tab.rowconfigure(1, weight=1)
-        self.tab.columnconfigure(0, weight=2)
-        self.tab.columnconfigure(1, weight=1)
-
-                                      
-        ctrl = ttk.Frame(self.tab)
-        ctrl.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
-        for i in range(10):
-            ctrl.columnconfigure(i, weight=0)
-        ctrl.columnconfigure(9, weight=1)
-
-        ttk.Label(ctrl, text="Symbol:").grid(row=0, column=0, sticky="w")
-
-                                        
-        self.cbo_symbol = ttk.Combobox(
-            ctrl, width=16, textvariable=self.symbol_var, state="normal", values=[]
-        )
-        self.cbo_symbol.grid(row=0, column=1, sticky="w", padx=(4, 10))
-        self.cbo_symbol.bind("<<ComboboxSelected>>", lambda e: self._redraw_safe())
-        self._populate_symbol_list()                                        
-
-        ttk.Label(ctrl, text="TF:").grid(row=0, column=2, sticky="w")
-        self.cbo_tf = ttk.Combobox(
-            ctrl, width=6, state="readonly",
-            values=["M1", "M5", "M15", "H1", "H4", "D1"], textvariable=self.tf_var
-        )
-        self.cbo_tf.grid(row=0, column=3, sticky="w", padx=(4, 10))
-        self.cbo_tf.bind("<<ComboboxSelected>>", lambda e: self._redraw_safe())
-
-        ttk.Label(ctrl, text="Số nến:").grid(row=0, column=4, sticky="w")
-        ttk.Spinbox(ctrl, from_=50, to=5000, textvariable=self.n_candles_var, width=8,
-                    command=self._redraw_safe).grid(row=0, column=5, sticky="w", padx=(4, 10))
-
-        ttk.Label(ctrl, text="Làm mới (s):").grid(row=0, column=6, sticky="w")
-        ttk.Spinbox(ctrl, from_=1, to=3600, textvariable=self.refresh_secs_var, width=6)\
-            .grid(row=0, column=7, sticky="w", padx=(4, 10))
-
-                                                               
-                                                                                 
-        self.btn_start = ttk.Button(ctrl, text="► Start", command=self.start)
-        self.btn_start.grid(row=0, column=8, sticky="w")
-        self.btn_stop = ttk.Button(ctrl, text="□ Stop", command=self.stop, state="disabled")
-        self.btn_stop.grid(row=0, column=9, sticky="w", padx=(6, 10))
-        try:
-            self.btn_start.grid_remove()
-            self.btn_stop.grid_remove()
-        except Exception:
-            pass
-
-                                                                  
-                                                                         
-        self.root.after(200, self.start)
-
-                                                                 
-
-                                                            
-        chart_wrap = ttk.Frame(self.tab)
-        chart_wrap.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
-        chart_wrap.rowconfigure(1, weight=1)
-        chart_wrap.columnconfigure(0, weight=1)
-
-                                                                                                               
-        self.fig = Figure(figsize=(6, 4), dpi=100, constrained_layout=False)
-        self.ax_price = self.fig.add_subplot(1, 1, 1)
-
-        self.canvas = FigureCanvasTkAgg(self.fig, master=chart_wrap)
-        self.canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew")
-
-                            
-        try:
-            from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
-            tb_frame = ttk.Frame(chart_wrap)
-            tb_frame.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-            self.toolbar = NavigationToolbar2Tk(self.canvas, tb_frame)
-            self.toolbar.update()
-        except Exception:
-            self.toolbar = None
-
-                       
-        acc_box = ttk.LabelFrame(self.tab, text="Account info", padding=8)
-        acc_box.grid(row=1, column=1, sticky="nsew")
-        for i in range(2):
-            acc_box.columnconfigure(i, weight=1)
-
-        self.acc_balance = tk.StringVar(value="-")
-        self.acc_equity = tk.StringVar(value="-")
-        self.acc_margin = tk.StringVar(value="-")
-        self.acc_leverage = tk.StringVar(value="-")
-        self.acc_currency = tk.StringVar(value="-")
-        self.acc_status = tk.StringVar(value="Chưa kết nối MT5")
-
-        ttk.Label(acc_box, text="Balance:").grid(row=0, column=0, sticky="w")
-        ttk.Label(acc_box, textvariable=self.acc_balance).grid(row=0, column=1, sticky="e")
-        ttk.Label(acc_box, text="Equity:").grid(row=1, column=0, sticky="w")
-        ttk.Label(acc_box, textvariable=self.acc_equity).grid(row=1, column=1, sticky="e")
-        ttk.Label(acc_box, text="Free margin:").grid(row=2, column=0, sticky="w")
-        ttk.Label(acc_box, textvariable=self.acc_margin).grid(row=2, column=1, sticky="e")
-        ttk.Label(acc_box, text="Leverage:").grid(row=3, column=0, sticky="w")
-        ttk.Label(acc_box, textvariable=self.acc_leverage).grid(row=3, column=1, sticky="e")
-        ttk.Label(acc_box, text="Currency:").grid(row=4, column=0, sticky="w")
-        ttk.Label(acc_box, textvariable=self.acc_currency).grid(row=4, column=1, sticky="e")
-        ttk.Separator(acc_box, orient="horizontal").grid(row=5, column=0, columnspan=2, sticky="ew", pady=6)
-        ttk.Label(acc_box, textvariable=self.acc_status, foreground="#666").grid(row=6, column=0, columnspan=2, sticky="w")
-
-                                                  
-        grids = ttk.Frame(self.tab)
-        grids.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
-        grids.columnconfigure(0, weight=1)
-        grids.columnconfigure(1, weight=1)
-        grids.rowconfigure(0, weight=1)
-
-                                              
-        pos_box = ttk.LabelFrame(grids, text="Open positions", padding=6)
-        pos_box.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-        pos_box.rowconfigure(0, weight=1)
-        pos_box.columnconfigure(0, weight=1)
-
-        self.pos_cols = ("ticket", "type", "lots", "price", "sl", "tp", "pnl")
-        self.tree_pos = ttk.Treeview(pos_box, columns=self.pos_cols, show="headings", height=6)
-        for c, w in zip(self.pos_cols, (90, 110, 70, 110, 110, 110, 100)):
-            self.tree_pos.heading(c, text=c.upper())
-            self.tree_pos.column(c, width=w, anchor="e" if c in ("lots", "price", "sl", "tp", "pnl") else "w")
-        self.tree_pos.grid(row=0, column=0, sticky="nsew")
-        scr1 = ttk.Scrollbar(pos_box, orient="vertical", command=self.tree_pos.yview)
-        self.tree_pos.configure(yscrollcommand=scr1.set)
-        scr1.grid(row=0, column=1, sticky="ns")
-
-                 
-        his_box = ttk.LabelFrame(grids, text="History (deals gần nhất)", padding=6)
-        his_box.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        his_box.rowconfigure(0, weight=1)
-        his_box.columnconfigure(0, weight=1)
-        self.his_cols = ("time", "ticket", "type", "volume", "price", "profit")
-        self.tree_his = ttk.Treeview(his_box, columns=self.his_cols, show="headings", height=6)
-        for c, w in zip(self.his_cols, (140, 90, 70, 80, 110, 100)):
-            self.tree_his.heading(c, text=c.upper())
-            self.tree_his.column(c, width=w, anchor="e" if c in ("volume", "price", "profit") else "w")
-        self.tree_his.grid(row=0, column=0, sticky="nsew")
-        scr2 = ttk.Scrollbar(his_box, orient="vertical", command=self.tree_his.yview)
-        self.tree_his.configure(yscrollcommand=scr2.set)
-        scr2.grid(row=0, column=1, sticky="ns")
-
-                    
-        self._redraw_safe()
-
-                                 
-    def start(self):
-        """
-        Mục đích: Bắt đầu quy trình chính (khởi tạo trạng thái, đọc cấu hình, chạy tác vụ nền).
-        Tham số: (không)
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        if self._running:
-            return
-        self._running = True
-        self.btn_start.configure(state="disabled")
-        self.btn_stop.configure(state="normal")
-        self._tick()
-
-    def stop(self):
-        """
-        Mục đích: Dừng quy trình đang chạy một cách an toàn (đặt cờ, giải phóng tài nguyên, cập nhật UI).
-        Tham số: (không)
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        self._running = False
-        if self._after_job:
-            self.root.after_cancel(self._after_job)
-            self._after_job = None
-        self.btn_start.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
-
-                         
-    def _populate_symbol_list(self):
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số: (không)
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        try:
-            if not self._ensure_mt5(want_account=False):
-                return
-            import MetaTrader5 as mt5
-            syms = mt5.symbols_get()
-            names = sorted([s.name for s in syms]) if syms else []
-            if names:
-                self.cbo_symbol["values"] = names
-                                                                                 
-                if "XAUUSD" in names:
-                    self.symbol_var.set("XAUUSD")
-        except Exception:
-            pass
-
-
-    def _mt5_tf(self, tf_str: str):
-        """
-        Mục đích: Tương tác với MetaTrader 5 (kết nối, lấy dữ liệu nến, tính toán chỉ số, snapshot...).
-        Tham số:
-          - tf_str: str — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        try:
-            import MetaTrader5 as mt5
-        except Exception:
-            return None
-        mapping = {
-            "M1": mt5.TIMEFRAME_M1,
-            "M5": mt5.TIMEFRAME_M5,
-            "M15": mt5.TIMEFRAME_M15,
-            "H1": mt5.TIMEFRAME_H1,
-            "H4": mt5.TIMEFRAME_H4,
-            "D1": mt5.TIMEFRAME_D1,
-        }
-        return mapping.get(tf_str.upper(), mt5.TIMEFRAME_M5)
-
-    def _ensure_mt5(self, *, want_account: bool = True) -> bool:
-        """
-        Mục đích: Tương tác với MetaTrader 5 (kết nối, lấy dữ liệu nến, tính toán chỉ số, snapshot...).
-        Tham số: (không)
-        Trả về: bool
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        try:
-            import MetaTrader5 as mt5
-        except Exception:
-            self.acc_status.set("Chưa cài MetaTrader5 (pip install MetaTrader5)")
-            return False
-
-                                                         
-        if getattr(self.app, "mt5_initialized", False):
-            if want_account and mt5.account_info() is None:
-                self.acc_status.set("MT5: chưa đăng nhập (account_info=None)")
-                return False
-            return True
-
-                                                             
-        if getattr(self.app, "mt5_enabled_var", None) and self.app.mt5_enabled_var.get():
-            try:
-                self.app._mt5_connect()
-            except Exception:
-                pass
-            if getattr(self.app, "mt5_initialized", False):
-                if want_account and mt5.account_info() is None:
-                    self.acc_status.set("MT5: chưa đăng nhập (account_info=None)")
-                    return False
-                return True
-
-                                
-        if not mt5.initialize():
-            code, msg = mt5.last_error()
-            self.acc_status.set(f"MT5 init fail: {code} {msg}")
-            return False
-
-        if want_account and mt5.account_info() is None:
-            code, msg = mt5.last_error()
-            self.acc_status.set(f"MT5: chưa đăng nhập (account_info=None). last_error={code} {msg}")
-            return False
-
-        return True
-
-
-    def _rates_to_df(self, symbol, tf_code, count: int):
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số:
-          - symbol — (tự suy luận theo ngữ cảnh sử dụng).
-          - tf_code — (tự suy luận theo ngữ cảnh sử dụng).
-          - count: int — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        if not self._ensure_mt5():
-            return pd.DataFrame()
-        import MetaTrader5 as mt5
-        try:
-            if not symbol:
-                self.acc_status.set("Symbol rỗng")
-                return pd.DataFrame()
-
-            info = mt5.symbol_info(symbol)
-            if info is None:
-                self.acc_status.set(f"Symbol không tồn tại trong MT5: {symbol}")
-                return pd.DataFrame()
-            if not info.visible:
-                mt5.symbol_select(symbol, True)
-
-            count = max(50, int(count or 300))
-            arr = mt5.copy_rates_from_pos(symbol, tf_code, 0, count)
-            if arr is None or len(arr) == 0:
-                code, msg = mt5.last_error()
-                self.acc_status.set(f"Không lấy được rates ({symbol}). last_error={code} {msg}")
-                return pd.DataFrame()
-
-            df = pd.DataFrame(arr)
-            df["time"] = pd.to_datetime(df["time"], unit="s")
-            df.set_index("time", inplace=True)
-            df.rename(columns={
-                "open": "Open", "high": "High", "low": "Low", "close": "Close",
-                "tick_volume": "Volume"
-            }, inplace=True)
-            if "Volume" not in df.columns:
-                df["Volume"] = df.get("real_volume", 0) if "real_volume" in df.columns else 0
-            for c in ("Open", "High", "Low", "Close", "Volume"):
-                if c in df.columns:
-                    df[c] = pd.to_numeric(df[c], errors="coerce")
-            df.dropna(subset=["Open", "High", "Low", "Close"], inplace=True)
-            return df.tail(count)
-        except Exception as e:
-            self.acc_status.set(f"Lỗi xử lý rates: {e}")
-            return pd.DataFrame()
-
-    def _style(self):
-                                          
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số: (không)
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        try:
-            return mpf.make_mpf_style(base_mpf_style="yahoo")
-        except Exception:
-            return mpf.make_mpf_style(base_mpf_style="classic")
-
-    def _fmt(self, x, digits=5):
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số:
-          - x — (tự suy luận theo ngữ cảnh sử dụng).
-          - digits — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        try:
-            return f"{float(x):.{digits}f}"
-        except Exception:
-            return str(x)
-
-    def _update_account_info(self, symbol: str):
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số:
-          - symbol: str — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        if not self._ensure_mt5():
-            return
-        import MetaTrader5 as mt5
-        try:
-            acc = mt5.account_info()
-            if acc:
-                self.acc_balance.set(self._fmt(acc.balance, 2))
-                self.acc_equity.set(self._fmt(acc.equity, 2))
-                self.acc_margin.set(self._fmt(acc.margin_free, 2))
-                self.acc_leverage.set(str(getattr(acc, "leverage", "")))
-                self.acc_currency.set(getattr(acc, "currency", "") or "-")
-                self.acc_status.set(f"OK • {symbol} • {self.tf_var.get()}")
-            else:
-                self.acc_status.set("Không đọc được account info")
-        except Exception:
-            self.acc_status.set("Lỗi đọc account info")
-
-    def _fill_positions_table(self, symbol: str):
-                                       
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số:
-          - symbol: str — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        for i in self.tree_pos.get_children():
-            self.tree_pos.delete(i)
-        if not self._ensure_mt5():
-            return
-        import MetaTrader5 as mt5
-        try:
-            info = mt5.symbol_info(symbol)
-            digits = getattr(info, "digits", 5) if info else 5
-            rows = []
-
-                                
-            poss = mt5.positions_get(symbol=symbol) or []
-            for p in poss:
-                typ = "BUY" if int(getattr(p, "type", 0)) == 0 else "SELL"
-                lots = float(getattr(p, "volume", 0.0))
-                price = float(getattr(p, "price_open", 0.0))
-                sl = float(getattr(p, "sl", 0.0)) or 0.0
-                tp = float(getattr(p, "tp", 0.0)) or 0.0
-                pnl = float(getattr(p, "profit", 0.0))
-                rows.append((
-                    int(getattr(p, "ticket", 0)),
-                    typ, f"{lots:.2f}", self._fmt(price, digits),
-                    (self._fmt(sl, digits) if sl else ""),
-                    (self._fmt(tp, digits) if tp else ""),
-                    f"{pnl:.2f}",
-                ))
-
-                            
-            ords = mt5.orders_get(symbol=symbol) or []
-            type_map = {
-                getattr(mt5, "ORDER_TYPE_BUY_LIMIT", 2):        "BUY LIMIT",
-                getattr(mt5, "ORDER_TYPE_SELL_LIMIT", 3):       "SELL LIMIT",
-                getattr(mt5, "ORDER_TYPE_BUY_STOP", 4):         "BUY STOP",
-                getattr(mt5, "ORDER_TYPE_SELL_STOP", 5):        "SELL STOP",
-                getattr(mt5, "ORDER_TYPE_BUY_STOP_LIMIT", 6):   "BUY STOP LIMIT",
-                getattr(mt5, "ORDER_TYPE_SELL_STOP_LIMIT", 7):  "SELL STOP LIMIT",
-            }
-            for o in ords:
-                otype = int(getattr(o, "type", 0))
-                typ = type_map.get(otype, f"TYPE {otype}")
-                lots = float(getattr(o, "volume_current", 0.0))
-                price = float(getattr(o, "price_open", 0.0)) or float(getattr(o, "price_current", 0.0))
-                sl = float(getattr(o, "sl", 0.0)) or 0.0
-                tp = float(getattr(o, "tp", 0.0)) or 0.0
-                rows.append((
-                    int(getattr(o, "ticket", 0)),
-                    typ, f"{lots:.2f}", self._fmt(price, digits),
-                    (self._fmt(sl, digits) if sl else ""),
-                    (self._fmt(tp, digits) if tp else ""),
-                    "",                       
-                ))
-
-            try:
-                rows.sort(key=lambda r: r[0], reverse=True)
-            except Exception:
-                pass
-
-            for r in rows:
-                self.tree_pos.insert("", "end", values=r)
-        except Exception:
-            pass
-
-    def _fill_history_table(self, symbol: str):
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số:
-          - symbol: str — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        for i in self.tree_his.get_children():
-            self.tree_his.delete(i)
-        if not self._ensure_mt5():
-            return
-        import MetaTrader5 as mt5
-        try:
-            from datetime import datetime, timedelta
-            now = datetime.now()
-            deals = mt5.history_deals_get(now - timedelta(days=1), now) or []
-            info = mt5.symbol_info(symbol)
-            digits = getattr(info, "digits", 5) if info else 5
-            rows = []
-            for d in deals:
-                try:
-                    if getattr(d, "symbol", "") != symbol:
-                        continue
-                    t = datetime.fromtimestamp(int(getattr(d, "time", 0))).strftime("%Y-%m-%d %H:%M:%S")
-                    ticket = int(getattr(d, "ticket", 0))
-                    typ_val = int(getattr(d, "type", 0))
-                    _typ_map = {
-                        getattr(mt5, "DEAL_TYPE_BUY", 0): "BUY",
-                        getattr(mt5, "DEAL_TYPE_SELL", 1): "SELL",
-                    }
-                    typ = _typ_map.get(typ_val, str(typ_val))
-                    vol = float(getattr(d, "volume", 0.0))
-                    price = float(getattr(d, "price", 0.0))
-                    profit = float(getattr(d, "profit", 0.0))
-                    rows.append((t, ticket, typ, f"{vol:.2f}", self._fmt(price, digits), f"{profit:.2f}"))
-                except Exception:
-                    continue
-            rows = sorted(rows, key=lambda x: x[0], reverse=True)[:100]
-            for r in rows:
-                self.tree_his.insert("", "end", values=r)
-        except Exception:
-            pass
-
-                      
-    def _draw_chart(self):
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số: (không)
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        sym = (self.symbol_var.get() or "").strip()
-        tf_code = self._mt5_tf(self.tf_var.get())
-        self.ax_price.clear()
-
-        if not sym or tf_code is None:
-            self.ax_price.set_title("Nhập Symbol và chọn TF")
-            self.canvas.draw_idle()
-            return
-
-        df = self._rates_to_df(sym, tf_code, self.n_candles_var.get())
-
-        if df.empty or len(df) < 5:
-                                                                             
-            self.ax_price.set_title(f"{sym} {self.tf_var.get()} — không có dữ liệu")
-            self.canvas.draw_idle()
-            self._update_account_info(sym)
-            self._fill_positions_table(sym)
-            self._fill_history_table(sym)
-            return
-
-        st = self._style()
-        try:
-                                      
-            mpf.plot(df, type="candle", ax=self.ax_price, style=st, show_nontrading=False)
-        except Exception:
-            self.ax_price.plot(df.index, df["Close"])
-            self.ax_price.set_title(f"{sym} {self.tf_var.get()} (simple)")
-
-                       
-        if self._ensure_mt5():
-            try:
-                import MetaTrader5 as mt5
-                info = mt5.symbol_info(sym)
-                digits = getattr(info, "digits", 5) if info else 5
-
-                poss = mt5.positions_get(symbol=sym) or []
-                for p in poss:
-                    typ_i = int(getattr(p, "type", 0))
-                    entry = float(getattr(p, "price_open", 0.0))
-                    sl = float(getattr(p, "sl", 0.0)) or None
-                    tp = float(getattr(p, "tp", 0.0)) or None
-                    col = "#22c55e" if typ_i == 0 else "#ef4444"
-                    self.ax_price.axhline(entry, color=col, ls="--", lw=1.0, alpha=0.95)
-                    if sl:
-                        self.ax_price.axhline(sl, color="#ef4444", ls=":", lw=1.0, alpha=0.85)
-                    if tp:
-                        self.ax_price.axhline(tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
-                    label = f"{'BUY' if typ_i==0 else 'SELL'} {getattr(p,'volume',0):.2f} @{self._fmt(entry, digits)}"
-                    self.ax_price.text(df.index[-1], entry, "  " + label, va="center", color=col, fontsize=8)
-
-                ords = mt5.orders_get(symbol=sym) or []
-                def _otype_txt(t):
-                    """
-                    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-                    Tham số:
-                      - t — (tự suy luận theo ngữ cảnh sử dụng).
-                    Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-                    Ghi chú:
-                      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-                    """
-                    m = {
-                        getattr(mt5, "ORDER_TYPE_BUY_LIMIT", 2):  "BUY LIMIT",
-                        getattr(mt5, "ORDER_TYPE_BUY_STOP", 4):   "BUY STOP",
-                        getattr(mt5, "ORDER_TYPE_SELL_LIMIT", 3): "SELL LIMIT",
-                        getattr(mt5, "ORDER_TYPE_SELL_STOP", 5):  "SELL STOP",
-                    }
-                    return m.get(int(t), f"TYPE {t}")
-                for o in ords:
-                    otype = int(getattr(o, "type", 0))
-                    lots  = float(getattr(o, "volume_current", 0.0))
-                    px    = float(getattr(o, "price_open", 0.0)) or float(getattr(o, "price_current", 0.0))
-                    sl    = float(getattr(o, "sl", 0.0)) or None
-                    tp    = float(getattr(o, "tp", 0.0)) or None
-                    pend_col = "#8b5cf6"
-                    self.ax_price.axhline(px, color=pend_col, ls="--", lw=1.1, alpha=0.95)
-                    txt = f"PEND {_otype_txt(otype)} {lots:.2f} @{self._fmt(px, digits)}"
-                    self.ax_price.text(df.index[-1], px, "  " + txt, va="center", color=pend_col, fontsize=8)
-                    if sl:
-                        self.ax_price.axhline(sl, color="#ef4444", ls=":", lw=1.0, alpha=0.85)
-                        self.ax_price.text(df.index[-1], sl, "  SL", va="center", color="#ef4444", fontsize=7)
-                    if tp:
-                        self.ax_price.axhline(tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
-                        self.ax_price.text(df.index[-1], tp, "  TP", va="center", color="#22c55e", fontsize=7)
-            except Exception:
-                pass
-
-        self.ax_price.set_title(f"{sym}  •  {self.tf_var.get()}  •  {len(df)} bars")
-        self.canvas.draw_idle()
-
-        self._update_account_info(sym)
-        self._fill_positions_table(sym)
-        self._fill_history_table(sym)
-
-    def _redraw_safe(self):
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số: (không)
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        try:
-            self._draw_chart()
-        except Exception as e:
-            try:
-                self.ax_price.clear()
-                self.ax_price.set_title(f"Chart error: {e}")
-                self.canvas.draw_idle()
-            except Exception:
-                pass
-
-    def _tick(self):
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số: (không)
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        if not self._running:
-            return
-        self._redraw_safe()
-        secs = max(1, int(self.refresh_secs_var.get() or 5))
         self._after_job = self.root.after(secs * 1000, self._tick)
 
 def main():
@@ -6649,3 +5461,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
