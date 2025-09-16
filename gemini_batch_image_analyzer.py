@@ -3,36 +3,28 @@
 
 from __future__ import annotations
 
-                              
 import os
 import sys
 import re
 import json
 import time
 import ssl
-import base64
 import hashlib
 import queue
 import threading
-import urllib.parse
-import urllib.request
-import urllib.error
+
 import ast
 from pathlib import Path
 import math
 import subprocess
-from statistics import median
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 import platform
-from dataclasses import dataclass
 
-                     
 import tkinter as tk
 from tkinter import ttk, filedialog
 from tkinter.scrolledtext import ScrolledText
 
-                                                
 HAS_MPL = False
 try:
     import matplotlib  # type: ignore
@@ -41,7 +33,6 @@ try:
 except Exception:
     HAS_MPL = False
 
-                                       
 try:
     from dotenv import load_dotenv
 except Exception:
@@ -54,11 +45,6 @@ except Exception:
     sys.exit(1)
 
 try:
-    import certifi
-except Exception:
-    certifi = None
-
-try:
     import MetaTrader5 as mt5
 except Exception:
     mt5 = None
@@ -68,8 +54,6 @@ try:
 except Exception:
     Image = None
 
-
-                                                             
 from gemini_folder_once.constants import (
     SUPPORTED_EXTS,
     DEFAULT_MODEL,
@@ -88,121 +72,12 @@ from gemini_folder_once.utils import (
 
 from gemini_folder_once.telegram_client import TelegramClient, build_ssl_context
 
-                                                                         
 from gemini_folder_once.config import RunConfig
 from gemini_folder_once import context_builder, report_parser
 from gemini_folder_once import no_trade, news
 from gemini_folder_once.chart_tab import ChartTabTV
 from gemini_folder_once import uploader
-                                                                                
-def _session_ranges(
-    m1_rates,
-    tz_shift_hours: int | None = None,
-    source_tz: str = "UTC",
-    target_tz: str = "Asia/Ho_Chi_Minh",
-    day=None,
-    ):
-    """
-    Tính high/low theo *các phiên trong ngày* (theo giờ Việt Nam, IANA tz chuẩn), dựa trên M1.
-    London/New York tự xử lý DST. New York được tách 2 khóa: `newyork_pre`, `newyork_post`.
-    - tz_shift_hours != None: dùng dịch thô (tương thích cũ, KHÔNG DST).
-    - tz_shift_hours == None: dùng zoneinfo source_tz -> target_tz (có DST).
-    """
-    from datetime import datetime, timedelta, timezone
-    try:
-        from zoneinfo import ZoneInfo  # py>=3.9
-    except Exception:
-        ZoneInfo = None
-
-    def _to_local(dt_naive_str: str):
-        dt_utc = datetime.strptime(dt_naive_str, "%Y-%m-%d %H:%M:%S")
-        if tz_shift_hours is not None:
-            return dt_utc + timedelta(hours=int(tz_shift_hours))
-        if ZoneInfo:
-            src = ZoneInfo(source_tz or "UTC")
-            dst = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
-            return dt_utc.replace(tzinfo=src).astimezone(dst).replace(tzinfo=None)
-        # Fallback không zoneinfo: giả định UTC +7
-        return dt_utc + timedelta(hours=7)
-
-    if not m1_rates:
-        return {
-            "asia": {"start": "07:00", "end": "16:00", "high": None, "low": None},
-            "london": {"start": "14:00", "end": "23:00", "high": None, "low": None},
-            "newyork_pre": {"start": "19:00", "end": "24:00", "high": None, "low": None},
-            "newyork_post": {"start": "00:00", "end": "05:00", "high": None, "low": None},
-        }
-
-    first_local = _to_local(m1_rates[0]["time"])
-    today_local = day or first_local.date()
-    year = today_local.year
-
-    def _dst_on(zone: str, d) -> bool:
-        if not ZoneInfo:
-            return False
-        z = ZoneInfo(zone)
-        jan = datetime(year, 1, 1, tzinfo=z).utcoffset()
-        jul = datetime(year, 7, 1, tzinfo=z).utcoffset()
-        cur = datetime(d.year, d.month, d.day, tzinfo=z).utcoffset()
-        base = min(jan, jul)
-        return cur > base
-
-    uk_dst = _dst_on("Europe/London", today_local)
-    us_dst = _dst_on("America/New_York", today_local)
-
-    # Khung theo giờ VN (UTC+7), đã xét DST UK/US
-    if uk_dst and us_dst:
-        # UK+1, US+1
-        buckets = {
-            "asia":        (7, 16),
-            "london":      (14, 22),  # 8–16 UK local -> VN 14–22
-            "newyork_pre": (20, 24),  # 8–12 US local -> VN 19/20–24 (chọn 20–24)
-            "newyork_post":(0, 5),    # 12–16 US local -> VN 00–04/05 (chọn 00–05)
-        }
-    elif (not uk_dst) and (not us_dst):
-        # Cả hai không DST
-        buckets = {
-            "asia":        (7, 16),
-            "london":      (15, 23),  # 8–16 UK local -> VN 15–23
-            "newyork_pre": (19, 24),  # 8–12 US local -> VN 19–24
-            "newyork_post":(0, 4),    # 12–16 US local -> VN 00–04
-        }
-    elif uk_dst and (not us_dst):
-        # UK DST ON, US DST OFF (giai đoạn chuyển mùa hiếm)
-        buckets = {
-            "asia":        (7, 16),
-            "london":      (14, 22),
-            "newyork_pre": (19, 24),
-            "newyork_post":(0, 4),
-        }
-    else:
-        # UK DST OFF, US DST ON
-        buckets = {
-            "asia":        (7, 16),
-            "london":      (15, 23),
-            "newyork_pre": (20, 24),
-            "newyork_post":(0, 5),
-        }
-
-    out = {k: {"start": f"{v[0]:02d}:00", "end": f"{v[1]:02d}:00", "high": None, "low": None} for k, v in buckets.items()}
-    for r in m1_rates:
-        try:
-            t = _to_local(r["time"])
-        except Exception:
-            continue
-        if t.date() != today_local:
-            continue
-        h = t.hour
-        for name, (h0, h1) in buckets.items():
-            if h0 <= h < h1:
-                hi = out[name]["high"]
-                lo = out[name]["low"]
-                rh = float(r.get("high")) if r.get("high") is not None else None
-                rl = float(r.get("low")) if r.get("low") is not None else None
-                out[name]["high"] = rh if hi is None else (max(hi, rh) if rh is not None else hi)
-                out[name]["low"]  = rl if lo is None else (min(lo, rl) if rl is not None else lo)
-    return out
-
+from gemini_folder_once import mt5_utils
 # -----------------------------------------------------------------------------
 # Killzones theo GIỜ VIỆT NAM (UTC+7), suy từ giờ địa phương chuẩn quốc tế:
 #   - London: 08:00–11:00 Europe/London (local)
@@ -210,26 +85,6 @@ def _session_ranges(
 #   - New York (post): 13:30–16:00 America/New_York (local)
 # Tự động xử lý DST/tuần lệch pha nhờ zoneinfo, trả về HH:MM theo Asia/Ho_Chi_Minh.
 # -----------------------------------------------------------------------------
-def _killzones_vn_for_date(day=None, target_tz: str = "Asia/Ho_Chi_Minh"):
-    """
-    Trả về dict killzones theo giờ Việt Nam cho ngày 'day' (datetime.date).
-    Nếu day=None, dùng ngày hiện tại. Không đụng tới Tkinter (an toàn gọi từ worker).
-    """
-    from datetime import datetime, date as _date
-    try:
-        from zoneinfo import ZoneInfo  # Python 3.9+
-    except Exception:
-        ZoneInfo = None
-
-    d = day or datetime.now().date()
-    # Fallback khi không có zoneinfo: dùng mapping mùa hè thường thấy (EDT/BST)
-    if ZoneInfo is None:
-        return {
-            "london":       {"start": "14:00", "end": "17:00"},
-            "newyork_pre":  {"start": "19:30", "end": "22:00"},
-            "newyork_post": {"start": "00:30", "end": "03:00"},
-        }
-
     tz_vn = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
     tz_uk = ZoneInfo("Europe/London")
     tz_us = ZoneInfo("America/New_York")
@@ -254,39 +109,7 @@ def _killzones_vn_for_date(day=None, target_tz: str = "Asia/Ho_Chi_Minh"):
         "london":       {"start": l_st,        "end": l_ed},
         "newyork_pre":  {"start": ny_pre_st,   "end": ny_pre_ed},
         "newyork_post": {"start": ny_post_st,  "end": ny_post_ed},
-    }
-
-def _points_per_pip_from_info(info: dict) -> int:
-    """
-    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-    Tham số:
-      - info: dict — (tự suy luận theo ngữ cảnh sử dụng).
-    Trả về: int
-    Ghi chú:
-      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-    """
-    try:
-        d = int((info or {}).get("digits") or 0)
-    except Exception:
-        d = 0
-    return 10 if d >= 3 else 1
-
-
-def _pip_size_from_info(info: dict) -> float:
-    """
-    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-    Tham số:
-      - info: dict — (tự suy luận theo ngữ cảnh sử dụng).
-    Trả về: float
-    Ghi chú:
-      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-    """
-    point = float((info or {}).get("point") or 0.0)
-    ppp = _points_per_pip_from_info(info)
-    return point * ppp if point else 0.0
-
-                                                                                    
-def _value_per_point_safe(symbol: str, info_obj=None) -> float | None:
+    }\ndef _value_per_point_safe(symbol: str, info_obj=None) -> float | None:
     """
     Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
     Tham số:
@@ -310,11 +133,9 @@ def _value_per_point_safe(symbol: str, info_obj=None) -> float | None:
         tick_value = float(getattr(info_obj, "trade_tick_value", 0.0) or 0.0)
         tick_size  = float(getattr(info_obj, "trade_tick_size", 0.0) or 0.0)
 
-                                                                            
         if tick_value > 0 and tick_size > 0:
             return tick_value * (point / tick_size)
 
-                                                                                       
         try:
             tick = mt5.symbol_info_tick(symbol)
             mid = None
@@ -329,7 +150,6 @@ def _value_per_point_safe(symbol: str, info_obj=None) -> float | None:
         except Exception:
             pass
 
-                                                          
         csize = float(getattr(info_obj, "trade_contract_size", 0.0) or 0.0)
         if csize > 0:
             return csize * point
@@ -340,7 +160,6 @@ def _value_per_point_safe(symbol: str, info_obj=None) -> float | None:
 
 from gemini_folder_once.utils import _tg_html_escape
 
-                                                    
 class GeminiFolderOnceApp:
     """
     Lớp giao diện và điều phối chính của ứng dụng: quản lý cấu hình, hàng đợi UI, tải ảnh, gọi Gemini, tổng hợp báo cáo, tích hợp MT5/Telegram và (tuỳ chọn) auto-trade.
@@ -365,10 +184,9 @@ class GeminiFolderOnceApp:
         self.root.geometry("1180x780")
         self.root.minsize(1024, 660)
         self._trade_log_lock = threading.Lock()
-                                                              
+
         self._ui_log_lock = threading.Lock()
 
-                          
         self.folder_path = tk.StringVar(value="")
         api_init = ""
         if API_KEY_ENC.exists():
@@ -378,16 +196,14 @@ class GeminiFolderOnceApp:
         self.model_var = tk.StringVar(value=DEFAULT_MODEL)
 
         self.delete_after_var = tk.BooleanVar(value=True)
-        self.max_files_var = tk.IntVar(value=0)                      
+        self.max_files_var = tk.IntVar(value=0)
         self.status_var = tk.StringVar(value="Chưa chọn thư mục.")
         self.progress_var = tk.DoubleVar(value=0.0)
 
-                  
         self.autorun_var = tk.BooleanVar(value=False)
         self.autorun_seconds_var = tk.IntVar(value=60)
         self._autorun_job = None
 
-                               
         self.remember_context_var = tk.BooleanVar(value=True)
         self.context_n_reports_var = tk.IntVar(value=1)
         self.context_limit_chars_var = tk.IntVar(value=2000)
@@ -395,7 +211,6 @@ class GeminiFolderOnceApp:
         self.prefer_ctx_json_var = tk.BooleanVar(value=True)
         self.ctx_json_n_var = tk.IntVar(value=5)
 
-                        
         self.telegram_enabled_var = tk.BooleanVar(value=False)
         self.telegram_token_var = tk.StringVar(value="")
         self.telegram_chat_id_var = tk.StringVar(value="")
@@ -403,7 +218,6 @@ class GeminiFolderOnceApp:
         self.telegram_ca_path_var = tk.StringVar(value="")
         self._last_telegram_signature = None
 
-             
         self.mt5_enabled_var = tk.BooleanVar(value=False)
         self.mt5_term_path_var = tk.StringVar(value="")
         self.mt5_symbol_var = tk.StringVar(value="")
@@ -414,65 +228,59 @@ class GeminiFolderOnceApp:
         self.mt5_n_H1 = tk.IntVar(value=120)
         self.mt5_initialized = False
 
-                               
         self.no_trade_enabled_var = tk.BooleanVar(value=True)
-        self.nt_spread_factor_var = tk.DoubleVar(value=1.2)                          
-        self.nt_min_atr_m5_pips_var = tk.DoubleVar(value=3.0)                                 
-        self.nt_min_ticks_per_min_var = tk.IntVar(value=5)                                             
+        self.nt_spread_factor_var = tk.DoubleVar(value=1.2)
+        self.nt_min_atr_m5_pips_var = tk.DoubleVar(value=3.0)
+        self.nt_min_ticks_per_min_var = tk.IntVar(value=5)
 
-                          
         self.upload_workers_var = tk.IntVar(value=4)
         self.cache_enabled_var = tk.BooleanVar(value=True)
         self.optimize_lossless_var = tk.BooleanVar(value=False)
         self.only_generate_if_changed_var = tk.BooleanVar(value=False)
 
-                             
         self.auto_trade_enabled_var = tk.BooleanVar(value=False)
-        self.trade_strict_bias_var = tk.BooleanVar(value=True)                          
-        self.trade_size_mode_var = tk.StringVar(value="lots")                       
+        self.trade_strict_bias_var = tk.BooleanVar(value=True)
+        self.trade_size_mode_var = tk.StringVar(value="lots")
         self.trade_lots_total_var = tk.DoubleVar(value=0.10)
-        self.trade_equity_risk_pct_var = tk.DoubleVar(value=1.0)      
-        self.trade_money_risk_var = tk.DoubleVar(value=10.0)                            
-        self.trade_split_tp1_pct_var = tk.IntVar(value=50)                                
+        self.trade_equity_risk_pct_var = tk.DoubleVar(value=1.0)
+        self.trade_money_risk_var = tk.DoubleVar(value=10.0)
+        self.trade_split_tp1_pct_var = tk.IntVar(value=50)
         self.trade_deviation_points_var = tk.IntVar(value=20)
         self.trade_pending_threshold_points_var = tk.IntVar(value=60)
         self.trade_magic_var = tk.IntVar(value=26092025)
         self.trade_comment_prefix_var = tk.StringVar(value="AI-ICT")
-                                      
-        self.trade_pending_ttl_min_var      = tk.IntVar(value=90)                                 
-        self.trade_min_rr_tp2_var           = tk.DoubleVar(value=2.0)                       
-        self.trade_min_dist_keylvl_pips_var = tk.DoubleVar(value=5.0)                                              
-        self.trade_cooldown_min_var         = tk.IntVar(value=10)                                  
-        self.trade_dynamic_pending_var      = tk.BooleanVar(value=True)                              
-        self.auto_trade_dry_run_var         = tk.BooleanVar(value=False)                          
-        self.trade_move_to_be_after_tp1_var = tk.BooleanVar(value=True)                          
-        self.trade_trailing_atr_mult_var    = tk.DoubleVar(value=0.5)                                 
-        self.trade_allow_session_asia_var   = tk.BooleanVar(value=True)                 
+
+        self.trade_pending_ttl_min_var      = tk.IntVar(value=90)
+        self.trade_min_rr_tp2_var           = tk.DoubleVar(value=2.0)
+        self.trade_min_dist_keylvl_pips_var = tk.DoubleVar(value=5.0)
+        self.trade_cooldown_min_var         = tk.IntVar(value=10)
+        self.trade_dynamic_pending_var      = tk.BooleanVar(value=True)
+        self.auto_trade_dry_run_var         = tk.BooleanVar(value=False)
+        self.trade_move_to_be_after_tp1_var = tk.BooleanVar(value=True)
+        self.trade_trailing_atr_mult_var    = tk.DoubleVar(value=0.5)
+        self.trade_allow_session_asia_var   = tk.BooleanVar(value=True)
         self.trade_allow_session_london_var = tk.BooleanVar(value=True)
         self.trade_allow_session_ny_var     = tk.BooleanVar(value=True)
-                                                
-        self.trade_news_block_before_min_var = tk.IntVar(value=15)                      
-        self.trade_news_block_after_min_var  = tk.IntVar(value=15)                    
 
-                                                 
-        self.ff_cache_events_local = []                                    
-        self.ff_cache_fetch_time   = 0.0                                      
+        self.trade_news_block_before_min_var = tk.IntVar(value=15)
+        self.trade_news_block_after_min_var  = tk.IntVar(value=15)
 
-                         
+        self.ff_cache_events_local = []
+        self.ff_cache_fetch_time   = 0.0
+
         self.is_running = False
         self.stop_flag = False
-        self.results = []                                   
+        self.results = []
         self.combined_report_text = ""
         self.ui_queue = queue.Queue()
 
-                                    
         self.prompt_file_path_var = tk.StringVar(value="")
         self.auto_load_prompt_txt_var = tk.BooleanVar(value=True)
 
         self._build_ui()
-        self._load_workspace()                      
+        self._load_workspace()
         self._poll_ui_queue()
-                                                  
+
     def _build_ui(self):
         """
         Mục đích: Khởi tạo/cấu hình thành phần giao diện hoặc cấu trúc dữ liệu nội bộ.
@@ -482,7 +290,7 @@ class GeminiFolderOnceApp:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
         self.root.columnconfigure(0, weight=1)
-                 
+
         top = ttk.Frame(self.root, padding=(10, 8, 10, 6))
         top.grid(row=0, column=0, sticky="ew")
         for c in (1, 3, 5):
@@ -521,35 +329,29 @@ class GeminiFolderOnceApp:
         self.export_btn.pack(side="left", padx=(6, 0))
         ttk.Button(actions, text="✖ Xoá kết quả", command=self.clear_results).pack(side="left", padx=(6, 0))
 
-                  
         prog = ttk.Frame(self.root, padding=(10, 0, 10, 6))
         prog.grid(row=1, column=0, sticky="ew")
         prog.columnconfigure(0, weight=1)
         ttk.Progressbar(prog, variable=self.progress_var, maximum=100).grid(row=0, column=0, sticky="ew")
         ttk.Label(prog, textvariable=self.status_var).grid(row=1, column=0, sticky="w", pady=(3, 0))
 
-                  
         self.nb = ttk.Notebook(self.root)
         self.nb.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
         self.root.rowconfigure(2, weight=1)
 
-                         
         tab_report = ttk.Frame(self.nb, padding=8)
         self.nb.add(tab_report, text="Report")
 
-                                  
-        tab_report.columnconfigure(0, weight=1)             
-        tab_report.columnconfigure(1, weight=2)                        
+        tab_report.columnconfigure(0, weight=1)
+        tab_report.columnconfigure(1, weight=2)
         tab_report.rowconfigure(0, weight=1)
 
-                                                                               
         left_panel = ttk.Frame(tab_report)
         left_panel.grid(row=0, column=0, sticky="nsew")
         left_panel.columnconfigure(0, weight=1)
-        left_panel.rowconfigure(0, weight=1)                  
-        left_panel.rowconfigure(1, weight=1)                      
+        left_panel.rowconfigure(0, weight=1)
+        left_panel.rowconfigure(1, weight=1)
 
-                      
         cols = ("#", "name", "status")
         self.tree = ttk.Treeview(left_panel, columns=cols, show="headings", selectmode="browse")
         self.tree.heading("#", text="#")
@@ -564,14 +366,12 @@ class GeminiFolderOnceApp:
         scr_y.grid(row=0, column=0, sticky="nse", padx=(0,0))
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
-                                                       
         archives = ttk.LabelFrame(left_panel, text="History & JSON", padding=6)
         archives.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
-        archives.columnconfigure(0, weight=1)                
-        archives.columnconfigure(1, weight=1)             
+        archives.columnconfigure(0, weight=1)
+        archives.columnconfigure(1, weight=1)
         archives.rowconfigure(1, weight=1)
 
-                             
         hist_col = ttk.Frame(archives)
         hist_col.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 6))
         hist_col.columnconfigure(0, weight=1)
@@ -592,7 +392,6 @@ class GeminiFolderOnceApp:
         self.history_list.bind("<<ListboxSelect>>", lambda e: self._preview_history_selected())
         self.history_list.bind("<Double-Button-1>", lambda e: self._open_history_selected())
 
-                          
         json_col = ttk.Frame(archives)
         json_col.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(6, 0))
         json_col.columnconfigure(0, weight=1)
@@ -613,7 +412,6 @@ class GeminiFolderOnceApp:
         self.json_list.bind("<<ListboxSelect>>", lambda e: self._preview_json_selected())
         self.json_list.bind("<Double-Button-1>", lambda e: self._load_json_selected())
 
-                                                               
         detail_box = ttk.LabelFrame(tab_report, text="Chi tiết (Báo cáo Tổng hợp)", padding=8)
         detail_box.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         detail_box.rowconfigure(0, weight=1)
@@ -621,15 +419,14 @@ class GeminiFolderOnceApp:
         self.detail_text = ScrolledText(detail_box, wrap="word")
         self.detail_text.grid(row=0, column=0, sticky="nsew")
         self.detail_text.insert("1.0", "Báo cáo tổng hợp sẽ hiển thị tại đây sau khi phân tích.")
-                                                                         
+
         self._refresh_history_list()
         self._refresh_json_list()
 
-                       
         if HAS_MPL:
             self.chart_tab_tv = ChartTabTV(self, self.nb)
         else:
-                                                       
+
             tab_chart_placeholder = ttk.Frame(self.nb, padding=8)
             self.nb.add(tab_chart_placeholder, text="Chart")
             ttk.Label(
@@ -639,7 +436,6 @@ class GeminiFolderOnceApp:
                 foreground="#666"
             ).pack(anchor="w")
 
-                         
         tab_prompt = ttk.Frame(self.nb, padding=8)
         self.nb.add(tab_prompt, text="Prompt")
         tab_prompt.columnconfigure(0, weight=1)
@@ -657,10 +453,9 @@ class GeminiFolderOnceApp:
         self.prompt_text = ScrolledText(tab_prompt, wrap="word", height=18)
         self.prompt_text.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
 
-                                                                       
         if not self._load_prompt_from_file(silent=True):
             self.ui_status("Chưa nạp PROMPT.txt — hãy bấm 'Tải PROMPT.txt' hoặc 'Chọn file…'")
-                                     
+
         tab_opts = ttk.Frame(self.nb, padding=8)
         self.nb.add(tab_opts, text="Options")
         tab_opts.columnconfigure(0, weight=1)
@@ -668,7 +463,6 @@ class GeminiFolderOnceApp:
         opts_nb = ttk.Notebook(tab_opts)
         opts_nb.grid(row=0, column=0, sticky="nsew")
 
-                    
         run_tab = ttk.Frame(opts_nb, padding=8)
         opts_nb.add(run_tab, text="Run")
         run_tab.columnconfigure(0, weight=1)
@@ -696,7 +490,6 @@ class GeminiFolderOnceApp:
         ttk.Label(row_ul, text="Giới hạn số ảnh tối đa (0 = không giới hạn):").pack(side="left")
         ttk.Spinbox(row_ul, from_=0, to=1000, textvariable=self.max_files_var, width=8).pack(side="left", padx=(6, 0))
 
-                       
         card_fast = ttk.LabelFrame(run_tab, text="Tăng tốc & Cache", padding=8)
         card_fast.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         row_w = ttk.Frame(card_fast)
@@ -710,7 +503,6 @@ class GeminiFolderOnceApp:
         ttk.Checkbutton(card_fast, text="Chỉ gọi model nếu bộ ảnh không đổi",
                         variable=self.only_generate_if_changed_var).grid(row=3, column=0, sticky="w", pady=(6, 0))
 
-                          
         card_nt = ttk.LabelFrame(run_tab, text="NO-TRADE cứng (chặn gọi model nếu điều kiện xấu)", padding=8)
         card_nt.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         ttk.Checkbutton(card_nt, text="Bật NO-TRADE cứng",
@@ -728,7 +520,6 @@ class GeminiFolderOnceApp:
         ttk.Spinbox(r3, from_=0, to=200, textvariable=self.nt_min_ticks_per_min_var,
                     width=6).pack(side="left", padx=(6, 12))
 
-                        
         ctx_tab = ttk.Frame(opts_nb, padding=8)
         opts_nb.add(ctx_tab, text="Context")
         ctx_tab.columnconfigure(0, weight=1)
@@ -755,7 +546,6 @@ class GeminiFolderOnceApp:
         ttk.Label(rowj, text="Số JSON gần nhất:").pack(side="left")
         ttk.Spinbox(rowj, from_=1, to=20, textvariable=self.ctx_json_n_var, width=6).pack(side="left", padx=(6, 0))
 
-                         
         tg_tab = ttk.Frame(opts_nb, padding=8)
         opts_nb.add(tg_tab, text="Telegram")
         tg_tab.columnconfigure(1, weight=1)
@@ -774,7 +564,6 @@ class GeminiFolderOnceApp:
         ttk.Checkbutton(tg_tab, text="Bỏ qua kiểm tra chứng chỉ (KHÔNG KHUYẾN NGHỊ)",
                         variable=self.telegram_skip_verify_var).grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
-                    
         mt5_tab = ttk.Frame(opts_nb, padding=8)
         opts_nb.add(mt5_tab, text="MT5")
         mt5_tab.columnconfigure(1, weight=1)
@@ -809,7 +598,6 @@ class GeminiFolderOnceApp:
 
         ttk.Label(mt5_tab, textvariable=self.mt5_status_var, foreground="#555").grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
-                              
         auto_card = ttk.LabelFrame(mt5_tab, text="Auto-Trade khi có Thiết lập xác suất cao", padding=8)
         auto_card.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         r0 = ttk.Frame(auto_card); r0.grid(row=0, column=0, columnspan=3, sticky="w")
@@ -844,13 +632,11 @@ class GeminiFolderOnceApp:
         ttk.Label(r4, text="Comment:").pack(side="left")
         tk.Entry(r4, textvariable=self.trade_comment_prefix_var, width=18).pack(side="left", padx=(6,0))
 
-                                                                         
         r5 = ttk.Frame(auto_card); r5.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4,0))
         ttk.Checkbutton(r5, text="Dry-run (không gửi lệnh)", variable=self.auto_trade_dry_run_var).pack(side="left")
         ttk.Checkbutton(r5, text="Pending theo ATR", variable=self.trade_dynamic_pending_var).pack(side="left", padx=(12,0))
         ttk.Checkbutton(r5, text="BE sau TP1", variable=self.trade_move_to_be_after_tp1_var).pack(side="left", padx=(12,0))
 
-                                   
         r6 = ttk.Frame(auto_card); r6.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4,0))
         ttk.Label(r6, text="TTL pending (phút):").pack(side="left")
         ttk.Spinbox(r6, from_=1, to=1440, textvariable=self.trade_pending_ttl_min_var, width=6).pack(side="left", padx=(6,12))
@@ -861,19 +647,16 @@ class GeminiFolderOnceApp:
         ttk.Label(r6, text="Cooldown (phút):").pack(side="left")
         ttk.Spinbox(r6, from_=0, to=360, textvariable=self.trade_cooldown_min_var, width=6).pack(side="left", padx=(6,12))
 
-                           
         r7 = ttk.Frame(auto_card); r7.grid(row=7, column=0, columnspan=3, sticky="w", pady=(4,0))
         ttk.Label(r7, text="Trailing ATR ×").pack(side="left")
         ttk.Spinbox(r7, from_=0.1, to=3.0, increment=0.1, textvariable=self.trade_trailing_atr_mult_var, width=6).pack(side="left", padx=(6,12))
 
-                            
         r8 = ttk.Frame(auto_card); r8.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4,0))
         ttk.Label(r8, text="Phiên cho phép:").pack(side="left")
         ttk.Checkbutton(r8, text="Asia",   variable=self.trade_allow_session_asia_var).pack(side="left", padx=(6,0))
         ttk.Checkbutton(r8, text="London", variable=self.trade_allow_session_london_var).pack(side="left", padx=(6,0))
         ttk.Checkbutton(r8, text="New York", variable=self.trade_allow_session_ny_var).pack(side="left", padx=(6,0))
 
-                                                 
         r9 = ttk.Frame(auto_card); r9.grid(row=9, column=0, columnspan=3, sticky="w", pady=(4,0))
         ttk.Label(r9, text="Chặn quanh news:").pack(side="left")
         ttk.Label(r9, text="Trước (phút):").pack(side="left", padx=(8,2))
@@ -882,7 +665,6 @@ class GeminiFolderOnceApp:
         ttk.Spinbox(r9, from_=0, to=180, textvariable=self.trade_news_block_after_min_var, width=6).pack(side="left")
         ttk.Label(r9, text="Nguồn: Forex Factory (High)").pack(side="left", padx=(12,0))
 
-                          
         ws_tab = ttk.Frame(opts_nb, padding=8)
         opts_nb.add(ws_tab, text="Workspace")
         for i in range(3):
@@ -901,7 +683,6 @@ class GeminiFolderOnceApp:
         """
         self.api_entry.configure(show="" if self.api_entry.cget("show") == "*" else "*")
 
-                                                                                             
     def _snapshot_config(self) -> RunConfig:
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -911,39 +692,39 @@ class GeminiFolderOnceApp:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
         return RunConfig(
-                              
+
             folder=self.folder_path.get().strip(),
             delete_after=bool(self.delete_after_var.get()),
             max_files=int(self.max_files_var.get()),
-                           
+
             upload_workers=int(self.upload_workers_var.get()),
             cache_enabled=bool(self.cache_enabled_var.get()),
             optimize_lossless=bool(self.optimize_lossless_var.get()),
             only_generate_if_changed=bool(self.only_generate_if_changed_var.get()),
-                     
+
             ctx_limit=int(self.context_limit_chars_var.get()),
             create_ctx_json=bool(self.create_ctx_json_var.get()),
             prefer_ctx_json=bool(self.prefer_ctx_json_var.get()),
             ctx_json_n=int(self.ctx_json_n_var.get()),
-                      
+
             telegram_enabled=bool(self.telegram_enabled_var.get()),
             telegram_token=self.telegram_token_var.get().strip(),
             telegram_chat_id=self.telegram_chat_id_var.get().strip(),
             telegram_skip_verify=bool(self.telegram_skip_verify_var.get()),
             telegram_ca_path=self.telegram_ca_path_var.get().strip(),
-                 
+
             mt5_enabled=bool(self.mt5_enabled_var.get()),
             mt5_symbol=self.mt5_symbol_var.get().strip(),
             mt5_n_M1=int(self.mt5_n_M1.get()),
             mt5_n_M5=int(self.mt5_n_M5.get()),
             mt5_n_M15=int(self.mt5_n_M15.get()),
             mt5_n_H1=int(self.mt5_n_H1.get()),
-                      
+
             nt_enabled=bool(self.no_trade_enabled_var.get()),
             nt_spread_factor=float(self.nt_spread_factor_var.get()),
             nt_min_atr_m5_pips=float(self.nt_min_atr_m5_pips_var.get()),
             nt_min_ticks_per_min=int(self.nt_min_ticks_per_min_var.get()),
-                        
+
             auto_trade_enabled=bool(self.auto_trade_enabled_var.get()),
             trade_strict_bias=bool(self.trade_strict_bias_var.get()),
             trade_size_mode=self.trade_size_mode_var.get(),
@@ -969,8 +750,7 @@ class GeminiFolderOnceApp:
             trade_news_block_before_min=int(self.trade_news_block_before_min_var.get()),
             trade_news_block_after_min=int(self.trade_news_block_after_min_var.get()),
         )
-    
-                                                                  
+
     def _load_env(self):
         """
         Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
@@ -1028,7 +808,7 @@ class GeminiFolderOnceApp:
             self.ui_message("info", "API", "Đã xoá API key đã lưu.")
         except Exception as e:
             self.ui_message("error", "API", str(e))
-                                                              
+
     def _get_reports_dir(self, folder_override: str | None = None) -> Path:
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -1094,7 +874,6 @@ class GeminiFolderOnceApp:
         if hasattr(self, "detail_text"):
             self.ui_detail_replace("Báo cáo tổng hợp sẽ hiển thị tại đây sau khi phân tích.")
 
-                                                          
     def start_analysis(self):
         """
         Mục đích: Bắt đầu quy trình chính (khởi tạo trạng thái, đọc cấu hình, chạy tác vụ nền).
@@ -1113,7 +892,6 @@ class GeminiFolderOnceApp:
         if self.cache_enabled_var.get() and self.delete_after_var.get():
             self.ui_status("Lưu ý: Cache ảnh đang bật, KHÔNG nên xoá file trên Gemini sau phân tích.")
 
-                             
         self.clear_results()
         self.ui_status("Đang nạp lại ảnh từ thư mục đã chọn...")
         self._load_files(folder)
@@ -1135,7 +913,6 @@ class GeminiFolderOnceApp:
             self.ui_message("error", "Gemini", f"Lỗi cấu hình API: {e}")
             return
 
-                    
         for i, r in enumerate(self.results):
             r["status"] = "Chưa xử lý"
             r["text"] = ""
@@ -1149,7 +926,6 @@ class GeminiFolderOnceApp:
         self.stop_btn.configure(state="normal")
         self.export_btn.configure(state="disabled")
 
-                                                                                  
         cfg = self._snapshot_config()
         t = threading.Thread(
             target=self._worker_run_whole_folder,
@@ -1170,7 +946,6 @@ class GeminiFolderOnceApp:
             self.stop_flag = True
             self.ui_status("Đang dừng sau khi hoàn tất tác vụ hiện tại...")
 
-                                                                    
     def _load_upload_cache(self) -> dict:
         """
         Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
@@ -1233,7 +1008,6 @@ class GeminiFolderOnceApp:
         from gemini_folder_once import uploader as _up
         _up.UploadCache.put(cache, path, remote_name)
 
-                                                                     
     def _prepare_image_for_upload(self, path: str) -> str:
         """
         Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
@@ -1259,10 +1033,6 @@ class GeminiFolderOnceApp:
         from gemini_folder_once import uploader as _up
         return _up.prepare_image(path, optimize=bool(optimize), app_dir=APP_DIR)
 
-
-                                                                  
-
-                                                                     
     def _parse_ctx_json_files(self, max_n=5, folder: str | None = None):
         """
         Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
@@ -1350,7 +1120,7 @@ class GeminiFolderOnceApp:
         return context_builder.folder_signature(names)
 
     def compose_context(self, cfg: RunConfig, budget_chars=1800):
-                                                                        
+
         """
         Mục đích: Xây dựng/ngắt ghép ngữ cảnh (text/JSON) để truyền vào prompt của Gemini.
         Tham số:
@@ -1361,7 +1131,6 @@ class GeminiFolderOnceApp:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
         return context_builder.compose_context(self, cfg, budget_chars)
-
 
     def _worker_run_whole_folder(self, prompt: str, model_name: str, cfg: RunConfig):
 
@@ -1385,7 +1154,6 @@ class GeminiFolderOnceApp:
             """
             return time.perf_counter()
 
-                                                
         def _gen_with_retry(_model, _parts, tries=2, base_delay=2.0):
             """
             Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -1428,27 +1196,25 @@ class GeminiFolderOnceApp:
             self._enqueue(self._finalize_stopped)
             return
 
-
-        uploaded_files = []                                                           
-        file_slots     = [None] * len(paths)                                     
+        uploaded_files = []
+        file_slots     = [None] * len(paths)
         combined_text  = ""
         early_exit     = False
 
         try:
-                                                                            
+
             t_up0 = _tnow()
             cache = self._load_upload_cache() if cfg.cache_enabled else {}
 
-                                                               
-            prepared_map = {}                               
-            to_upload = []                              
+            prepared_map = {}
+            to_upload = []
             for i, (p, n) in enumerate(zip(paths, names)):
                 cached_remote = self._cache_lookup(cache, p) if cache else ""
                 if cached_remote:
                     try:
                         f = genai.get_file(cached_remote)
                         if getattr(getattr(f, "state", None), "name", None) == "ACTIVE":
-                            file_slots[i] = f                             
+                            file_slots[i] = f
                             prepared_map[i] = None
                             continue
                     except Exception:
@@ -1457,7 +1223,6 @@ class GeminiFolderOnceApp:
                 to_upload.append((i, p, n, upath))
                 prepared_map[i] = upath
 
-                                                                                     
             if cfg.only_generate_if_changed and len(to_upload) == 0 and all(file_slots):
                 plan = None
                 composed = ""
@@ -1502,12 +1267,10 @@ class GeminiFolderOnceApp:
                 early_exit = True
                 raise SystemExit
 
-                                        
             for (i, p, n, upath) in to_upload:
                 self.results[i]["status"] = "Đang upload..."
                 self._update_tree_row(i, "Đang upload...")
 
-                                                                
             if to_upload:
                 max_workers = max(1, min(len(to_upload), int(cfg.upload_workers)))
                 with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -1517,7 +1280,7 @@ class GeminiFolderOnceApp:
                     }
                     done_cnt = 0
                     steps_upload   = len(to_upload)
-                    steps_process  = 1             
+                    steps_process  = 1
                     total_steps    = steps_upload + steps_process + 1
 
                     for fut in as_completed(futs):
@@ -1533,8 +1296,8 @@ class GeminiFolderOnceApp:
 
                         (p_ret, fobj) = fut.result()
                         i, p = futs[fut]
-                        file_slots[i] = fobj                                          
-                        uploaded_files.append((fobj, p))                                         
+                        file_slots[i] = fobj
+                        uploaded_files.append((fobj, p))
 
                         done_cnt += 1
                         self._update_progress(done_cnt, total_steps)
@@ -1548,7 +1311,6 @@ class GeminiFolderOnceApp:
                 steps_process  = 1
                 total_steps    = steps_upload + steps_process + 1
 
-                                                 
             if cfg.cache_enabled:
                 for (f, p) in uploaded_files:
                     try:
@@ -1562,12 +1324,11 @@ class GeminiFolderOnceApp:
                 early_exit = True
                 raise SystemExit
 
-                                                                                 
             all_media = []
             for i in range(len(paths)):
                 f = file_slots[i]
                 if f is None:
-                                                                               
+
                     all_media.append(uploader.as_inline_media_part(prepared_map.get(i) or paths[i]))
                 else:
                     all_media.append(uploader.file_or_inline_for_model(
@@ -1576,7 +1337,6 @@ class GeminiFolderOnceApp:
                         paths[i]
                     ))
 
-                       
             if cfg.cache_enabled:
                 for (f, p) in uploaded_files:
                     try:
@@ -1590,7 +1350,6 @@ class GeminiFolderOnceApp:
                 early_exit = True
                 raise SystemExit
 
-                                                                                             
             t_ctx0 = _tnow()
             plan = None
             composed = ""
@@ -1618,11 +1377,10 @@ class GeminiFolderOnceApp:
                     mt5_dict = {}
             self.ui_status(f"Context+MT5 xong trong {(_tnow()-t_ctx0):.2f}s")
 
-                                                                 
             if cfg.nt_enabled and mt5_dict:
                 ok, reasons = no_trade.pretrade_hard_filters(mt5_dict, cfg)
                 if not ok:
-                                                 
+
                     try:
                         self._log_trade_decision({
                             "stage": "no-trade",
@@ -1632,13 +1390,13 @@ class GeminiFolderOnceApp:
                     except Exception:
                         pass
                     note = "NO-TRADE: Điều kiện giao dịch không thỏa.\n- " + "\n- ".join(reasons)
-                                                       
+
                     try:
                         self._log_trade_decision({
                             "stage": "no-trade",
                             "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "reasons": reasons,
-                            
+
                         }, folder_override=(self.mt5_symbol_var.get().strip() or None))
                     except Exception:
                         pass
@@ -1650,7 +1408,7 @@ class GeminiFolderOnceApp:
                     self.ui_detail_replace(note)
                     _ = self._auto_save_report(note, cfg)
                     self.ui_refresh_history_list()
-                                                                
+
                     try:
                         if mt5_dict:
                             self._mt5_manage_be_trailing(mt5_dict, cfg)
@@ -1659,12 +1417,10 @@ class GeminiFolderOnceApp:
                     early_exit = True
                     raise SystemExit
 
-                                                                                      
             self.ui_status("Đang phân tích toàn bộ thư mục...")
             try:
                 tf_section = self._build_timeframe_section([Path(p).name for p in paths]).strip()
 
-                                                          
                 parts_text = []
                 if tf_section:
                     parts_text.append("### Nhãn khung thời gian (tự nhận từ tên tệp)\n")
@@ -1679,7 +1435,6 @@ class GeminiFolderOnceApp:
                     parts_text.append(mt5_json_full)
                 prompt_final = "".join(parts_text)
 
-                                                                           
                 t_llm0 = _tnow()
                 parts = all_media + [prompt_final]
                 resp = _gen_with_retry(model, parts, tries=2, base_delay=2.0)
@@ -1687,13 +1442,11 @@ class GeminiFolderOnceApp:
                 combined_text = (getattr(resp, "text", "") or "").strip() or "[Không có nội dung trả về]"
                 self.ui_status(f"Model trả lời trong {(_tnow()-t_llm0):.2f}s")
 
-                                                         
                 self._update_progress(steps_upload + steps_process, steps_upload + steps_process + 1)
 
             except Exception as e:
                 combined_text = f"[LỖI phân tích] {e}"
 
-                                                      
             for p in paths:
                 idx_real = next((i for i, r in enumerate(self.results) if r["path"] == p), None)
                 if idx_real is not None:
@@ -1713,7 +1466,6 @@ class GeminiFolderOnceApp:
             self.ui_refresh_history_list()
             self.ui_refresh_json_list()
 
-                                                                            
             if not self.stop_flag and not early_exit:
                 try:
                     self._maybe_notify_telegram(combined_text, saved_path, cfg)
@@ -1723,25 +1475,23 @@ class GeminiFolderOnceApp:
                     self._auto_trade_if_high_prob(combined_text, mt5_dict, cfg)
                 except Exception as e:
                     self.ui_status(f"Auto-Trade lỗi: {e}")
-                                                   
+
                 try:
                     if mt5_dict:
                         self._mt5_manage_be_trailing(mt5_dict, cfg)
                 except Exception:
                     pass
 
-
-                                                
             self._update_progress(steps_upload + steps_process + 1, steps_upload + steps_process + 1)
 
         except SystemExit:
-                                    
+
             pass
         except Exception as e:
             self.ui_message("error", "Lỗi", str(e))
 
         finally:
-                                                         
+
             if not cfg.cache_enabled and cfg.delete_after:
                 for uf, _ in uploaded_files:
                     try:
@@ -1749,7 +1499,6 @@ class GeminiFolderOnceApp:
                     except Exception:
                         pass
 
-                                                       
             self._enqueue(self._finalize_done if not self.stop_flag else self._finalize_stopped)
 
     def _upload_one_file_for_worker(self, item):
@@ -1781,7 +1530,6 @@ class GeminiFolderOnceApp:
         except Exception:
             pass
 
-                                                                      
     def _auto_save_json_from_report(self, text: str, cfg: RunConfig):
         """
         Mục đích: Ghi/Xuất dữ liệu (báo cáo .md, JSON tóm tắt, cache...).
@@ -1817,7 +1565,6 @@ class GeminiFolderOnceApp:
         out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return out
 
-                                                        
     def _pick_ca_bundle(self):
         """
         Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
@@ -1891,10 +1638,9 @@ class GeminiFolderOnceApp:
             ln = re.sub(r"\s+", " ", (ln or "")).strip()
             if len(ln) > MAX_PER_LINE:
                 ln = ln[: MAX_PER_LINE - 1] + "…"
-                                                
+
             cleaned.append(_tg_html_escape(ln))
 
-                                                   
         folder_safe = _tg_html_escape(folder)
         saved_safe = _tg_html_escape(saved_report_path.name) if saved_report_path else None
         ts_safe = _tg_html_escape(ts)
@@ -1914,7 +1660,6 @@ class GeminiFolderOnceApp:
             pass
         return msg
 
-                                                        
     def _build_ssl_context_from_cfg(self, cfg: RunConfig) -> ssl.SSLContext:
         """
         Mục đích: Khởi tạo/cấu hình thành phần giao diện hoặc cấu trúc dữ liệu nội bộ.
@@ -2132,8 +1877,6 @@ class GeminiFolderOnceApp:
         msg = TelegramClient.build_message(lines, saved_report_path, folder=cfg.folder)
         self._send_telegram_message_from_cfg2(msg, cfg)
 
-                                                                        
-                                          
     def _find_balanced_json_after(self, text: str, start_idx: int):
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -2168,7 +1911,6 @@ class GeminiFolderOnceApp:
         """
         return report_parser.extract_json_block_prefer(text)
 
-                                       
         fence = re.findall(r"```json\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
         for blob in fence:
             try:
@@ -2176,7 +1918,6 @@ class GeminiFolderOnceApp:
             except Exception:
                 pass
 
-                                                                          
         keywords = ["CHECKLIST_JSON", "EXTRACT_JSON", "setup", "trade", "signal"]
         lowered = text.lower()
         for kw in keywords:
@@ -2191,7 +1932,6 @@ class GeminiFolderOnceApp:
                         except Exception:
                             pass
 
-                                                                          
         first_brace = text.find("{")
         while first_brace >= 0:
             js, nxt = self._find_balanced_json_after(text, first_brace)
@@ -2218,7 +1958,7 @@ class GeminiFolderOnceApp:
         return report_parser.coerce_setup_from_json(obj)
         if obj is None:
             return None
-                                      
+
         candidates = []
         if isinstance(obj, dict):
             candidates.append(obj)
@@ -2260,14 +2000,13 @@ class GeminiFolderOnceApp:
             if not x:
                 return None
             s = str(x).strip().lower()
-                      
+
             if s in ("long", "buy", "mua", "bull", "bullish"):
                 return "long"
             if s in ("short", "sell", "bán", "ban", "bear", "bearish"):
                 return "short"
             return None
 
-                                   
         for c in candidates:
             d = {
                 "direction": _dir(c.get("direction") or c.get("dir") or c.get("side")),
@@ -2276,7 +2015,7 @@ class GeminiFolderOnceApp:
                 "tp1":   _num(c.get("tp1")   or c.get("tp_1")  or c.get("take_profit_1") or c.get("tp")),
                 "tp2":   _num(c.get("tp2")   or c.get("tp_2")  or c.get("take_profit_2")),
             }
-                                                                                   
+
             if d["tp1"] is None and d["tp2"] is not None:
                 d["tp1"] = d["tp2"]
             if d["tp1"] is not None and d["sl"] is not None and d["entry"] is not None and d["direction"] in ("long","short"):
@@ -2321,11 +2060,10 @@ class GeminiFolderOnceApp:
         if not text:
             return out
 
-                                                      
         obj = None
         if hasattr(self, "_extract_json_block_prefer"):
             obj = self._extract_json_block_prefer(text)
-                                                              
+
         if obj is None:
             for m in re.finditer(r"\{[\s\S]*?\}", text):
                 try:
@@ -2375,18 +2113,18 @@ class GeminiFolderOnceApp:
               - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
             """
             if not isinstance(root, dict): return None
-                                                         
+
             chk = root.get("CHECKLIST_JSON") or root.get("checklist") or root
             if isinstance(chk, dict) and ("setup_status" in chk or "conclusions" in chk):
                 out["bias_h1"] = (chk.get("bias_H1") or chk.get("bias_h1") or "").lower() or out["bias_h1"]
                 concl = (chk.get("conclusions") or "").upper()
                 out["enough"] = out["enough"] or ("ĐỦ" in concl or "DU" in concl)
-                                             
+
             cands = []
             for k in ("proposed_plan","plan","trade","signal","setup"):
                 if isinstance(root.get(k), dict):
                     cands.append(root[k])
-                                          
+
             for v in root.values():
                 if isinstance(v, dict):
                     for k in ("proposed_plan","plan","trade","signal","setup"):
@@ -2411,7 +2149,6 @@ class GeminiFolderOnceApp:
             out.update(plan)
             return out
 
-                                             
         lines_sig = None
         try:
             lines, lines_sig, _ = self._extract_seven_lines(text)
@@ -2419,7 +2156,7 @@ class GeminiFolderOnceApp:
             lines = None
         if lines:
             out["direction"] = self._parse_direction_from_line1(lines[0])
-                                                                              
+
             def _lastnum(s):
                 """
                 Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -2456,14 +2193,12 @@ class GeminiFolderOnceApp:
             self.ui_status("Auto-Trade: MT5 chưa bật/cài.")
             return
 
-                                
         setup = self._parse_setup_from_report(combined_text)
         direction = setup["direction"]
         entry = setup["entry"]; sl = setup["sl"]; tp1 = setup["tp1"]; tp2 = setup["tp2"]
         bias = (setup["bias_h1"] or "").lower()
         enough = bool(setup["enough"])
 
-                       
         if direction not in ("long", "short"):
             self.ui_status("Auto-Trade: thiếu hướng lệnh.")
             try:
@@ -2505,7 +2240,6 @@ class GeminiFolderOnceApp:
             except Exception: pass
             return
 
-                                       
         setup_sig = hashlib.sha1(f"{sym}|{direction}|{round(entry,5)}|{round(sl,5)}|{round(tp1,5)}|{round(tp2,5)}".encode("utf-8")).hexdigest()
         state = self._load_last_trade_state()
         last_sig = (state.get("sig") or "")
@@ -2523,7 +2257,6 @@ class GeminiFolderOnceApp:
             except Exception: pass
             return
 
-                                         
         pending_thr = int(cfg.trade_pending_threshold_points)
         try:
             atr = (((mt5_ctx.get("volatility") or {}).get("ATR") or {}).get("M5"))
@@ -2534,7 +2267,6 @@ class GeminiFolderOnceApp:
         except Exception:
             pass
 
-                         
         lots_total = None
         mode = cfg.trade_size_mode
         if mode == "lots":
@@ -2578,7 +2310,6 @@ class GeminiFolderOnceApp:
                 return
             lots_total = risk_money / (dist_points * value_per_point)
 
-                                  
         vol_min = getattr(info, "volume_min", 0.01) or 0.01
         vol_max = getattr(info, "volume_max", 100.0) or 100.0
         vol_step = getattr(info, "volume_step", 0.01) or 0.01
@@ -2596,7 +2327,7 @@ class GeminiFolderOnceApp:
         lots_total = _round_step(lots_total)
         split1 = max(1, min(99, int(cfg.trade_split_tp1_pct))) / 100.0
         vol1 = _round_step(lots_total * split1)
-        vol2 = _round_step(lots_total - vol1)                                    
+        vol2 = _round_step(lots_total - vol1)
         if vol1 < vol_min or vol2 < vol_min:
             self.ui_status("Auto-Trade: khối lượng quá nhỏ sau chia TP.")
             try:
@@ -2612,17 +2343,14 @@ class GeminiFolderOnceApp:
         magic = int(cfg.trade_magic)
         comment_prefix = (cfg.trade_comment_prefix or "AI-ICT").strip()
 
-                                                                            
         dist_to_entry_pts = abs(entry - cp) / point
         use_pending = dist_to_entry_pts >= pending_thr
         if use_pending and dist_to_entry_pts <= deviation:
-            use_pending = False                          
+            use_pending = False
 
-                     
         from datetime import timedelta
         exp_time = datetime.now() + timedelta(minutes=int(cfg.trade_pending_ttl_min))
 
-                                        
         log_base = {
             "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2,
@@ -2635,11 +2363,10 @@ class GeminiFolderOnceApp:
 
         if cfg.auto_trade_dry_run:
             self.ui_status("Auto-Trade: DRY-RUN — chỉ log, không gửi lệnh.")
-                                         
+
             self._save_last_trade_state({"sig": setup_sig, "time": time.time()})
             return
 
-                     
         reqs = []
         if use_pending:
             if direction == "long":
@@ -2672,7 +2399,6 @@ class GeminiFolderOnceApp:
                 dict(**common, volume=vol2, tp=round(tp2, digits), comment=f"{comment_prefix}-TP2"),
             ]
 
-                                
         errs = []
         for req in reqs:
             prefer = "pending" if req.get("action") == mt5.TRADE_ACTION_PENDING else "market"
@@ -2687,8 +2413,6 @@ class GeminiFolderOnceApp:
             self._save_last_trade_state({"sig": setup_sig, "time": time.time()})
             self._log_trade_decision({**log_base, "stage": "send", "ok": True}, folder_override=(self.mt5_symbol_var.get().strip() or None))
             self.ui_status("Auto-Trade: đã gửi 2 lệnh TP1/TP2.")
-
-                                         
 
     def _order_send_safe(self, req, retry=2):
         """
@@ -2709,7 +2433,6 @@ class GeminiFolderOnceApp:
             time.sleep(0.6)
         return last
 
-                                                                                   
     def _fill_priority(self, prefer: str):
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -2724,7 +2447,7 @@ class GeminiFolderOnceApp:
             FOK = mt5.ORDER_FILLING_FOK
             RET = mt5.ORDER_FILLING_RETURN
         except Exception:
-                                             
+
             IOC = 1; FOK = 0; RET = 2
         return ([IOC, FOK, RET] if prefer == "market" else [FOK, IOC, RET])
 
@@ -2763,17 +2486,13 @@ class GeminiFolderOnceApp:
             res = self._order_send_safe(r, retry=retry_per_mode)
             tried.append(self._fill_name(fill))
 
-                                      
             if res and res.retcode == mt5.TRADE_RETCODE_DONE:
                 if len(tried) > 1:
                     self.ui_status(f"Order OK sau khi đổi filling → {tried[-1]}.")
                 return res
 
-                                                                                             
-                                                                          
             last_res = res
 
-                                                    
         cmt = getattr(last_res, "comment", "unknown") if last_res else "no result"
         self.ui_status(f"Order FAIL với các filling: {', '.join(tried)} — {cmt}")
         return last_res
@@ -2809,7 +2528,7 @@ class GeminiFolderOnceApp:
         ss = (mt5_ctx.get("sessions_today") or {})
         now = datetime.now().strftime("%H:%M")
         ok = False
-        def _in(r): 
+        def _in(r):
             """
             Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
             Tham số:
@@ -2821,9 +2540,9 @@ class GeminiFolderOnceApp:
             return bool(r and r.get("start") and r.get("end") and r["start"] <= now < r["end"])
         if cfg.trade_allow_session_asia   and _in(ss.get("asia")): ok = True
         if cfg.trade_allow_session_london and _in(ss.get("london")): ok = True
-        if cfg.trade_allow_session_ny     and ( _in(ss.get("newyork_pre")) or _in(ss.get("newyork_post")) ): 
+        if cfg.trade_allow_session_ny     and ( _in(ss.get("newyork_pre")) or _in(ss.get("newyork_post")) ):
             ok = True
-                                                           
+
         if not (cfg.trade_allow_session_asia or cfg.trade_allow_session_london or cfg.trade_allow_session_ny):
             ok = True
         return ok
@@ -2847,13 +2566,6 @@ class GeminiFolderOnceApp:
                 subprocess.run(["xdg-open", str(path)], check=False)
         except Exception as e:
             self.ui_message("error", "Mở tệp", str(e))
-
-                                                                                    
-                                    
-    
-
-    
-        
 
     def _near_key_levels_too_close(self, mt5_ctx: dict, min_pips: float, cp: float) -> bool:
         """
@@ -2894,7 +2606,6 @@ class GeminiFolderOnceApp:
             p = d / f"trade_log_{datetime.now().strftime('%Y%m%d')}.jsonl"
             line = (json.dumps(data, ensure_ascii=False, separators=(',', ':')) + "\n").encode("utf-8")
 
-                                     
             p.parent.mkdir(parents=True, exist_ok=True)
 
             with self._trade_log_lock:
@@ -2907,7 +2618,7 @@ class GeminiFolderOnceApp:
                                 fr.seek(-1, os.SEEK_END)
                                 need_leading_newline = (fr.read(1) != b"\n")
                     except Exception:
-                                                                     
+
                         need_leading_newline = False
 
                 with open(p, "ab") as f:
@@ -2916,11 +2627,11 @@ class GeminiFolderOnceApp:
                     f.write(line)
                     f.flush()
                     try:
-                        os.fsync(f.fileno())                                           
+                        os.fsync(f.fileno())
                     except Exception:
                         pass
         except Exception:
-                                                  
+
             pass
 
     def _load_last_trade_state(self):
@@ -2969,7 +2680,7 @@ class GeminiFolderOnceApp:
             if not info:
                 return
             magic = int(cfg.trade_magic)
-                        
+
             atr = None
             point = None
             try:
@@ -2984,7 +2695,6 @@ class GeminiFolderOnceApp:
             if not positions:
                 return
 
-                                                      
             from datetime import timedelta
             now = datetime.now()
             deals = mt5.history_deals_get(now - timedelta(days=2), now) or []
@@ -3016,14 +2726,13 @@ class GeminiFolderOnceApp:
                     if not cur:
                         continue
 
-                                  
                     move_to_be = False
                     if cfg.trade_move_to_be_after_tp1:
-                                                    
+
                         if (sym, pos_id) in tp1_closed:
                             move_to_be = True
                         else:
-                                                       
+
                             if sl is not None and point:
                                 half = abs(entry - sl) * 0.5
                                 if (p.type == mt5.POSITION_TYPE_BUY and cur - entry >= half) or\
@@ -3032,11 +2741,10 @@ class GeminiFolderOnceApp:
 
                     new_sl = sl
                     if move_to_be:
-                                                      
+
                         buf = (point * 2)
                         new_sl = entry - buf if p.type == mt5.POSITION_TYPE_BUY else entry + buf
 
-                                  
                     if atr_pts and atr_mult > 0 and point:
                         trail = atr_pts * atr_mult * point
                         if p.type == mt5.POSITION_TYPE_BUY:
@@ -3049,7 +2757,7 @@ class GeminiFolderOnceApp:
                                 new_sl = cand
 
                     if new_sl and (sl is None or abs(new_sl - sl) > point*1.5):
-                                
+
                         req = dict(action=mt5.TRADE_ACTION_SLTP, position=pos_id, symbol=sym,
                                 sl=round(new_sl, mt5.symbol_info(sym).digits),
                                 tp=p.tp)
@@ -3059,7 +2767,6 @@ class GeminiFolderOnceApp:
         except Exception:
             pass
 
-                                                              
     def _maybe_delete(self, uploaded_file):
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -3113,7 +2820,7 @@ class GeminiFolderOnceApp:
         self._enqueue(action)
 
     def _finalize_done(self):
-                          
+
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
         Tham số: (không)
@@ -3128,7 +2835,7 @@ class GeminiFolderOnceApp:
             }, folder_override=(self.mt5_symbol_var.get().strip() or None))
         except Exception:
             pass
-                                           
+
         self.is_running = False
         self.stop_flag = False
         self.stop_btn.configure(state="disabled")
@@ -3166,7 +2873,6 @@ class GeminiFolderOnceApp:
         else:
             self.detail_text.insert("1.0", "Chưa có báo cáo. Hãy bấm 'Bắt đầu'.")
 
-                                                              
     def export_markdown(self):
         """
         Mục đích: Ghi/Xuất dữ liệu (báo cáo .md, JSON tóm tắt, cache...).
@@ -3239,7 +2945,6 @@ class GeminiFolderOnceApp:
         self.ui_progress(0)
         self.ui_status("Đã xoá kết quả khỏi giao diện.")
 
-                                                        
     def _enqueue(self, func):
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -3251,9 +2956,8 @@ class GeminiFolderOnceApp:
         """
         self.ui_queue.put(func)
 
-                                                                        
     def ui_status(self, text: str):
-                                                               
+
         """
         Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
         Tham số:
@@ -3293,7 +2997,7 @@ class GeminiFolderOnceApp:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
         def _show():
-                                                     
+
             """
             Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
             Tham số: (không)
@@ -3308,7 +3012,6 @@ class GeminiFolderOnceApp:
                 except Exception:
                     pass
 
-                                               
             top = tk.Toplevel(self.root)
             try:
                 top.transient(self.root)
@@ -3324,20 +3027,18 @@ class GeminiFolderOnceApp:
             frm = ttk.Frame(top, padding=12)
             frm.pack(fill="both", expand=True)
 
-                                        
             ttk.Label(frm, text=title or "", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 4))
             ttk.Label(frm, text=text or "", justify="left", wraplength=480).pack(anchor="w")
             ttk.Label(frm, text=f"Sẽ tự đóng trong {auto_close_ms//1000}s", foreground="#666").pack(anchor="w", pady=(8, 0))
             ttk.Button(frm, text="Đóng", command=top.destroy).pack(anchor="e", pady=(8, 0))
 
-                                                                    
             try:
                 top.update_idletasks()
                 x = self.root.winfo_rootx() + self.root.winfo_width() - top.winfo_width() - 24
                 y = self.root.winfo_rooty() + 24
                 x = max(0, x); y = max(0, y)
                 top.geometry(f"+{x}+{y}")
-                                                                          
+
                 def _drop_topmost():
                     """
                     Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -3352,7 +3053,6 @@ class GeminiFolderOnceApp:
             except Exception:
                 pass
 
-                                                        
             def _safe_destroy():
                 """
                 Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -3408,7 +3108,7 @@ class GeminiFolderOnceApp:
                     except Exception:
                         pass
         except Exception:
-                                                  
+
             pass
 
     def ui_widget_state(self, widget, state: str):
@@ -3460,7 +3160,6 @@ class GeminiFolderOnceApp:
             self.detail_text.insert("1.0", placeholder or "")
         ))
 
-                                                                                    
     def ui_refresh_history_list(self):
         """
         Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
@@ -3481,7 +3180,6 @@ class GeminiFolderOnceApp:
         """
         self._enqueue(self._refresh_json_list)
 
-
     def _poll_ui_queue(self):
         """
         Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
@@ -3501,7 +3199,6 @@ class GeminiFolderOnceApp:
             pass
         self.root.after(80, self._poll_ui_queue)
 
-                                                      
     def ui_set_var(self, tk_var, value):
         """
         Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
@@ -3530,7 +3227,6 @@ class GeminiFolderOnceApp:
             w.insert("1.0", t)
         ))
 
-                                                           
     def _refresh_history_list(self):
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -3601,7 +3297,7 @@ class GeminiFolderOnceApp:
         try:
             p.unlink()
             self._refresh_history_list()
-            self.detail_text.delete("1.0", "end")                               
+            self.detail_text.delete("1.0", "end")
         except Exception as e:
             self.ui_message("error", "History", str(e))
 
@@ -3617,7 +3313,6 @@ class GeminiFolderOnceApp:
         if d:
             self._open_path(d)
 
-                                                        
     def _refresh_json_list(self):
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -3688,7 +3383,7 @@ class GeminiFolderOnceApp:
         try:
             p.unlink()
             self._refresh_json_list()
-            self.detail_text.delete("1.0", "end")                           
+            self.detail_text.delete("1.0", "end")
         except Exception as e:
             self.ui_message("error", "JSON", str(e))
 
@@ -3704,7 +3399,6 @@ class GeminiFolderOnceApp:
         if d:
             self._open_path(d)
 
-                                                                
     def _detect_timeframe_from_name(self, name: str) -> str:
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -3716,8 +3410,6 @@ class GeminiFolderOnceApp:
         """
         s = Path(name).stem.lower()
 
-                                                                         
-                                                                      
         patterns = [
             ("MN1", r"(?<![a-z0-9])(?:mn1|1mo|monthly)(?![a-z0-9])"),
             ("W1",  r"(?<![a-z0-9])(?:w1|1w|weekly)(?![a-z0-9])"),
@@ -3727,7 +3419,7 @@ class GeminiFolderOnceApp:
             ("M30", r"(?<![a-z0-9])(?:m30|30m)(?![a-z0-9])"),
             ("M15", r"(?<![a-z0-9])(?:m15|15m)(?![a-z0-9])"),
             ("M5",  r"(?<![a-z0-9])(?:m5|5m)(?![a-z0-9])"),
-                                                                           
+
             ("M1",  r"(?<![a-z0-9])(?:m1|1m)(?![a-z0-9])"),
         ]
 
@@ -3751,7 +3443,6 @@ class GeminiFolderOnceApp:
             lines.append(f"- {n} ⇒ {tf}")
         return "\n".join(lines)
 
-                                                       
     def _toggle_autorun(self):
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -3807,9 +3498,9 @@ class GeminiFolderOnceApp:
         if not self.is_running:
             self.start_analysis()
         else:
-                                                                 
+
             if self.mt5_enabled_var.get() and self.auto_trade_enabled_var.get():
-                                                                        
+
                 cfg_snapshot = self._snapshot_config()
                 def _sweep(c):
                     """
@@ -3831,7 +3522,6 @@ class GeminiFolderOnceApp:
                 threading.Thread(target=_sweep, args=(cfg_snapshot,), daemon=True).start()
             self._schedule_next_autorun()
 
-                                                              
     def _pick_mt5_terminal(self):
         """
         Mục đích: Tương tác với MetaTrader 5 (kết nối, lấy dữ liệu nến, tính toán chỉ số, snapshot...).
@@ -3924,639 +3614,19 @@ class GeminiFolderOnceApp:
             if not self.mt5_initialized:
                 return ""
 
-                                            
-        def _value_per_point(info_obj):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - info_obj — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            return _value_per_point_safe(sym, info_obj) or 0.0
-
-        def _points_per_pip(info_obj):
-                                                                                 
-                                                                 
-                                                                       
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - info_obj — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            d = int(info_obj.get("digits", 5) or 5)
-            if d >= 3:
-                return 10
-            return 1
-
-        def _quantiles(vals, q_list):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - vals — (tự suy luận theo ngữ cảnh sử dụng).
-              - q_list — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            if not vals:
-                return {q: None for q in q_list}
-            arr = sorted(vals)
-            out = {}
-            for q in q_list:
-                if q <= 0: out[q] = arr[0]; continue
-                if q >= 1: out[q] = arr[-1]; continue
-                pos = (len(arr)-1) * q
-                lo = int(math.floor(pos)); hi = int(math.ceil(pos))
-                if lo == hi:
-                    out[q] = arr[lo]
-                else:
-                    out[q] = arr[lo] + (arr[hi] - arr[lo]) * (pos - lo)
-            return out
-
-        def _adr_stats(symbol, n=20):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - symbol — (tự suy luận theo ngữ cảnh sử dụng).
-              - n — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            bars = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 0, max(25, n+2))
-            if bars is None or len(bars) < 5:
-                return None
-            ranges = [float(b["high"] - b["low"]) for b in bars[-(n+1):-1]]
-            if not ranges:
-                return None
-            def _avg(m): 
-                """
-                Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-                Tham số:
-                  - m — (tự suy luận theo ngữ cảnh sử dụng).
-                Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-                Ghi chú:
-                  - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-                """
-                return sum(ranges[-m:]) / max(1, m) if len(ranges) >= m else None
-            return {"d5": _avg(5), "d10": _avg(10), "d20": _avg(20)}
-
-        def _position_in_day_range(cp, day):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - cp — (tự suy luận theo ngữ cảnh sử dụng).
-              - day — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            hi = day.get("high"); lo = day.get("low")
-            if not cp or not hi or not lo or hi <= lo:
-                return None
-            return max(0.0, min(1.0, (cp - lo) / (hi - lo)))
-
-        def _round_levels_near(cp, point, points_per_pip, steps=(0, 25, 50, 75)):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - cp — (tự suy luận theo ngữ cảnh sử dụng).
-              - point — (tự suy luận theo ngữ cảnh sử dụng).
-              - points_per_pip — (tự suy luận theo ngữ cảnh sử dụng).
-              - steps — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            if not cp or not point:
-                return []
-            pip = points_per_pip * point
-            base = round(cp / (0.01 * pip)) * (0.01 * pip)                  
-            lv = []
-                                            
-            piv = [int(math.floor((cp / pip))) * pip + (s * pip / 100.0) for s in (0,25,50,75)]
-            for price in piv:
-                dist_pips = abs(cp - price) / (point * points_per_pip)
-                lv.append({"level": f"{int(round((price % 1)/pip*100)):02d}" if pip>0 else "xx",
-                        "price": round(price, info.digits), "distance_pips": round(dist_pips, 2)})
-                             
-            seen = set(); out=[]
-            for x in lv:
-                if x["price"] in seen: 
-                    continue
-                seen.add(x["price"]); out.append(x)
-            return out
-
-        def _fib_from_h1_swing(h1_rates):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - h1_rates — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            if not h1_rates:
-                return None
-            hi = max(r["high"] for r in h1_rates)
-            lo = min(r["low"]  for r in h1_rates)
-            if hi is None or lo is None or hi <= lo:
-                return None
-            eq50 = (hi + lo) / 2.0
-            ote62 = lo + (hi - lo) * 0.62
-            ote79 = lo + (hi - lo) * 0.79
-            return {"lo": lo, "hi": hi, "eq50": eq50, "ote_62": ote62, "ote_79": ote79}
-
-                                                   
-        info = mt5.symbol_info(sym)
-        if not info:
-            return ""
-        if not info.visible:
-            mt5.symbol_select(sym, True)
-        acc = mt5.account_info()
-        tick = mt5.symbol_info_tick(sym)
-
-        info_obj = {
-            "digits": getattr(info, "digits", None), 
-            "point": getattr(info, "point", None),
-            "contract_size": getattr(info, "trade_contract_size", None),
-            "spread_current": getattr(info, "spread", None),
-            "swap_long": getattr(info, "swap_long", None),
-            "swap_short": getattr(info, "swap_short", None),
-        }
-        account_obj = None
-        if acc:
-            account_obj = {
-                "balance": float(getattr(acc, "balance", 0.0)),
-                "equity": float(getattr(acc, "equity", 0.0)),
-                "free_margin": float(getattr(acc, "margin_free", 0.0)),
-                "currency": getattr(acc, "currency", None),
-                "leverage": int(getattr(acc, "leverage", 0)) or None
-            }
-        rules_obj = {
-            "volume_min": getattr(info, "volume_min", None),
-            "volume_max": getattr(info, "volume_max", None),
-            "volume_step": getattr(info, "volume_step", None),
-            "trade_tick_value": getattr(info, "trade_tick_value", None),
-            "trade_tick_size": getattr(info, "trade_tick_size", None),
-            "stop_level_points": getattr(info, "trade_stops_level", None),
-            "freeze_level_points": getattr(info, "trade_freeze_level", None),
-            "margin_initial": getattr(info, "margin_initial", None),
-            "margin_maintenance": getattr(info, "margin_maintenance", None),
-        }
-
-        tick_obj = {}
-        if tick:
-            tick_obj = {
-                "bid": float(getattr(tick, "bid", 0.0)),
-                "ask": float(getattr(tick, "ask", 0.0)),
-                "last": float(getattr(tick, "last", 0.0)),
-                "time": int(getattr(tick, "time", 0)),
-            }
-        cp = float(tick_obj.get("bid") or tick_obj.get("last") or 0.0)
-
-                                                 
-        tick_stats_5m = {}
-        tick_stats_30m = {}
+        # Delegate to mt5_utils for building the MT5 context JSON
         try:
-            now_ts = int(time.time())
-            for minutes, holder in ((5, "short"), (30, "long")):
-                frm = now_ts - minutes * 60
-                ticks = mt5.copy_ticks_range(sym, frm, now_ts, mt5.COPY_TICKS_INFO)
-                if ticks is None or len(ticks) < 5 or not info:
-                    if minutes == 5:   tick_stats_5m = {}
-                    else:              tick_stats_30m = {}
-                    continue
-                spreads = []
-                for t in ticks:
-                    b, a = float(t["bid"]), float(t["ask"])
-                    if a > 0 and b > 0:
-                        spreads.append(int(round((a - b) / (info.point or 0.01))))
-                if minutes == 5:
-                    med = median(spreads) if spreads else None
-                    p90 = sorted(spreads)[int(len(spreads)*0.9)] if spreads else None
-                    tick_stats_5m = {"ticks_per_min": int(len(ticks)/5), "median_spread": med, "p90_spread": p90}
-                else:
-                    med = median(spreads) if spreads else None
-                    p90 = sorted(spreads)[int(len(spreads)*0.9)] if spreads else None
-                    tick_stats_30m = {"ticks_per_min": int(len(ticks)/30), "median_spread": med, "p90_spread": p90}
+            return mt5_utils.build_context(
+                sym,
+                n_m1=(cfg.mt5_n_M1 if cfg else int(self.mt5_n_M1.get())),
+                n_m5=(cfg.mt5_n_M5 if cfg else int(self.mt5_n_M5.get())),
+                n_m15=(cfg.mt5_n_M15 if cfg else int(self.mt5_n_M15.get())),
+                n_h1=(cfg.mt5_n_H1 if cfg else int(self.mt5_n_H1.get())),
+                plan=plan,
+                return_json=True,
+            ) or ""
         except Exception:
-            pass
-
-                                                   
-        def _series(tfcode, bars):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - tfcode — (tự suy luận theo ngữ cảnh sử dụng).
-              - bars — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            arr = mt5.copy_rates_from_pos(sym, tfcode, 0, max(50, int(bars)))
-            rows = []
-            if arr is not None:
-                for r in arr:
-                    rows.append({
-                        "time": datetime.fromtimestamp(int(r["time"])).strftime("%Y-%m-%d %H:%M:%S"),
-                        "open": float(r["open"]), "high": float(r["high"]),
-                        "low": float(r["low"]), "close": float(r["close"]),
-                        "vol": int(r["tick_volume"])
-                    })
-            return rows
-
-        series = {
-            "M1":  _series(mt5.TIMEFRAME_M1,  cfg.mt5_n_M1 if cfg else self.mt5_n_M1.get()),
-            "M5":  _series(mt5.TIMEFRAME_M5,  cfg.mt5_n_M5 if cfg else self.mt5_n_M5.get()),
-            "M15": _series(mt5.TIMEFRAME_M15, cfg.mt5_n_M15 if cfg else self.mt5_n_M15.get()),
-            "H1":  _series(mt5.TIMEFRAME_H1,  cfg.mt5_n_H1 if cfg else self.mt5_n_H1.get()),
-        }
-
-                                                            
-        def _hl_from(tfcode, bars):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - tfcode — (tự suy luận theo ngữ cảnh sử dụng).
-              - bars — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            data = mt5.copy_rates_from_pos(sym, tfcode, 0, bars)
-            if data is None or len(data) == 0:
-                return None
-            hi = max([float(x["high"]) for x in data])
-            lo = min([float(x["low"])  for x in data])
-            op = float(data[0]["open"])
-            return {"open": op, "high": hi, "low": lo}
-
-        daily = _hl_from(mt5.TIMEFRAME_D1, 2) or {}
-        prev_day = {}
-        try:
-            d2 = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_D1, 1, 1)
-            if d2 is not None and len(d2) == 1:
-                prev_day = {"high": float(d2[0]["high"]), "low": float(d2[0]["low"])}
-        except Exception:
-            pass
-        weekly = _hl_from(mt5.TIMEFRAME_W1, 1) or {}
-        prev_week = {}
-        try:
-            w2 = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_W1, 1, 1)
-            if w2 is not None and len(w2) == 1:
-                prev_week = {"high": float(w2[0]["high"]), "low": float(w2[0]["low"])}
-        except Exception:
-            pass
-        monthly = _hl_from(mt5.TIMEFRAME_MN1, 1) or {}
-
-        midnight_open = None
-        if series["M1"]:
-            for r in series["M1"]:
-                if r["time"].endswith("00:00:00"):
-                    midnight_open = r["open"]
-                    break
-        if daily:
-            eq50 = (daily.get("high", None) + daily.get("low", None)) / 2.0 if daily.get("high") and daily.get("low") else None
-            daily["eq50"] = eq50
-            daily["midnight_open"] = midnight_open
-
-                                             
-        sessions_today = _session_ranges(series["M1"]) if series["M1"] else {}
-        def _vwap(rates):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - rates — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            if not rates:
-                return None
-            s_pv = 0.0; s_v = 0.0
-            for r in rates:
-                tp = (r["high"] + r["low"] + r["close"]) / 3.0
-                v = max(1, r["vol"])
-                s_pv += tp * v; s_v += v
-            return s_pv / s_v if s_v > 0 else None
-
-        vwap_day = _vwap([r for r in series["M1"] if r["time"][:10] == datetime.now().strftime("%Y-%m-%d")])
-        vwaps = {"day": vwap_day}
-        for ss in ["asia", "london", "newyork_pre","newyork_post"]:
-            rng = sessions_today.get(ss, {})
-            if rng and rng.get("start") and rng.get("end"):
-                sub = []
-                for r in series["M1"]:
-                    hh = r["time"][11:16]
-                    if r["time"][:10] == datetime.now().strftime("%Y-%m-%d") and rng["start"] <= hh < rng["end"]:
-                        sub.append(r)
-                vwaps[ss] = _vwap(sub) if sub else None
-            else:
-                vwaps[ss] = None
-
-                                                          
-        def _ema(values, period):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - values — (tự suy luận theo ngữ cảnh sử dụng).
-              - period — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            if not values or period <= 1:
-                return None
-            alpha = 2.0 / (period + 1.0)
-            ema = values[0]
-            for v in values[1:]:
-                ema = alpha * v + (1 - alpha) * ema
-            return float(ema)
-
-        def _atr_series(rates, period=14):
-                                                                 
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - rates — (tự suy luận theo ngữ cảnh sử dụng).
-              - period — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            if not rates or len(rates) < period + 1:
-                return None, []
-            trs = []
-            prev_close = rates[0]["close"]
-            for r in rates[1:]:
-                tr = max(r["high"] - r["low"], abs(r["high"] - prev_close), abs(r["low"] - prev_close))
-                trs.append(tr)
-                prev_close = r["close"]
-            if len(trs) < period:
-                return None, trs
-            alpha = 1.0 / period
-            atr = sum(trs[:period]) / period
-            out = [atr]
-            for tr in trs[period:]:
-                atr = (1 - alpha) * atr + alpha * tr
-                out.append(atr)
-            return (out[-1] if out else None), trs
-
-        ema_block = {}
-        atr_block = {}
-        for k in ["M1", "M5", "M15", "H1"]:
-            closes = [r["close"] for r in series.get(k, [])]
-            ema_block[k] = {"ema50": _ema(closes, 50) if closes else None, "ema200": _ema(closes, 200) if closes else None}
-        atr_m5_now, tr_m5 = _atr_series(series.get("M5", []), period=14)
-        atr_block["M5"]  = atr_m5_now
-        atr_block["M1"]  = _atr_series(series.get("M1", []), period=14)[0]
-        atr_block["M15"] = _atr_series(series.get("M15", []), period=14)[0]
-        atr_block["H1"]  = _atr_series(series.get("H1", []), period=14)[0]
-
-                                      
-        q = _quantiles(tr_m5, [0.33, 0.66]) if tr_m5 else {0.33: None, 0.66: None}
-        if atr_m5_now and q[0.33] and q[0.66]:
-            if atr_m5_now <= q[0.33]:
-                vol_regime = "low"
-            elif atr_m5_now >= q[0.66]:
-                vol_regime = "high"
-            else:
-                vol_regime = "normal"
-        else:
-            vol_regime = None
-
-                                                       
-        kills = _killzones_vn_for_date()
-        now_hhmm = datetime.now().strftime("%H:%M")
-        kill_active = None
-        mins_to_next = None
-        try:
-            def _mins(t1, t2):
-                """
-                Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-                Tham số:
-                  - t1 — (tự suy luận theo ngữ cảnh sử dụng).
-                  - t2 — (tự suy luận theo ngữ cảnh sử dụng).
-                Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-                Ghi chú:
-                  - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-                """
-                h1,m1=map(int,t1.split(":")); h2,m2=map(int,t2.split(":"))
-                return (h2-h1)*60 + (m2-m1)
-            order = ["london","newyork_pre","newyork_post"]
-            for k in order:
-                st, ed = kills[k]["start"], kills[k]["end"]
-                if st <= now_hhmm < ed:
-                    kill_active = k
-                    break
-            if kill_active is None:
-                                    
-                for k in order:
-                    st = kills[k]["start"]
-                    if now_hhmm < st:
-                        mins_to_next = _mins(now_hhmm, st)
-                        break
-        except Exception:
-            pass
-
-                                                    
-        def _nearby_levels(cp):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - cp — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            lv = []
-            if prev_day:
-                lv += [{"name": "PDH", "price": prev_day["high"]}, {"name": "PDL", "price": prev_day["low"]}]
-            if daily:
-                if daily.get("eq50") is not None:
-                    lv.append({"name": "EQ50_D", "price": daily["eq50"]})
-                if daily.get("open") is not None:
-                    lv.append({"name": "DO", "price": daily["open"]})
-            out = []
-            for x in lv:
-                rel = "ABOVE" if x["price"] > cp else ("BELOW" if x["price"] < cp else "INSIDE")
-                dist = abs(x["price"] - cp) / (info.point or 0.01) if cp and info else None
-                out.append({"name": x["name"], "price": x["price"], "relation": rel, "distance_pips": dist})
-            return out
-
-        key_near = _nearby_levels(cp) if cp > 0 else []
-
-        points_per_pip = _points_per_pip(info_obj)
-        value_per_point = _value_per_point(info)
-        round_levels = _round_levels_near(cp, (info.point or 0.01), points_per_pip)
-        fib_h1 = _fib_from_h1_swing(series.get("H1", []))
-
-                                             
-        adr = _adr_stats(sym, n=20)
-        day_open = daily.get("open") if daily else None
-        prev_close = None
-        try:
-            d1_prev_close_arr = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_D1, 1, 1)
-            if d1_prev_close_arr is not None and len(d1_prev_close_arr)==1:
-                prev_close = float(d1_prev_close_arr[0]["close"])
-        except Exception:
-            pass
-        day_range = None
-        day_range_pct = None
-        if daily and adr and adr.get("d20"):
-            day_range = (daily["high"] - daily["low"]) if (daily.get("high") and daily.get("low")) else None
-            if day_range:
-                day_range_pct = (day_range / adr["d20"]) * 100.0
-
-        pos_in_day = _position_in_day_range(cp, daily) if daily else None
-        spread_points = None
-        if tick and info and getattr(info, "point", None):
-            b = float(getattr(tick, "bid", 0.0)); a=float(getattr(tick,"ask",0.0))
-            spread_points = (a - b) / (info.point or 0.01) if (a>0 and b>0) else None
-        atr_norm = {"spread_as_pct_of_atr_m5": None}
-        if spread_points and atr_m5_now and atr_m5_now > 0:
-            atr_norm["spread_as_pct_of_atr_m5"] = (spread_points / (atr_m5_now/(info.point or 0.01))) * 100.0
-
-                                                      
-        risk_model = None
-        rr_projection = None
-        if plan and info and points_per_pip and value_per_point > 0:
-            entry = plan.get("entry"); sl = plan.get("sl")
-            tp1  = plan.get("tp1");  tp2 = plan.get("tp2")
-            if entry and sl and entry != sl:
-                dist_points = abs(entry - sl) / (info.point or 0.01)
-                pip_value_per_lot = value_per_point * points_per_pip
-                risk_model = {
-                    "given_entry": entry, "given_sl": sl,
-                    "pip_value_per_lot": pip_value_per_lot,
-                    "value_per_point": value_per_point,
-                    "points_per_pip": points_per_pip
-                }
-                def _rr(tp):
-                    """
-                    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-                    Tham số:
-                      - tp — (tự suy luận theo ngữ cảnh sử dụng).
-                    Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-                    Ghi chú:
-                      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-                    """
-                    if not tp: return None
-                    return abs(tp - entry) / abs(entry - sl)
-                rr_projection = {
-                    "tp1": {"price": tp1, "rr": _rr(tp1)},
-                    "tp2": {"price": tp2, "rr": _rr(tp2)},
-                }
-
-                                                      
-        open_positions, pending_orders = [], []
-        try:
-            poss = mt5.positions_get(symbol=sym) or []
-            for p in poss:
-                open_positions.append({
-                    "ticket": int(getattr(p, "ticket", 0)),
-                    "type": int(getattr(p, "type", 0)),
-                    "lots": float(getattr(p, "volume", 0.0)),
-                    "price": float(getattr(p, "price_open", 0.0)),
-                    "sl": float(getattr(p, "sl", 0.0)) or None,
-                    "tp": float(getattr(p, "tp", 0.0)) or None,
-                    "pnl": float(getattr(p, "profit", 0.0)),
-                })
-            ords = mt5.orders_get(symbol=sym) or []
-            for o in ords:
-                pending_orders.append({
-                    "ticket": int(getattr(o, "ticket", 0)),
-                    "type": int(getattr(o, "type", 0)),
-                    "lots": float(getattr(o, "volume_current", 0.0)),
-                    "price": float(getattr(o, "price_open", 0.0)) or float(getattr(o, "price_current", 0.0)),
-                    "sl": float(getattr(o, "sl", 0.0)) or None,
-                    "tp": float(getattr(o, "tp", 0.0)) or None,
-                    "expiration": int(getattr(o, "expiration_time", 0)) or None
-                })
-        except Exception:
-            pass
-                                                                      
-        def _ema50_slope_10(closes):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - closes — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            if not closes or len(closes) <= 60:                                
-                return None
-            now = _ema(closes, 50)
-            prev = _ema(closes[:-10], 50) if len(closes) > 10 else None
-            return (now - prev) if (now is not None and prev is not None) else None
-
-        m5_closes = [r["close"] for r in series.get("M5", [])]
-        h1_closes = [r["close"] for r in series.get("H1", [])]
-
-        ema_slope_block = {
-            "M5": {"ema50_per_10bars": _ema50_slope_10(m5_closes)},
-            "H1": {"ema50_per_10bars": _ema50_slope_10(h1_closes)}
-        }
-
-        payload = {
-            "MT5_DATA": {
-                "symbol": sym,
-                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "broker_time": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00","Z"),
-                "account": account_obj,
-                "info": info_obj,
-                "symbol_rules": rules_obj,
-                "pip": {
-                    "points_per_pip": points_per_pip,
-                    "value_per_point": value_per_point,
-                    "pip_value_per_lot": (value_per_point * points_per_pip if value_per_point else None)
-                },
-                "tick": tick_obj,
-                "tick_stats_5m": tick_stats_5m or None,
-                "tick_stats_30m": tick_stats_30m or None,
-                "levels": {
-                    "daily": daily or None,
-                    "prev_day": prev_day or None,
-                    "weekly": weekly or None,
-                    "prev_week": prev_week or None,
-                    "monthly": monthly or None
-                },
-                "day_open": daily.get("open") if daily else None,
-                "prev_day_close": prev_close,
-                "adr": adr or None,
-                "day_range": day_range,
-                "day_range_pct_of_adr20": (float(day_range_pct) if day_range_pct is not None else None),
-                "position_in_day_range": (float(pos_in_day) if pos_in_day is not None else None),
-                "sessions_today": sessions_today or None,
-                "volatility": {"ATR": atr_block},
-                "volatility_regime": vol_regime,
-                "trend_refs": {"EMA": ema_block},
-                "ema_slope": ema_slope_block,
-                "vwap": vwaps,
-                "kills": kills,
-                "killzone_active": kill_active,
-                "mins_to_next_killzone": mins_to_next,
-                "key_levels_nearby": key_near,
-                "round_levels": round_levels or None,
-                "fib_h1_last_swing": fib_h1 or None,
-                "atr_norm": atr_norm,
-                "risk_model": risk_model,
-                "rr_projection": rr_projection,
-                "open_positions": open_positions or [],
-                "pending_orders": pending_orders or []
-            }
-        }
-        try:
-            return json.dumps(payload, ensure_ascii=False)
-        except Exception:
-            return str(payload)
+            return ""\n
 
     def _mt5_snapshot_popup(self):
         """
@@ -4576,8 +3646,7 @@ class GeminiFolderOnceApp:
         st = ScrolledText(win, wrap="none")
         st.pack(fill="both", expand=True)
         st.insert("1.0", txt)
-    
-                                           
+
     def _extract_text_from_obj(self, obj):
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
@@ -4602,7 +3671,7 @@ class GeminiFolderOnceApp:
                 parts.append(x)
                 return
             if isinstance(x, dict):
-                                               
+
                 for k in ("text", "content", "prompt", "body", "value"):
                     v = x.get(k)
                     if isinstance(v, str) and v.strip():
@@ -4616,7 +3685,7 @@ class GeminiFolderOnceApp:
 
         walk(obj)
         text = "\n\n".join(t.strip() for t in parts if t and t.strip())
-                                        
+
         if text and text.count("\\n") > 0 and text.count("\n") <= text.count("\\n"):
             text = (text.replace("\\n", "\n")
                         .replace("\\t", "\t")
@@ -4635,21 +3704,18 @@ class GeminiFolderOnceApp:
         """
         s = raw.strip()
 
-                           
         try:
             obj = json.loads(s)
             return self._extract_text_from_obj(obj)
         except Exception:
             pass
 
-                                                                   
         try:
             obj = ast.literal_eval(s)
             return self._extract_text_from_obj(obj)
         except Exception:
             pass
 
-                                                        
         if s.count("\\n") >= 3 and s.count("\n") <= s.count("\\n"):
             s = (s.replace("\\n", "\n")
                  .replace("\\t", "\t")
@@ -4670,7 +3736,6 @@ class GeminiFolderOnceApp:
         self.prompt_text.delete("1.0", "end")
         self.prompt_text.insert("1.0", pretty)
 
-                                                                  
     def _find_prompt_file(self):
         """
         Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
@@ -4713,7 +3778,7 @@ class GeminiFolderOnceApp:
                     self.ui_message("warning", "Prompt", "Không tìm thấy PROMPT.txt trong thư mục đã chọn hoặc APP_DIR.")
                 return False
             raw = p.read_text(encoding="utf-8", errors="ignore")
-            text = self._normalize_prompt_text(raw)                       
+            text = self._normalize_prompt_text(raw)
             self.prompt_text.delete("1.0", "end")
             self.prompt_text.insert("1.0", text)
             self.prompt_file_path_var.set(str(p))
@@ -4750,7 +3815,7 @@ class GeminiFolderOnceApp:
         """
         if self.auto_load_prompt_txt_var.get():
             self._load_prompt_from_file(silent=True)
-                                                     
+
     def _save_workspace(self):
         """
         Mục đích: Ghi/Xuất dữ liệu (báo cáo .md, JSON tóm tắt, cache...).
@@ -4774,7 +3839,7 @@ class GeminiFolderOnceApp:
             "create_ctx_json": bool(self.create_ctx_json_var.get()),
             "prefer_ctx_json": bool(self.prefer_ctx_json_var.get()),
             "ctx_json_n": int(self.ctx_json_n_var.get()),
-                      
+
             "telegram_enabled": bool(self.telegram_enabled_var.get()),
             "telegram_token_enc": obfuscate_text(self.telegram_token_var.get().strip())
             if self.telegram_token_var.get().strip()
@@ -4782,7 +3847,7 @@ class GeminiFolderOnceApp:
             "telegram_chat_id": self.telegram_chat_id_var.get().strip(),
             "telegram_skip_verify": bool(self.telegram_skip_verify_var.get()),
             "telegram_ca_path": self.telegram_ca_path_var.get().strip(),
-                 
+
             "mt5_enabled": bool(self.mt5_enabled_var.get()),
             "mt5_term_path": self.mt5_term_path_var.get().strip(),
             "mt5_symbol": self.mt5_symbol_var.get().strip(),
@@ -4790,17 +3855,17 @@ class GeminiFolderOnceApp:
             "mt5_n_M5": int(self.mt5_n_M5.get()),
             "mt5_n_M15": int(self.mt5_n_M15.get()),
             "mt5_n_H1": int(self.mt5_n_H1.get()),
-                      
+
             "no_trade_enabled": bool(self.no_trade_enabled_var.get()),
             "nt_spread_factor": float(self.nt_spread_factor_var.get()),
             "nt_min_atr_m5_pips": float(self.nt_min_atr_m5_pips_var.get()),
             "nt_min_ticks_per_min": int(self.nt_min_ticks_per_min_var.get()),
-                         
+
             "upload_workers": int(self.upload_workers_var.get()),
             "cache_enabled": bool(self.cache_enabled_var.get()),
             "opt_lossless": bool(self.optimize_lossless_var.get()),
             "only_generate_if_changed": bool(self.only_generate_if_changed_var.get()),
-                        
+
             "auto_trade_enabled": bool(self.auto_trade_enabled_var.get()),
             "trade_strict_bias": bool(self.trade_strict_bias_var.get()),
             "trade_size_mode": self.trade_size_mode_var.get(),
@@ -4812,7 +3877,7 @@ class GeminiFolderOnceApp:
             "trade_pending_threshold_points": int(self.trade_pending_threshold_points_var.get()),
             "trade_magic": int(self.trade_magic_var.get()),
             "trade_comment_prefix": self.trade_comment_prefix_var.get(),
-                                         
+
             "trade_pending_ttl_min": int(self.trade_pending_ttl_min_var.get()),
             "trade_min_rr_tp2": float(self.trade_min_rr_tp2_var.get()),
             "trade_min_dist_keylvl_pips": float(self.trade_min_dist_keylvl_pips_var.get()),
@@ -4826,7 +3891,6 @@ class GeminiFolderOnceApp:
             "trade_allow_session_ny": bool(self.trade_allow_session_ny_var.get()),
             "news_block_before_min": int(self.trade_news_block_before_min_var.get()),
             "news_block_after_min": int(self.trade_news_block_after_min_var.get()),
-
 
         }
         try:
@@ -4850,7 +3914,6 @@ class GeminiFolderOnceApp:
         except Exception:
             return
 
-                         
         self.prompt_file_path_var.set(data.get("prompt_file_path", ""))
         self.auto_load_prompt_txt_var.set(bool(data.get("auto_load_prompt_txt", True)))
         folder = data.get("folder_path", "")
@@ -4860,14 +3923,12 @@ class GeminiFolderOnceApp:
             self._refresh_history_list()
             self._refresh_json_list()
 
-                     
         self.model_var.set(data.get("model", DEFAULT_MODEL))
         self.delete_after_var.set(bool(data.get("delete_after", True)))
         self.max_files_var.set(int(data.get("max_files", 0)))
         self.autorun_var.set(bool(data.get("autorun", False)))
         self.autorun_seconds_var.set(int(data.get("autorun_secs", 60)))
 
-                 
         self.remember_context_var.set(bool(data.get("remember_ctx", True)))
         self.context_n_reports_var.set(int(data.get("ctx_n_reports", 1)))
         self.context_limit_chars_var.set(int(data.get("ctx_limit_chars", 2000)))
@@ -4875,14 +3936,12 @@ class GeminiFolderOnceApp:
         self.prefer_ctx_json_var.set(bool(data.get("prefer_ctx_json", True)))
         self.ctx_json_n_var.set(int(data.get("ctx_json_n", 5)))
 
-                  
         self.telegram_enabled_var.set(bool(data.get("telegram_enabled", False)))
         self.telegram_token_var.set(deobfuscate_text(data.get("telegram_token_enc", "")))
         self.telegram_chat_id_var.set(data.get("telegram_chat_id", ""))
         self.telegram_skip_verify_var.set(bool(data.get("telegram_skip_verify", False)))
         self.telegram_ca_path_var.set(data.get("telegram_ca_path", ""))
 
-             
         self.mt5_enabled_var.set(bool(data.get("mt5_enabled", False)))
         self.mt5_term_path_var.set(data.get("mt5_term_path", ""))
         self.mt5_symbol_var.set(data.get("mt5_symbol", ""))
@@ -4891,19 +3950,16 @@ class GeminiFolderOnceApp:
         self.mt5_n_M15.set(int(data.get("mt5_n_M15", 96)))
         self.mt5_n_H1.set(int(data.get("mt5_n_H1", 120)))
 
-                  
         self.no_trade_enabled_var.set(bool(data.get("no_trade_enabled", True)))
         self.nt_spread_factor_var.set(float(data.get("nt_spread_factor", 1.2)))
         self.nt_min_atr_m5_pips_var.set(float(data.get("nt_min_atr_m5_pips", 3.0)))
         self.nt_min_ticks_per_min_var.set(int(data.get("nt_min_ticks_per_min", 5)))
 
-                       
         self.upload_workers_var.set(int(data.get("upload_workers", 4)))
         self.cache_enabled_var.set(bool(data.get("cache_enabled", True)))
         self.optimize_lossless_var.set(bool(data.get("opt_lossless", False)))
         self.only_generate_if_changed_var.set(bool(data.get("only_generate_if_changed", False)))
 
-                    
         self.auto_trade_enabled_var.set(bool(data.get("auto_trade_enabled", False)))
         self.trade_strict_bias_var.set(bool(data.get("trade_strict_bias", True)))
         self.trade_size_mode_var.set(data.get("trade_size_mode", "lots"))
@@ -4916,9 +3972,6 @@ class GeminiFolderOnceApp:
         self.trade_magic_var.set(int(data.get("trade_magic", 26092025)))
         self.trade_comment_prefix_var.set(data.get("trade_comment_prefix", "AI-ICT"))
 
-                                                         
-                                                                        
-                                                                                              
         before_val = data.get("news_block_before_min")
         after_val  = data.get("news_block_after_min")
         legacy_val = data.get("trade_news_block_min")
@@ -4948,7 +4001,6 @@ class GeminiFolderOnceApp:
 
         self.trade_news_block_before_min_var.set(before)
         self.trade_news_block_after_min_var.set(after)
-
 
     def _delete_workspace(self):
         """
@@ -4980,7 +4032,6 @@ class GeminiFolderOnceApp:
         except Exception:
             return
 
-                         
         self.prompt_file_path_var.set(data.get("prompt_file_path", ""))
         self.auto_load_prompt_txt_var.set(bool(data.get("auto_load_prompt_txt", True)))
         folder = data.get("folder_path", "")
@@ -4990,14 +4041,12 @@ class GeminiFolderOnceApp:
             self._refresh_history_list()
             self._refresh_json_list()
 
-                     
         self.model_var.set(data.get("model", DEFAULT_MODEL))
         self.delete_after_var.set(bool(data.get("delete_after", True)))
         self.max_files_var.set(int(data.get("max_files", 0)))
         self.autorun_var.set(bool(data.get("autorun", False)))
         self.autorun_seconds_var.set(int(data.get("autorun_secs", 60)))
 
-                 
         self.remember_context_var.set(bool(data.get("remember_ctx", True)))
         self.context_n_reports_var.set(int(data.get("ctx_n_reports", 1)))
         self.context_limit_chars_var.set(int(data.get("ctx_limit_chars", 2000)))
@@ -5005,14 +4054,12 @@ class GeminiFolderOnceApp:
         self.prefer_ctx_json_var.set(bool(data.get("prefer_ctx_json", True)))
         self.ctx_json_n_var.set(int(data.get("ctx_json_n", 5)))
 
-                  
         self.telegram_enabled_var.set(bool(data.get("telegram_enabled", False)))
         self.telegram_token_var.set(deobfuscate_text(data.get("telegram_token_enc", "")))
         self.telegram_chat_id_var.set(data.get("telegram_chat_id", ""))
         self.telegram_skip_verify_var.set(bool(data.get("telegram_skip_verify", False)))
         self.telegram_ca_path_var.set(data.get("telegram_ca_path", ""))
 
-             
         self.mt5_enabled_var.set(bool(data.get("mt5_enabled", False)))
         self.mt5_term_path_var.set(data.get("mt5_term_path", ""))
         self.mt5_symbol_var.set(data.get("mt5_symbol", ""))
@@ -5021,19 +4068,16 @@ class GeminiFolderOnceApp:
         self.mt5_n_M15.set(int(data.get("mt5_n_M15", 96)))
         self.mt5_n_H1.set(int(data.get("mt5_n_H1", 120)))
 
-                  
         self.no_trade_enabled_var.set(bool(data.get("no_trade_enabled", True)))
         self.nt_spread_factor_var.set(float(data.get("nt_spread_factor", 1.2)))
         self.nt_min_atr_m5_pips_var.set(float(data.get("nt_min_atr_m5_pips", 3.0)))
         self.nt_min_ticks_per_min_var.set(int(data.get("nt_min_ticks_per_min", 5)))
 
-                       
         self.upload_workers_var.set(int(data.get("upload_workers", 4)))
         self.cache_enabled_var.set(bool(data.get("cache_enabled", True)))
         self.optimize_lossless_var.set(bool(data.get("opt_lossless", False)))
         self.only_generate_if_changed_var.set(bool(data.get("only_generate_if_changed", False)))
 
-                    
         self.auto_trade_enabled_var.set(bool(data.get("auto_trade_enabled", False)))
         self.trade_strict_bias_var.set(bool(data.get("trade_strict_bias", True)))
         self.trade_size_mode_var.set(data.get("trade_size_mode", "lots"))
@@ -5046,9 +4090,6 @@ class GeminiFolderOnceApp:
         self.trade_magic_var.set(int(data.get("trade_magic", 26092025)))
         self.trade_comment_prefix_var.set(data.get("trade_comment_prefix", "AI-ICT"))
 
-                                                         
-                                                                        
-                                                                                              
         before_val = data.get("news_block_before_min")
         after_val  = data.get("news_block_after_min")
         legacy_val = data.get("trade_news_block_min")
@@ -5078,7 +4119,6 @@ class GeminiFolderOnceApp:
 
         self.trade_news_block_before_min_var.set(before)
         self.trade_news_block_after_min_var.set(after)
-
 
     def _delete_workspace(self):
         """
@@ -5111,4 +4151,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
