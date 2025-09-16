@@ -1293,7 +1293,13 @@ class GeminiFolderOnceApp:
             self.ui_status(f"Context+MT5 xong trong {(_tnow()-t_ctx0):.2f}s")
 
             if cfg.nt_enabled and mt5_dict:
-                ok, reasons = no_trade.pretrade_hard_filters(mt5_dict, cfg)
+                ok, reasons, self.ff_cache_events_local, self.ff_cache_fetch_time = no_trade.evaluate(
+                    mt5_dict,
+                    cfg,
+                    cache_events=self.ff_cache_events_local,
+                    cache_fetch_time=self.ff_cache_fetch_time,
+                    ttl_sec=300,
+                )
                 if not ok:
 
                     try:

@@ -11,6 +11,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 from .config import RunConfig
 from . import mt5_utils
+from . import no_trade
 
 
 def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConfig):
@@ -23,6 +24,35 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
     if not cfg.mt5_enabled or mt5 is None:
         app.ui_status("Auto-Trade: MT5 not enabled or missing.")
         return
+
+    # NO-TRADE evaluate: hard filters + session + news window
+    try:
+        ok_nt, reasons_nt, ev, ts = no_trade.evaluate(
+            mt5_ctx or {},
+            cfg,
+            cache_events=getattr(app, "ff_cache_events_local", None),
+            cache_fetch_time=getattr(app, "ff_cache_fetch_time", None),
+            ttl_sec=300,
+        )
+        # Update app-level news cache
+        try:
+            app.ff_cache_events_local = ev
+            app.ff_cache_fetch_time = ts
+        except Exception:
+            pass
+        if not ok_nt:
+            app.ui_status("Auto-Trade: NO-TRADE filters blocked.\n- " + "\n- ".join(reasons_nt))
+            try:
+                app._log_trade_decision(
+                    {"stage": "no-trade", "reasons": reasons_nt},
+                    folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None),
+                )
+            except Exception:
+                pass
+            return
+    except Exception:
+        # Fail-open: if evaluate crashes, proceed without blocking
+        pass
 
     setup = app._parse_setup_from_report(combined_text)
     direction = setup.get("direction")
