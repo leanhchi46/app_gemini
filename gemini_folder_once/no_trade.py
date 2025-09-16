@@ -64,25 +64,32 @@ def check_liquidity(mt5_ctx: dict, cfg: RunConfig) -> Optional[str]:
     return None
 
 
-def pretrade_hard_filters(mt5_ctx: dict, cfg: RunConfig) -> Tuple[bool, List[str]]:
+def pretrade_hard_filters(mt5_ctx: dict, cfg: RunConfig) -> Tuple[bool, List[str], List[str]]:
     """Evaluate NO-TRADE hard filters using MT5 context and run config.
 
     Returns a tuple (ok, reasons). If ok is False, reasons contains human
     readable explanations for why trading should be skipped.
     """
     if not getattr(cfg, "nt_enabled", False):
-        return True, []
+        return True, [], []
 
     reasons: List[str] = []
-    for fn in (check_spread, check_atr_m5, check_liquidity):
+    codes: List[str] = []
+    checks: List[tuple] = [
+        (check_spread, "spread"),
+        (check_atr_m5, "atr_m5"),
+        (check_liquidity, "liquidity"),
+    ]
+    for fn, code in checks:
         try:
             why = fn(mt5_ctx, cfg)
             if why:
                 reasons.append(why)
+                codes.append(code)
         except Exception:
             # Ignore individual check failures and proceed conservatively
             pass
-    return (len(reasons) == 0), reasons
+    return (len(reasons) == 0), reasons, codes
 
 
 def _allowed_session_now(mt5_ctx: dict, cfg: RunConfig) -> bool:
@@ -131,7 +138,7 @@ def evaluate(
     cache_events: Optional[List[Dict[str, Any]]] = None,
     cache_fetch_time: Optional[float] = None,
     ttl_sec: int = 300,
-) -> Tuple[bool, List[str], List[Dict[str, Any]], float]:
+) -> Tuple[bool, List[str], List[Dict[str, Any]], float, Dict[str, Any]]:
     """Evaluate hard no-trade rules plus news/session gates.
 
     Returns (ok, reasons, events_cache, fetch_time).
@@ -139,12 +146,13 @@ def evaluate(
     - events_cache/fetch_time reflect updated news cache (if fetched).
     """
     # Start with existing hard filters
-    ok_hard, reasons = pretrade_hard_filters(mt5_ctx, cfg)
+    ok_hard, reasons, codes = pretrade_hard_filters(mt5_ctx, cfg)
 
     # Session gate
     sess_ok = _allowed_session_now(mt5_ctx, cfg)
     if not sess_ok:
         reasons.append("Ngoai phien cho phep")
+        codes.append("session")
 
     # News window gate
     events: List[Dict[str, Any]] = cache_events or []
@@ -157,7 +165,16 @@ def evaluate(
         after = int(getattr(cfg, "trade_news_block_after_min", 0) or 0)
     except Exception:
         after = 0
+    # Respect runtime toggle: when disabled, do not block around news
+    try:
+        enabled = bool(getattr(cfg, "trade_news_block_enabled", True))
+    except Exception:
+        enabled = True
+    if not enabled:
+        before = 0
+        after = 0
 
+    news_hit: Optional[Dict[str, Any]] = None
     if (before > 0) or (after > 0):
         try:
             in_window, why, events, fetch_ts = news.within_news_window_cfg_cached(
@@ -171,9 +188,27 @@ def evaluate(
             if in_window:
                 # 'why' includes event title/currency + time
                 reasons.append(f"Tin manh gan day: {why}")
+                codes.append("news")
+                # Try to find the matched event for meta
+                try:
+                    from datetime import datetime, timedelta
+                    now_local = datetime.now().astimezone()
+                    allowed = news.symbol_currencies(getattr(cfg, "mt5_symbol", ""))
+                    for ev in events or []:
+                        t = ev.get("when")
+                        if not t:
+                            continue
+                        if allowed and ev.get("curr") and ev["curr"] not in allowed:
+                            continue
+                        if (t - timedelta(minutes=before)) <= now_local <= (t + timedelta(minutes=after)):
+                            news_hit = ev
+                            break
+                except Exception:
+                    news_hit = None
         except Exception:
             # Fail-open: on news check error, do not block
             pass
 
     ok = (len(reasons) == 0) and ok_hard and sess_ok
-    return ok, reasons, events, fetch_ts
+    meta = {"codes": codes[:], "news_hit": news_hit}
+    return ok, reasons, events, fetch_ts, meta

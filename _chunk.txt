@@ -1,0 +1,13 @@
+ns": reasons
+                        }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+                    except Exception:
+                        pass
+                    note = "NO-TRADE: Điều kiện giao dịch không thỏa.\n- " + "\n- ".join(reasons)
+
+                    try:
+                        self._log_trade_decision({
+                            "stage": "no-trade",
+                            "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "reasons": reasons,
+
+                        }, folder_override=(self.mt5_symbol_var.get(

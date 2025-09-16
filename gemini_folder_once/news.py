@@ -203,3 +203,30 @@ def within_news_window_cfg_cached(
         fetch_ts = float(cache_fetch_time or 0.0)
     ok, why = is_within_news_window(events, cfg.mt5_symbol, minutes_before, minutes_after, now=now)
     return ok, why, events, fetch_ts
+
+
+def next_events_for_symbol(
+    events: List[Dict[str, Any]], symbol: str, *, now: Optional[datetime] = None, limit: int = 3
+) -> List[Dict[str, Any]]:
+    """Return the next few high-impact events relevant to `symbol`.
+
+    Filters by future time and symbol currencies, sorted ascending by time.
+    """
+    try:
+        now_local = (now or datetime.now()).astimezone()
+        allowed = symbol_currencies(symbol)
+        fut = []
+        for ev in events or []:
+            t = ev.get("when")
+            if not t:
+                continue
+            if t < now_local:
+                continue
+            cur = ev.get("curr")
+            if allowed and cur and cur not in allowed:
+                continue
+            fut.append(ev)
+        fut.sort(key=lambda x: x.get("when"))
+        return fut[: max(0, int(limit))]
+    except Exception:
+        return []

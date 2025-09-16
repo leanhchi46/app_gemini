@@ -27,12 +27,12 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
 
     # NO-TRADE evaluate: hard filters + session + news window
     try:
-        ok_nt, reasons_nt, ev, ts = no_trade.evaluate(
+        ok_nt, reasons_nt, ev, ts, meta = no_trade.evaluate(
             mt5_ctx or {},
             cfg,
             cache_events=getattr(app, "ff_cache_events_local", None),
             cache_fetch_time=getattr(app, "ff_cache_fetch_time", None),
-            ttl_sec=300,
+            ttl_sec=int(getattr(cfg, 'news_cache_ttl_sec', 300) or 300),
         )
         # Update app-level news cache
         try:
@@ -40,13 +40,19 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
             app.ff_cache_fetch_time = ts
         except Exception:
             pass
+        # Persist last NO-TRADE evaluation for UI
+        try:
+            app.last_no_trade_ok = bool(ok_nt)
+            app.last_no_trade_reasons = list(reasons_nt or [])
+            # Optionally persist meta for other UI components (non-breaking)
+            setattr(app, "last_no_trade_meta", meta)
+        except Exception:
+            pass
         if not ok_nt:
             app.ui_status("Auto-Trade: NO-TRADE filters blocked.\n- " + "\n- ".join(reasons_nt))
             try:
-                app._log_trade_decision(
-                    {"stage": "no-trade", "reasons": reasons_nt},
-                    folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None),
-                )
+                if hasattr(app, "_log_no_trade"):
+                    app._log_no_trade(reasons_nt, (meta or {}).get('codes', []), {'news_hit': (meta or {}).get('news_hit')})
             except Exception:
                 pass
             return

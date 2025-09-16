@@ -70,4 +70,6 @@ class RunConfig:
     trade_allow_session_ny: bool
     trade_news_block_before_min: int
     trade_news_block_after_min: int
-
+    # News controls
+    trade_news_block_enabled: bool
+    news_cache_ttl_sec: int

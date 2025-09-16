@@ -102,8 +102,14 @@ class ChartTabTV:
         except Exception:
             self.toolbar = None
 
-        acc_box = ttk.LabelFrame(self.tab, text="Account info", padding=8)
-        acc_box.grid(row=1, column=1, sticky="nsew")
+        # Right column wrapper to stack panels (Account + No-Trade)
+        right_col = ttk.Frame(self.tab)
+        right_col.grid(row=1, column=1, sticky="nsew")
+        for i in range(1):
+            right_col.columnconfigure(i, weight=1)
+
+        acc_box = ttk.LabelFrame(right_col, text="Account info", padding=8)
+        acc_box.grid(row=0, column=0, sticky="nsew")
         for i in range(2):
             acc_box.columnconfigure(i, weight=1)
         self.acc_balance = tk.StringVar(value="-")
@@ -158,6 +164,27 @@ class ChartTabTV:
         scr2 = ttk.Scrollbar(his_box, orient="vertical", command=self.tree_his.yview)
         self.tree_his.configure(yscrollcommand=scr2.set)
         scr2.grid(row=0, column=1, sticky="ns")
+
+        # --- No-Trade panel ---
+        self.nt_session_gate = tk.StringVar(value="-")
+        self.nt_reasons = tk.StringVar(value="")
+        self.nt_events = tk.StringVar(value="")
+
+        nt_box = ttk.LabelFrame(right_col, text="No-Trade", padding=8)
+        nt_box.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        nt_box.columnconfigure(0, weight=1)
+
+        ttk.Label(nt_box, text="Session gate:").grid(row=0, column=0, sticky="w")
+        self.lbl_nt_session = ttk.Label(nt_box, textvariable=self.nt_session_gate)
+        self.lbl_nt_session.grid(row=0, column=1, sticky="e")
+
+        ttk.Label(nt_box, text="Reasons:").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.lbl_nt_reasons = ttk.Label(nt_box, textvariable=self.nt_reasons, wraplength=260, justify="left")
+        self.lbl_nt_reasons.grid(row=2, column=0, columnspan=2, sticky="w")
+
+        ttk.Label(nt_box, text="Upcoming events:").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.lbl_nt_events = ttk.Label(nt_box, textvariable=self.nt_events, wraplength=260, justify="left")
+        self.lbl_nt_events.grid(row=4, column=0, columnspan=2, sticky="w")
 
         self._redraw_safe()
 
@@ -396,11 +423,107 @@ class ChartTabTV:
                 self.canvas.draw_idle()
             except Exception:
                 pass
+        try:
+            self._update_notrade_panel()
+        except Exception:
+            pass
 
     def _tick(self):
         if not self._running:
             return
+        try:
+            # Opportunistic refresh of shared news cache (non-blocking)
+            if hasattr(self.app, "_refresh_news_cache"):
+                ttl = None
+                try:
+                    ttl = int(getattr(self.app, "news_cache_ttl_sec_var", None).get()) if getattr(self.app, "news_cache_ttl_sec_var", None) else None
+                except Exception:
+                    ttl = None
+                self.app._refresh_news_cache(ttl=int(ttl or 300))
+        except Exception:
+            pass
         self._redraw_safe()
         secs = max(1, int(self.refresh_secs_var.get() or 5))
         self._after_job = self.root.after(secs * 1000, self._tick)
 
+    # -------------------------
+    # No-Trade panel helpers
+    # -------------------------
+    def _compute_sessions_today(self, symbol: str) -> dict:
+        try:
+            import MetaTrader5 as mt5
+            from . import mt5_utils as _mt5u
+        except Exception:
+            return {}
+        try:
+            # Minimal: any non-empty list unlocks session schedule
+            arr = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 5) or []
+            if not arr:
+                return {}
+            rows = [{"time": str(x.get("time"))} for x in arr]
+            return _mt5u.session_ranges_today(rows) or {}
+        except Exception:
+            return {}
+
+    def _allowed_session_now(self, ss: dict) -> bool:
+        try:
+            now = __import__("datetime").datetime.now().strftime("%H:%M")
+            def _in(r):
+                return bool(r and r.get("start") and r.get("end") and r["start"] <= now < r["end"])
+            ok = False
+            if getattr(self.app, "trade_allow_session_asia_var", None) and self.app.trade_allow_session_asia_var.get():
+                ok = ok or _in(ss.get("asia"))
+            if getattr(self.app, "trade_allow_session_london_var", None) and self.app.trade_allow_session_london_var.get():
+                ok = ok or _in(ss.get("london"))
+            if getattr(self.app, "trade_allow_session_ny_var", None) and self.app.trade_allow_session_ny_var.get():
+                ok = ok or _in(ss.get("newyork_pre")) or _in(ss.get("newyork_post"))
+            # If no restriction flags checked, allow
+            flags = [
+                bool(getattr(self.app, "trade_allow_session_asia_var", None) and self.app.trade_allow_session_asia_var.get()),
+                bool(getattr(self.app, "trade_allow_session_london_var", None) and self.app.trade_allow_session_london_var.get()),
+                bool(getattr(self.app, "trade_allow_session_ny_var", None) and self.app.trade_allow_session_ny_var.get()),
+            ]
+            if not any(flags):
+                ok = True
+            return bool(ok)
+        except Exception:
+            return True
+
+    def _update_notrade_panel(self):
+        # Session gate
+        sym = (self.symbol_var.get().strip() or getattr(self.app, "mt5_symbol_var", tk.StringVar(value="")).get().strip() or "")
+        ss = self._compute_sessions_today(sym) if sym else {}
+        sess_ok = self._allowed_session_now(ss)
+        self.nt_session_gate.set("Allowed" if sess_ok else "Blocked")
+
+        # Reasons from last evaluate
+        reasons = []
+        try:
+            reasons = list(getattr(self.app, "last_no_trade_reasons", []) or [])
+        except Exception:
+            reasons = []
+        if reasons:
+            txt = "\n".join([f"- {str(r)}" for r in reasons[:4]])
+        else:
+            txt = "(none)"
+        self.nt_reasons.set(txt)
+
+        # Upcoming high-impact events (limit 3) relevant to symbol
+        try:
+            from . import news as _news
+            feed = getattr(self.app, "ff_cache_events_local", []) or []
+            evs = _news.next_events_for_symbol(feed, sym, limit=3)
+            events_fmt = []
+            for ev in evs:
+                when = ev.get("when") if isinstance(ev, dict) else None
+                title = (ev.get("title") if isinstance(ev, dict) else None) or "Event"
+                cur = ev.get("curr") if isinstance(ev, dict) else None
+                try:
+                    ts = when.strftime('%a %H:%M') if hasattr(when, 'strftime') else str(when)
+                except Exception:
+                    ts = str(when)
+                tag = f" [{cur}]" if cur else ""
+                events_fmt.append(f"• {ts} — {title}{tag}")
+            self.nt_events.set("\n".join(events_fmt) if events_fmt else "(none)")
+        except Exception:
+            self.nt_events.set("(none)")
