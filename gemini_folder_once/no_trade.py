@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+from typing import Tuple, List
+
+from .config import RunConfig
+from .context_builder import _pip_size_from_info
+
+
+def pretrade_hard_filters(mt5_ctx: dict, cfg: RunConfig) -> Tuple[bool, List[str]]:
+    """Evaluate NO-TRADE hard filters using MT5 context and run config.
+
+    Returns a tuple (ok, reasons). If ok is False, reasons contains human
+    readable explanations for why trading should be skipped.
+    """
+    if not getattr(cfg, "nt_enabled", False):
+        return True, []
+
+    reasons: List[str] = []
+    info = (mt5_ctx.get("info") or {})
+    tick_stats = (mt5_ctx.get("tick_stats_5m") or {})
+    vol = (mt5_ctx.get("volatility") or {}).get("ATR") or {}
+
+    spread_cur = info.get("spread_current")
+    p90_sp = tick_stats.get("p90_spread")
+    median_sp = tick_stats.get("median_spread")
+    tpm = tick_stats.get("ticks_per_min")
+
+    if spread_cur is not None:
+        fac = max(1.0, float(cfg.nt_spread_factor))
+        if p90_sp:
+            if spread_cur > p90_sp * fac:
+                reasons.append(f"Spread cao (cur={spread_cur}, p90={p90_sp}, factor={fac})")
+        elif median_sp:
+            if spread_cur > median_sp * (fac + 0.1):
+                reasons.append(f"Spread cao (cur={spread_cur}, median~{median_sp})")
+
+    atr_m5 = vol.get("M5")
+    pip_size = _pip_size_from_info(info)
+    if atr_m5 and pip_size > 0:
+        atr_m5_pips = float(atr_m5) / pip_size
+        if atr_m5_pips < float(cfg.nt_min_atr_m5_pips):
+            reasons.append(f"ATR M5 thấp ({atr_m5_pips:.1f} pips)")
+
+    if tpm is not None and tpm < int(cfg.nt_min_ticks_per_min):
+        reasons.append(f"Thanh khoản thấp (ticks/min={tpm})")
+
+    return (len(reasons) == 0), reasons
+
