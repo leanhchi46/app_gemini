@@ -866,7 +866,8 @@ class GeminiFolderOnceApp:
             self.stop_flag = True
             self.ui_status("Đang dừng sau khi hoàn tất tác vụ hiện tại...")
 
-    def _load_upload_cache(self) -> dict:
+    '''
+    def _load_upload_cache(self) -> dict:  # removed; use uploader.UploadCache.load()
         """
         Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
         Tham số: (không)
@@ -874,10 +875,9 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        from gemini_folder_once import uploader as _up
-        return _up.UploadCache.load()
+        raise RuntimeError('removed: use uploader.UploadCache.load()')
 
-    def _save_upload_cache(self, cache: dict):
+    def _save_upload_cache(self, cache: dict):  # removed; use uploader.UploadCache.save()
         """
         Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
         Tham số:
@@ -886,10 +886,9 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        from gemini_folder_once import uploader as _up
-        _up.UploadCache.save(cache)
+        raise RuntimeError('removed: use uploader.UploadCache.save(cache)')
 
-    def _file_sig(self, path: str) -> str:
+    def _file_sig(self, path: str) -> str:  # removed; use uploader.UploadCache.file_sig()
         """
         Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
         Tham số:
@@ -898,10 +897,9 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        from gemini_folder_once import uploader as _up
-        return _up.UploadCache.file_sig(path)
+        raise RuntimeError('removed: use uploader.UploadCache.file_sig(path)')
 
-    def _cache_lookup(self, cache: dict, path: str) -> str:
+    def _cache_lookup(self, cache: dict, path: str) -> str:  # removed; use uploader.UploadCache.lookup()
         """
         Mục đích: Đọc/ghi cấu hình workspace, cache upload và các trạng thái phiên làm việc.
         Tham số:
@@ -911,10 +909,9 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        from gemini_folder_once import uploader as _up
-        return _up.UploadCache.lookup(cache, path)
+        raise RuntimeError('removed: use uploader.UploadCache.lookup(cache, path)')
 
-    def _cache_put(self, cache: dict, path: str, remote_name: str):
+    def _cache_put(self, cache: dict, path: str, remote_name: str):  # removed; use uploader.UploadCache.put()
         """
         Mục đích: Đọc/ghi cấu hình workspace, cache upload và các trạng thái phiên làm việc.
         Tham số:
@@ -925,10 +922,9 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        from gemini_folder_once import uploader as _up
-        _up.UploadCache.put(cache, path, remote_name)
+        raise RuntimeError('removed: use uploader.UploadCache.put(cache, path, remote_name)')
 
-    def _prepare_image_for_upload(self, path: str) -> str:
+    def _prepare_image_for_upload(self, path: str) -> str:  # removed; use uploader.prepare_image()
         """
         Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
         Tham số:
@@ -937,10 +933,9 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        from gemini_folder_once import uploader as _up
-        return _up.prepare_image(path, optimize=bool(self.optimize_lossless_var.get()), app_dir=APP_DIR)
+        raise RuntimeError('removed: use uploader.prepare_image(path, optimize=..., app_dir=APP_DIR)')
 
-    def _prepare_image_for_upload_cfg(self, path: str, optimize: bool) -> str:
+    def _prepare_image_for_upload_cfg(self, path: str, optimize: bool) -> str:  # removed; use uploader.prepare_image()
         """
         Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
         Tham số:
@@ -950,9 +945,9 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        from gemini_folder_once import uploader as _up
-        return _up.prepare_image(path, optimize=bool(optimize), app_dir=APP_DIR)
+        raise RuntimeError('removed: use uploader.prepare_image(path, optimize=..., app_dir=APP_DIR)')
 
+    '''
     def _parse_ctx_json_files(self, max_n=5, folder: str | None = None):
         """
         Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
@@ -1124,12 +1119,12 @@ class GeminiFolderOnceApp:
         try:
 
             t_up0 = _tnow()
-            cache = self._load_upload_cache() if cfg.cache_enabled else {}
+            cache = uploader.UploadCache.load() if cfg.cache_enabled else {}
 
             prepared_map = {}
             to_upload = []
             for i, (p, n) in enumerate(zip(paths, names)):
-                cached_remote = self._cache_lookup(cache, p) if cache else ""
+                cached_remote = uploader.UploadCache.lookup(cache, p) if cache else ""
                 if cached_remote:
                     try:
                         f = genai.get_file(cached_remote)
@@ -1139,7 +1134,7 @@ class GeminiFolderOnceApp:
                             continue
                     except Exception:
                         pass
-                upath = self._prepare_image_for_upload_cfg(p, optimize=cfg.optimize_lossless)
+                upath = uploader.prepare_image(p, optimize=bool(cfg.optimize_lossless), app_dir=APP_DIR)
                 to_upload.append((i, p, n, upath))
                 prepared_map[i] = upath
 
@@ -1234,10 +1229,10 @@ class GeminiFolderOnceApp:
             if cfg.cache_enabled:
                 for (f, p) in uploaded_files:
                     try:
-                        self._cache_put(cache, p, f.name)
+                        uploader.UploadCache.put(cache, p, f.name)
                     except Exception:
                         pass
-                self._save_upload_cache(cache)
+                uploader.UploadCache.save(cache)
 
             if self.stop_flag:
                 self._quick_be_trailing_sweep(cfg)
@@ -1260,10 +1255,10 @@ class GeminiFolderOnceApp:
             if cfg.cache_enabled:
                 for (f, p) in uploaded_files:
                     try:
-                        self._cache_put(cache, p, f.name)
+                        uploader.UploadCache.put(cache, p, f.name)
                     except Exception:
                         pass
-                self._save_upload_cache(cache)
+                uploader.UploadCache.save(cache)
 
             if self.stop_flag:
                 self._quick_be_trailing_sweep(cfg)
@@ -1421,13 +1416,7 @@ class GeminiFolderOnceApp:
 
             self._enqueue(self._finalize_done if not self.stop_flag else self._finalize_stopped)
 
-    def _upload_one_file_for_worker(self, item):
-        """
-        Wrapper: delegate to uploader.upload_one_file_for_worker
-        """
-        from gemini_folder_once import uploader as _up
-        return _up.upload_one_file_for_worker(item)
-        return (p, uf)
+    
 
     def _quick_be_trailing_sweep(self, cfg: RunConfig):
         """
