@@ -4,6 +4,7 @@ import json
 import math
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from statistics import median
 from typing import Any, Iterable, Sequence
 
@@ -211,6 +212,40 @@ def adr_stats(symbol: str, n: int = 20) -> dict[str, float] | None:
 # Time/session helpers
 # ------------------------------
 
+def _killzone_ranges_vn(d: datetime | None = None, target_tz: str | None = None) -> dict[str, dict[str, str]]:
+    """
+    Build London/NY killzones in Vietnam time (Asia/Ho_Chi_Minh),
+    converting from local market times with DST handled via zoneinfo.
+    - London: 08:00–11:00 Europe/London (local)
+    - New York (pre): 08:30–11:00 America/New_York (local)
+    - New York (post): 13:30–16:00 America/New_York (local)
+    Returns dict of {name: {start: HH:MM, end: HH:MM}}
+    """
+    tz_vn = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
+    tz_uk = ZoneInfo("Europe/London")
+    tz_us = ZoneInfo("America/New_York")
+    if d is None:
+        d = datetime.now(tz=tz_vn)
+
+    def _fmt(dt_local_tzaware: datetime) -> str:
+        return dt_local_tzaware.astimezone(tz_vn).strftime("%H:%M")
+
+    def _local_range(tz, h0, m0, h1, m1):
+        s = datetime(d.year, d.month, d.day, h0, m0, tzinfo=tz)
+        e = datetime(d.year, d.month, d.day, h1, m1, tzinfo=tz)
+        return _fmt(s), _fmt(e)
+
+    l_st, l_ed = _local_range(tz_uk, 8, 0, 11, 0)
+    ny_pre_st, ny_pre_ed = _local_range(tz_us, 8, 30, 11, 0)
+    ny_post_st, ny_post_ed = _local_range(tz_us, 13, 30, 16, 0)
+
+    return {
+        "london": {"start": l_st, "end": l_ed},
+        "newyork_pre": {"start": ny_pre_st, "end": ny_pre_ed},
+        "newyork_post": {"start": ny_post_st, "end": ny_post_ed},
+    }
+
+
 def session_ranges_today(m1_rates: Sequence[dict] | None) -> dict[str, dict]:
     """
     Compute session ranges for Asia/London/NY (split NY into pre/post) in local VN time.
@@ -219,14 +254,9 @@ def session_ranges_today(m1_rates: Sequence[dict] | None) -> dict[str, dict]:
     if not m1_rates:
         return {}
 
-    # Session schedule in VN time (hh:mm). Adjust if you need DST handling.
-    sessions = {
-        "asia": {"start": "06:00", "end": "09:00"},
-        "london": {"start": "13:00", "end": "16:00"},
-        "newyork_pre": {"start": "19:30", "end": "21:00"},
-        "newyork_post": {"start": "21:00", "end": "23:59"},
-    }
-
+    # Session schedule in VN time with DST-aware conversion for London/NY.
+    kills = _killzone_ranges_vn()
+    sessions = {"asia": {"start": "06:00", "end": "09:00"}, **kills}
     return sessions
 
 
@@ -483,13 +513,9 @@ def build_context(
     except Exception:
         pos_in_day = None
 
-    # Killzone detection (simple VN schedule)
-    kills = {
-        "london": {"start": "13:00", "end": "16:00"},
-        "newyork_pre": {"start": "19:30", "end": "21:00"},
-        "newyork_post": {"start": "21:00", "end": "23:59"},
-    }
-    now_hhmm = datetime.now().strftime("%H:%M")
+    # Killzone detection using DST-aware VN schedule
+    kills = _killzone_ranges_vn()
+    now_hhmm = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%H:%M")
     kill_active = None
     mins_to_next = None
     try:
@@ -633,4 +659,3 @@ __all__ = [
     "session_ranges_today",
     "build_context",
 ]
-

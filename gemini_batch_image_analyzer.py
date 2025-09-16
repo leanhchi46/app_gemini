@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """\nỨNG DỤNG: Gemini Folder Analyze Once — Phân tích Ảnh Theo Lô (1 lần) + Báo cáo ICT/SMC\n========================================================================================\nMục tiêu:\n- Tự động nạp toàn bộ ảnh trong 1 thư mục (các khung D1/H4/M15/M1 hoặc theo đặt tên).\n- (Tuỳ chọn) Lấy dữ liệu từ MT5 để bổ sung số liệu khách quan (ATR, spread, VWAP, PDH/PDL...).\n- Gọi model Gemini để tạo BÁO CÁO TIÊU CHUẨN (7 dòng + phần A→E + JSON máy-đọc-được).\n- Hỗ trợ cache/upload song song, xuất báo cáo .md, gửi Telegram, NO-TRADE, và auto-trade thử nghiệm.\n\nKiến trúc tổng quan:\n- Tkinter GUI (Notebook: Report/Prompt/Options) + hàng đợi UI để đảm bảo thread-safe.\n- Lớp GeminiFolderOnceApp: chứa toàn bộ trạng thái và quy trình điều phối.\n- RunConfig (dataclass): snapshot cấu hình từ UI để dùng trong worker thread.\n- Các khối chức năng: upload/cache, gọi Gemini, hợp nhất báo cáo, MT5/Telegram/News, auto-trade.\n\nLưu ý:\n- Không thay đổi logic/chức năng gốc; chỉ xoá các comment cũ và thay bằng docstring tiếng Việt.\n- Tất cả docstring đều nhằm giải thích ý tưởng/luồng xử lý; không ảnh hưởng hành vi runtime.\n"""
 
 from __future__ import annotations
@@ -85,31 +85,7 @@ from gemini_folder_once import mt5_utils
 #   - New York (post): 13:30–16:00 America/New_York (local)
 # Tự động xử lý DST/tuần lệch pha nhờ zoneinfo, trả về HH:MM theo Asia/Ho_Chi_Minh.
 # -----------------------------------------------------------------------------
-    tz_vn = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
-    tz_uk = ZoneInfo("Europe/London")
-    tz_us = ZoneInfo("America/New_York")
-
-    def _fmt(dt_local_tzaware):
-        # Quy sang VN và định dạng HH:MM
-        return dt_local_tzaware.astimezone(tz_vn).strftime("%H:%M")
-
-    def _local_range(tz, h0, m0, h1, m1):
-        s = datetime(d.year, d.month, d.day, h0, m0, tzinfo=tz)
-        e = datetime(d.year, d.month, d.day, h1, m1, tzinfo=tz)
-        return _fmt(s), _fmt(e)
-
-    # London 08:00–11:00 local
-    l_st, l_ed = _local_range(tz_uk, 8, 0, 11, 0)
-    # New York pre 08:30–11:00 local
-    ny_pre_st, ny_pre_ed = _local_range(tz_us, 8, 30, 11, 0)
-    # New York post 13:30–16:00 local
-    ny_post_st, ny_post_ed = _local_range(tz_us, 13, 30, 16, 0)
-
-    return {
-        "london":       {"start": l_st,        "end": l_ed},
-        "newyork_pre":  {"start": ny_pre_st,   "end": ny_pre_ed},
-        "newyork_post": {"start": ny_post_st,  "end": ny_post_ed},
-    }\ndef _value_per_point_safe(symbol: str, info_obj=None) -> float | None:
+def _value_per_point_safe(symbol: str, info_obj=None) -> float | None:
     """
     Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
     Tham số:
@@ -2199,6 +2175,61 @@ class GeminiFolderOnceApp:
         bias = (setup["bias_h1"] or "").lower()
         enough = bool(setup["enough"])
 
+        # Resolve MT5 context variables used below
+        try:
+            sym = (mt5_ctx.get("symbol") if mt5_ctx else None) or (
+                (cfg.mt5_symbol if cfg else None) or (self.mt5_symbol_var.get().strip() if hasattr(self, "mt5_symbol_var") else "")
+            )
+        except Exception:
+            sym = (cfg.mt5_symbol if cfg else (self.mt5_symbol_var.get().strip() if hasattr(self, "mt5_symbol_var") else ""))
+
+        tick = (mt5_ctx.get("tick") if isinstance(mt5_ctx, dict) else {}) or {}
+        try:
+            ask = float((tick.get("ask") if isinstance(tick, dict) else None) or 0.0)
+        except Exception:
+            ask = 0.0
+        try:
+            bid = float((tick.get("bid") if isinstance(tick, dict) else None) or 0.0)
+        except Exception:
+            bid = 0.0
+        try:
+            cp = float((tick.get("last") if isinstance(tick, dict) else None) or (bid or ask) or 0.0)
+        except Exception:
+            cp = 0.0
+
+        info_dict = (mt5_ctx.get("info") if isinstance(mt5_ctx, dict) else {}) or {}
+        try:
+            digits = int((info_dict.get("digits") if isinstance(info_dict, dict) else None) or 5)
+        except Exception:
+            digits = 5
+        try:
+            point = float((info_dict.get("point") if isinstance(info_dict, dict) else None) or 0.0)
+        except Exception:
+            point = 0.0
+
+        info = None
+        acc = None
+        if mt5 is not None:
+            try:
+                info = mt5.symbol_info(sym) if sym else None
+            except Exception:
+                info = None
+            try:
+                acc = mt5.account_info()
+            except Exception:
+                acc = None
+        # Fallback enrich for digits/point if missing
+        try:
+            if (not point) and info is not None:
+                point = float(getattr(info, "point", 0.0) or 0.0)
+        except Exception:
+            pass
+        try:
+            if (not digits) and info is not None:
+                digits = int(getattr(info, "digits", 5) or 5)
+        except Exception:
+            pass
+
         if direction not in ("long", "short"):
             self.ui_status("Auto-Trade: thiếu hướng lệnh.")
             try:
@@ -3626,7 +3657,7 @@ class GeminiFolderOnceApp:
                 return_json=True,
             ) or ""
         except Exception:
-            return ""\n
+            return ""
 
     def _mt5_snapshot_popup(self):
         """
@@ -3686,8 +3717,8 @@ class GeminiFolderOnceApp:
         walk(obj)
         text = "\n\n".join(t.strip() for t in parts if t and t.strip())
 
-        if text and text.count("\\n") > 0 and text.count("\n") <= text.count("\\n"):
-            text = (text.replace("\\n", "\n")
+        if text and text.count("") > 0 and text.count("\n") <= text.count(""):
+            text = (text.replace("", "\n")
                         .replace("\\t", "\t")
                         .replace('\\"', '"')
                         .replace("\\'", "'"))
@@ -3716,8 +3747,8 @@ class GeminiFolderOnceApp:
         except Exception:
             pass
 
-        if s.count("\\n") >= 3 and s.count("\n") <= s.count("\\n"):
-            s = (s.replace("\\n", "\n")
+        if s.count("") >= 3 and s.count("\n") <= s.count(""):
+            s = (s.replace("", "\n")
                  .replace("\\t", "\t")
                  .replace('\\"', '"')
                  .replace("\\'", "'"))
@@ -4135,7 +4166,7 @@ class GeminiFolderOnceApp:
         except Exception as e:
             self.ui_message("error", "Workspace", str(e))
 
-        self._after_job = self.root.after(secs * 1000, self._tick)
+        # No periodic scheduling needed here; remove stray reference to undefined 'secs' and '_tick'.
 
 def main():
     """
