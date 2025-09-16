@@ -6,19 +6,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-def _points_per_pip_from_info(info: dict) -> int:
-    try:
-        d = int((info or {}).get("digits") or 0)
-    except Exception:
-        d = 0
-    return 10 if d >= 3 else 1
+from .mt5_utils import pip_size_from_info
 
 
-def _pip_size_from_info(info: dict) -> float:
-    point = float((info or {}).get("point") or 0.0)
-    ppp = _points_per_pip_from_info(info)
-    return point * ppp if point else 0.0
+"""
+Note: MT5 info helpers are centralized in gemini_folder_once.mt5_utils and
+accept both dicts (our JSON schema) and MT5 objects. Import and reuse them
+here to avoid divergence.
+"""
 
 
 def parse_ctx_json_files(reports_dir: Path, max_n: int = 5) -> list[dict]:
@@ -129,7 +124,7 @@ def compose_context(app, cfg, budget_chars: int = 1800) -> str:
                 volATR = ((mt5full.get("volatility") or {}).get("ATR") or {})
                 stats5 = (mt5full.get("tick_stats_5m") or {})
                 key_near = mt5full.get("key_levels_nearby") or []
-                pip_size = _pip_size_from_info(info)
+                pip_size = pip_size_from_info(info)
                 cp = tick.get("bid") or tick.get("last")
                 atr_m5 = volATR.get("M5")
                 tpm = stats5.get("ticks_per_min")

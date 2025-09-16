@@ -69,6 +69,31 @@ def pip_size_from_info(info: dict | Any) -> float:
     return point * ppp if point else 0.0
 
 
+def info_get(info: dict | Any, key: str, default: Any = None) -> Any:
+    """
+    Safe accessor for MT5 info/account-like objects that may be dicts or
+    MetaTrader5 structs. Handles a few common key name differences.
+
+    Examples:
+    - info_get(info, "digits")
+    - info_get(info, "contract_size") -> maps to attr "trade_contract_size" on objects
+    - info_get(info, "spread_current") -> maps to attr "spread" on objects
+    """
+    if info is None:
+        return default
+    if isinstance(info, dict):
+        return info.get(key, default)
+    # Map commonly renamed fields from our JSON schema back to MT5 attributes
+    attr_map = {
+        "contract_size": "trade_contract_size",
+        "spread_current": "spread",
+        "stop_level_points": "trade_stops_level",
+        "freeze_level_points": "trade_freeze_level",
+    }
+    attr = attr_map.get(key, key)
+    return getattr(info, attr, default)
+
+
 def value_per_point(symbol: str, info_obj: Any | None = None) -> float | None:
     """
     Best-effort estimation of 1-point value per 1.00 lot for `symbol`.
@@ -648,6 +673,7 @@ def build_context(
 __all__ = [
     "connect",
     "ensure_initialized",
+    "info_get",
     "points_per_pip_from_info",
     "pip_size_from_info",
     "value_per_point",

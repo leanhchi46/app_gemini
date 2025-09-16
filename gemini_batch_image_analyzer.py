@@ -78,62 +78,6 @@ from gemini_folder_once import no_trade, news
 from gemini_folder_once.chart_tab import ChartTabTV
 from gemini_folder_once import uploader
 from gemini_folder_once import mt5_utils
-# -----------------------------------------------------------------------------
-# Killzones theo GIỜ VIỆT NAM (UTC+7), suy từ giờ địa phương chuẩn quốc tế:
-#   - London: 08:00–11:00 Europe/London (local)
-#   - New York (pre): 08:30–11:00 America/New_York (local)
-#   - New York (post): 13:30–16:00 America/New_York (local)
-# Tự động xử lý DST/tuần lệch pha nhờ zoneinfo, trả về HH:MM theo Asia/Ho_Chi_Minh.
-# -----------------------------------------------------------------------------
-def _value_per_point_safe(symbol: str, info_obj=None) -> float | None:
-    """
-    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-    Tham số:
-      - symbol: str — (tự suy luận theo ngữ cảnh sử dụng).
-      - info_obj — (tự suy luận theo ngữ cảnh sử dụng).
-    Trả về: float | None
-    Ghi chú:
-      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-    """
-    try:
-        if mt5 is None:
-            return None
-        info_obj = info_obj or mt5.symbol_info(symbol)
-        if not info_obj:
-            return None
-
-        point = float(getattr(info_obj, "point", 0.0) or 0.0)
-        if point <= 0:
-            return None
-
-        tick_value = float(getattr(info_obj, "trade_tick_value", 0.0) or 0.0)
-        tick_size  = float(getattr(info_obj, "trade_tick_size", 0.0) or 0.0)
-
-        if tick_value > 0 and tick_size > 0:
-            return tick_value * (point / tick_size)
-
-        try:
-            tick = mt5.symbol_info_tick(symbol)
-            mid = None
-            if tick:
-                bid = float(getattr(tick, "bid", 0.0) or 0.0)
-                ask = float(getattr(tick, "ask", 0.0) or 0.0)
-                mid = (bid + ask) / 2.0 if (bid and ask) else (ask or bid)
-            if mid and point > 0:
-                pr = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, symbol, 1.0, mid, mid + point)
-                if isinstance(pr, (int, float)):
-                    return abs(float(pr))
-        except Exception:
-            pass
-
-        csize = float(getattr(info_obj, "trade_contract_size", 0.0) or 0.0)
-        if csize > 0:
-            return csize * point
-
-        return None
-    except Exception:
-        return None
-
 from gemini_folder_once.utils import _tg_html_escape
 
 class GeminiFolderOnceApp:
@@ -2313,7 +2257,8 @@ class GeminiFolderOnceApp:
                     }, folder_override=(self.mt5_symbol_var.get().strip() or None))
                 except Exception: pass
                 return
-            value_per_point = _value_per_point_safe(sym, info) or 0.0
+            # Use centralized MT5 helper for value per point
+            value_per_point = (mt5_utils.value_per_point(sym, info) or 0.0)
             if value_per_point <= 0:
                 self.ui_status("Auto-Trade: không xác định được value per point — bỏ qua.")
                 try:

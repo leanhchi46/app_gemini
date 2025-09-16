@@ -9,11 +9,11 @@ from .mt5_utils import pip_size_from_info
 def check_spread(mt5_ctx: dict, cfg: RunConfig) -> Optional[str]:
     """Return reason string if current spread is too high, else None.
 
-    Prefers 5m p90, falls back to median; compares using nt_spread_factor
-    with a lower bound of 1.0, matching existing behavior.
+    Mirrors existing logic: prefer 5m p90, fallback to median, scaled by
+    nt_spread_factor (min 1.0).
     """
     info = (mt5_ctx.get("info") or {})
-    tick_stats = (mt5_ctx.get("tick_stats_5m") or {})
+    
     spread_cur = info.get("spread_current")
     p90_sp = tick_stats.get("p90_spread")
     median_sp = tick_stats.get("median_spread")
@@ -35,13 +35,13 @@ def check_spread(mt5_ctx: dict, cfg: RunConfig) -> Optional[str]:
 def check_atr_m5(mt5_ctx: dict, cfg: RunConfig) -> Optional[str]:
     """Return reason string if ATR M5 (in pips) is too low, else None."""
     info = (mt5_ctx.get("info") or {})
-    vol = (mt5_ctx.get("volatility") or {}).get("ATR") or {}
-    atr_m5 = vol.get("M5")
-    pip_size = pip_size_from_info(info)
+    
+    
+    
     if not atr_m5 or not pip_size or pip_size <= 0:
         return None
     try:
-        atr_m5_pips = float(atr_m5) / pip_size
+        
         if atr_m5_pips < float(cfg.nt_min_atr_m5_pips):
             return f"ATR M5 th?p ({atr_m5_pips:.1f} pips)"
     except Exception:
@@ -73,13 +73,30 @@ def pretrade_hard_filters(mt5_ctx: dict, cfg: RunConfig) -> Tuple[bool, List[str
         return True, []
 
     reasons: List[str] = []
+    # Split checks (spread/ATR/liquidity); behavior preserved
     for fn in (check_spread, check_atr_m5, check_liquidity):
         try:
             why = fn(mt5_ctx, cfg)
             if why:
                 reasons.append(why)
         except Exception:
-            # Ignore individual check failures and proceed conservatively
             pass
     return (len(reasons) == 0), reasons
+    tick_stats = (mt5_ctx.get("tick_stats_5m") or {})
+    vol = (mt5_ctx.get("volatility") or {}).get("ATR") or {}
 
+    
+
+    
+
+    atr_m5 = vol.get("M5")
+    pip_size = pip_size_from_info(info)
+    
+        
+        if atr_m5_pips < float(cfg.nt_min_atr_m5_pips):
+            reasons.append(f"ATR M5 thấp ({atr_m5_pips:.1f} pips)")
+
+    if tpm is not None and tpm < int(cfg.nt_min_ticks_per_min):
+        reasons.append(f"Thanh khoản thấp (ticks/min={tpm})")
+
+    return (len(reasons) == 0), reasons
