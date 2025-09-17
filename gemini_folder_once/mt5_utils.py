@@ -9,6 +9,7 @@ from statistics import median
 from typing import Any, Iterable, Sequence
 
 from . import ict_analysis
+from .safe_data import SafeMT5Data
 
 
 try:
@@ -356,19 +357,19 @@ def build_context(
     n_m5: int = 180,
     n_m15: int = 96,
     n_h1: int = 120,
-    return_json: bool = True,
+    return_json: bool = False, # Default changed to return the object
     plan: dict | None = None,
-) -> str | dict:
+) -> SafeMT5Data:
     """
     Fetches MT5 data + computes helpers used by the app.
     Returns a JSON string (default) containing a single object with key MT5_DATA.
     """
     if mt5 is None:
-        return "" if return_json else {}
+        return SafeMT5Data(None)
 
     info = mt5.symbol_info(symbol)
     if not info:
-        return "" if return_json else {}
+        return SafeMT5Data(None)
     if not getattr(info, "visible", True):
         try:
             mt5.symbol_select(symbol, True)
@@ -376,6 +377,29 @@ def build_context(
             pass
     acc = mt5.account_info()
     tick = mt5.symbol_info_tick(symbol)
+
+    # --- Fetch Open Positions ---
+    positions_list = []
+    try:
+        positions = mt5.positions_get(symbol=symbol)
+        if positions:
+            for pos in positions:
+                pos_dict = {
+                    "ticket": pos.ticket,
+                    "symbol": pos.symbol,
+                    "type": "BUY" if pos.type == 0 else "SELL",
+                    "volume": pos.volume,
+                    "price_open": pos.price_open,
+                    "sl": pos.sl,
+                    "tp": pos.tp,
+                    "price_current": pos.price_current,
+                    "profit": pos.profit,
+                    "comment": pos.comment,
+                }
+                positions_list.append(pos_dict)
+    except Exception:
+        # In case of any error, ensure the list is empty
+        positions_list = []
 
     info_obj = {
         "digits": getattr(info, "digits", None),
@@ -645,33 +669,38 @@ def build_context(
 
     # ICT Patterns
     ict_patterns = {}
-    ict_patterns["fvgs_m15"] = ict_analysis.find_fvgs(series.get("M15", []), cp)
-    ict_patterns["fvgs_h1"] = ict_analysis.find_fvgs(series.get("H1", []), cp)
-    
-    liquidity_h1 = ict_analysis.find_liquidity_levels(series.get("H1", []))
-    liquidity_m15 = ict_analysis.find_liquidity_levels(series.get("M15", []))
-    ict_patterns["liquidity_h1"] = liquidity_h1
-    ict_patterns["liquidity_m15"] = liquidity_m15
-    
-    ict_patterns["order_blocks_h1"] = ict_analysis.find_order_blocks(series.get("H1", []))
-    ict_patterns["order_blocks_m15"] = ict_analysis.find_order_blocks(series.get("M15", []))
-    ict_patterns["premium_discount_h1"] = ict_analysis.analyze_premium_discount(series.get("H1", []), cp)
-    ict_patterns["premium_discount_m15"] = ict_analysis.analyze_premium_discount(series.get("M15", []), cp)
-    
-    # MSS/BOS needs liquidity levels as input
-    ict_patterns["mss_h1"] = ict_analysis.find_market_structure_shift(series.get("H1", []), liquidity_h1.get("swing_highs_BSL", []), liquidity_h1.get("swing_lows_SSL", []))
-    ict_patterns["mss_m15"] = ict_analysis.find_market_structure_shift(series.get("M15", []), liquidity_m15.get("swing_highs_BSL", []), liquidity_m15.get("swing_lows_SSL", []))
-    ict_patterns["liquidity_voids_h1"] = ict_analysis.find_liquidity_voids(series.get("H1", []))
-    ict_patterns["liquidity_voids_m15"] = ict_analysis.find_liquidity_voids(series.get("M15", []))
+    try:
+        ict_patterns["fvgs_m15"] = ict_analysis.find_fvgs(series.get("M15", []), cp) or {}
+        ict_patterns["fvgs_h1"] = ict_analysis.find_fvgs(series.get("H1", []), cp) or {}
+        
+        liquidity_h1 = ict_analysis.find_liquidity_levels(series.get("H1", [])) or {}
+        liquidity_m15 = ict_analysis.find_liquidity_levels(series.get("M15", [])) or {}
+        ict_patterns["liquidity_h1"] = liquidity_h1
+        ict_patterns["liquidity_m15"] = liquidity_m15
+        
+        ict_patterns["order_blocks_h1"] = ict_analysis.find_order_blocks(series.get("H1", [])) or {}
+        ict_patterns["order_blocks_m15"] = ict_analysis.find_order_blocks(series.get("M15", [])) or {}
+        ict_patterns["premium_discount_h1"] = ict_analysis.analyze_premium_discount(series.get("H1", []), cp) or {}
+        ict_patterns["premium_discount_m15"] = ict_analysis.analyze_premium_discount(series.get("M15", []), cp) or {}
+        
+        # MSS/BOS needs liquidity levels as input
+        ict_patterns["mss_h1"] = ict_analysis.find_market_structure_shift(series.get("H1", []), liquidity_h1.get("swing_highs_BSL", []), liquidity_h1.get("swing_lows_SSL", []))
+        ict_patterns["mss_m15"] = ict_analysis.find_market_structure_shift(series.get("M15", []), liquidity_m15.get("swing_highs_BSL", []), liquidity_m15.get("swing_lows_SSL", []))
+        ict_patterns["liquidity_voids_h1"] = ict_analysis.find_liquidity_voids(series.get("H1", [])) or []
+        ict_patterns["liquidity_voids_m15"] = ict_analysis.find_liquidity_voids(series.get("M15", [])) or []
+    except Exception:
+        # If any ICT analysis fails, ensure ict_patterns is an empty dict
+        ict_patterns = {}
 
     payload = {
         "MT5_DATA": {
             "symbol": symbol,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "broker_time": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-            "account": account_obj,
-            "info": info_obj,
-            "symbol_rules": rules_obj,
+            "account": account_obj or {},
+            "positions": positions_list,
+            "info": info_obj or {},
+            "symbol_rules": rules_obj or {},
             "pip": {
                 "points_per_pip": points_per_pip_from_info(info_obj),
                 "value_per_point": value_per_point(symbol, info),
@@ -679,47 +708,52 @@ def build_context(
                     (value_per_point(symbol, info) or 0.0) * points_per_pip_from_info(info_obj)
                 ),
             },
-            "tick": tick_obj,
-            "tick_stats_5m": tick_stats_5m or None,
-            "tick_stats_30m": tick_stats_30m or None,
+            "tick": tick_obj or {},
+            "tick_stats_5m": tick_stats_5m or {},
+            "tick_stats_30m": tick_stats_30m or {},
             "levels": {
-                "daily": daily or None,
-                "prev_day": prev_day or None,
-                "weekly": weekly or None,
-                "prev_week": prev_week or None,
-                "monthly": monthly or None,
+                "daily": daily or {},
+                "prev_day": prev_day or {},
+                "weekly": weekly or {},
+                "prev_week": prev_week or {},
+                "monthly": monthly or {},
             },
             "day_open": daily.get("open") if daily else None,
             "prev_day_close": prev_close,
-            "adr": adr or None,
+            "adr": adr or {},
             "day_range": day_range,
             "day_range_pct_of_adr20": (float(day_range_pct) if day_range_pct is not None else None),
             "position_in_day_range": (float(pos_in_day) if pos_in_day is not None else None),
-            "sessions_today": sessions_today or None,
-            "session_liquidity": session_liquidity,
-            "volatility": {"ATR": atr_block},
+            "sessions_today": sessions_today or {},
+            "session_liquidity": session_liquidity or {},
+            "volatility": {"ATR": atr_block or {}},
             "volatility_regime": vol_regime,
-            "trend_refs": {"EMA": ema_block},
-            "vwap": vwaps,
-            "kills": kills,
+            "trend_refs": {"EMA": ema_block or {}},
+            "vwap": vwaps or {},
+            "kills": kills or {},
             "is_silver_bullet_window": is_silver_bullet,
             "killzone_active": kill_active,
             "mins_to_next_killzone": mins_to_next,
-            "key_levels_nearby": key_near,
-            "round_levels": round_levels or None,
-            "atr_norm": atr_norm,
-            "ict_patterns": ict_patterns,
-            "risk_model": risk_model,
-            "rr_projection": rr_projection,
+            "key_levels_nearby": key_near or [],
+            "round_levels": round_levels or [],
+            "atr_norm": atr_norm or {},
+            "ict_patterns": ict_patterns or {},
+            "risk_model": risk_model or {},
+            "rr_projection": rr_projection or {},
         }
     }
 
+    # Always wrap in SafeMT5Data. The caller can decide to get the raw dict or json.
+    safe_data_obj = SafeMT5Data(payload.get("MT5_DATA"))
+    
     if return_json:
         try:
+            # This path is now less common, but supported for compatibility.
             return json.dumps(payload, ensure_ascii=False)
         except Exception:
             return str(payload)
-    return payload
+            
+    return safe_data_obj
 
 
 __all__ = [

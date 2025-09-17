@@ -20,6 +20,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 import platform
+from typing import Optional
 
 import tkinter as tk
 from tkinter import ttk, filedialog
@@ -78,6 +79,7 @@ from gemini_folder_once import no_trade, news, auto_trade
 from gemini_folder_once.chart_tab import ChartTabTV
 from gemini_folder_once import uploader
 from gemini_folder_once import mt5_utils
+from gemini_folder_once.safe_data import SafeMT5Data
 from gemini_folder_once import no_run
 from gemini_folder_once import worker
 from gemini_folder_once.utils import _tg_html_escape
@@ -925,36 +927,15 @@ class GeminiFolderOnceApp:
         if len(self.results) == 0:
             return
 
-        # --- Dynamic Prompt Selection ---
-        prompt = ""
-        cfg = self._snapshot_config()
-        try:
-            if cfg.mt5_enabled:
-                # Build a temporary context to check for open trades
-                mt5_json_full = self._mt5_build_context(plan=None, cfg=cfg)
-                if mt5_json_full:
-                    mt5_data = json.loads(mt5_json_full).get("MT5_DATA", {})
-                    # Check if there are any open positions
-                    if mt5_data.get("positions"):
-                        prompt = self.prompt_entry_run_text.get("1.0", "end").strip()
-                        self.ui_status("Phát hiện lệnh đang mở, dùng prompt Quản Lý Lệnh.")
-                    else:
-                        prompt = self.prompt_no_entry_text.get("1.0", "end").strip()
-                        self.ui_status("Không có lệnh mở, dùng prompt Tìm Lệnh Mới.")
-                else:
-                    # Fallback if MT5 connection fails
-                    prompt = self.prompt_no_entry_text.get("1.0", "end").strip()
-            else:
-                # Default to no_entry prompt if MT5 is disabled
-                prompt = self.prompt_no_entry_text.get("1.0", "end").strip()
-        except Exception as e:
-            self.ui_message("error", "Lỗi chọn Prompt", f"Không thể xác định trạng thái lệnh MT5, dùng prompt mặc định. Lỗi: {e}")
-            prompt = self.prompt_no_entry_text.get("1.0", "end").strip()
+        # --- Prompts are now selected inside the worker ---
+        prompt_no_entry = self.prompt_no_entry_text.get("1.0", "end").strip()
+        prompt_entry_run = self.prompt_entry_run_text.get("1.0", "end").strip()
 
-        if not prompt:
+        if not prompt_no_entry or not prompt_entry_run:
             self.ui_message("warning", "Thiếu prompt", "Vui lòng nhập nội dung cho cả hai tab prompt trước khi chạy.")
             return
-        # --- End Dynamic Prompt Selection ---
+        
+        cfg = self._snapshot_config()
 
         api_key = self.api_key_var.get().strip() or os.environ.get("GOOGLE_API_KEY")
         if not api_key:
@@ -979,10 +960,15 @@ class GeminiFolderOnceApp:
         self.stop_btn.configure(state="normal")
         self.export_btn.configure(state="disabled")
 
-        # Note: cfg was already created for prompt selection
         t = threading.Thread(
             target=worker.run_analysis_worker,
-            args=(self, prompt, self.model_var.get(), cfg),
+            args=(
+                self,
+                prompt_no_entry,
+                prompt_entry_run,
+                self.model_var.get(),
+                cfg
+            ),
             daemon=True
         )
         t.start()
@@ -1191,12 +1177,9 @@ class GeminiFolderOnceApp:
         try:
             if not (cfg.mt5_enabled and cfg.auto_trade_enabled):
                 return
-            ctx = self._mt5_build_context(plan=None, cfg=cfg) or ""
-            if not ctx:
-                return
-            data = json.loads(ctx).get("MT5_DATA", {})
-            if data:
-                auto_trade.mt5_manage_be_trailing(self,data, cfg)
+            safe_data = self._mt5_build_context(plan=None, cfg=cfg)
+            if safe_data and safe_data.raw:
+                auto_trade.mt5_manage_be_trailing(self, safe_data.raw, cfg)
         except Exception:
             pass
 
@@ -3024,25 +3007,25 @@ class GeminiFolderOnceApp:
             self._enqueue(lambda: self.mt5_status_var.set(f"MT5: lỗi kết nối: {e}"))
             self.ui_message("error", "MT5", f"Lỗi kết nối: {e}")
 
-    def _mt5_build_context(self, plan=None, cfg: RunConfig | None = None):
+    def _mt5_build_context(self, plan=None, cfg: RunConfig | None = None) -> Optional[SafeMT5Data]:
         """
         Mục đích: Tương tác với MetaTrader 5 (kết nối, lấy dữ liệu nến, tính toán chỉ số, snapshot...).
         Tham số:
           - plan — (tự suy luận theo ngữ cảnh sử dụng).
           - cfg: RunConfig | None — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Trả về: đối tượng SafeMT5Data hoặc None.
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
         sym = (cfg.mt5_symbol if cfg else (self.mt5_symbol_var.get() or "").strip())
         if not ((cfg.mt5_enabled if cfg else self.mt5_enabled_var.get()) and sym) or mt5 is None:
-            return ""
+            return None
         if not self.mt5_initialized:
             self._mt5_connect()
             if not self.mt5_initialized:
-                return ""
+                return None
 
-        # Delegate to mt5_utils for building the MT5 context JSON
+        # Delegate to mt5_utils for building the MT5 context object
         try:
             return mt5_utils.build_context(
                 sym,
@@ -3051,10 +3034,10 @@ class GeminiFolderOnceApp:
                 n_m15=(cfg.mt5_n_M15 if cfg else int(self.mt5_n_M15.get())),
                 n_h1=(cfg.mt5_n_H1 if cfg else int(self.mt5_n_H1.get())),
                 plan=plan,
-                return_json=True,
-            ) or ""
+                return_json=False, # Ensure we get the object
+            )
         except Exception:
-            return ""
+            return None
 
     def _mt5_snapshot_popup(self):
         """
@@ -3064,16 +3047,23 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        txt = self._mt5_build_context(plan=None)
-        if not txt:
+        safe_data = self._mt5_build_context(plan=None)
+        if not safe_data or not safe_data.raw:
             self.ui_message("warning", "MT5", "Không thể lấy dữ liệu. Kiểm tra kết nối/biểu tượng (Symbol).")
             return
+        
+        # Convert the raw data to a formatted JSON string
+        try:
+            json_text = json.dumps(safe_data.raw, ensure_ascii=False, indent=2)
+        except Exception as e:
+            json_text = f"Lỗi khi định dạng JSON: {e}\n\nDữ liệu thô:\n{safe_data.raw}"
+
         win = tk.Toplevel(self.root)
         win.title("MT5 snapshot")
         win.geometry("760x520")
         st = ScrolledText(win, wrap="none")
         st.pack(fill="both", expand=True)
-        st.insert("1.0", txt)
+        st.insert("1.0", json_text)
 
     def _extract_text_from_obj(self, obj):
         """

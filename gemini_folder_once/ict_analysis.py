@@ -2,9 +2,10 @@ from __future__ import annotations
 from typing import Any, Iterable, Sequence
 from datetime import datetime
 
-def find_fvgs(rates: Sequence[dict], current_price: float) -> dict:
+def find_fvgs(rates: Sequence[dict], current_price: float) -> list:
     """
     Scans rates to find the nearest unfilled Fair Value Gaps (FVGs) relative to the current price.
+    Returns a list of FVG dictionaries.
     """
     if not rates or len(rates) < 3:
         return {}
@@ -52,7 +53,7 @@ def find_fvgs(rates: Sequence[dict], current_price: float) -> dict:
             unfilled_fvgs.append(fvg)
     
     if not unfilled_fvgs:
-        return {}
+        return []
 
     # Find the nearest bullish and bearish FVGs to the current price
     nearest_bullish = None
@@ -74,10 +75,16 @@ def find_fvgs(rates: Sequence[dict], current_price: float) -> dict:
                 min_dist_bearish = dist
                 nearest_bearish = fvg
 
-    return {
-        "nearest_bullish": nearest_bullish,
-        "nearest_bearish": nearest_bearish,
-    }
+    results = []
+    if nearest_bullish:
+        nearest_bullish['lo'] = nearest_bullish['bottom']
+        nearest_bullish['hi'] = nearest_bullish['top']
+        results.append(nearest_bullish)
+    if nearest_bearish:
+        nearest_bearish['lo'] = nearest_bearish['bottom']
+        nearest_bearish['hi'] = nearest_bearish['top']
+        results.append(nearest_bearish)
+    return results
 
 
 def find_liquidity_levels(rates: Sequence[dict], lookback: int = 200) -> dict:
@@ -106,10 +113,11 @@ def find_liquidity_levels(rates: Sequence[dict], lookback: int = 200) -> dict:
     }
 
 
-def find_order_blocks(rates: Sequence[dict], lookback: int = 100) -> dict:
+def find_order_blocks(rates: Sequence[dict], lookback: int = 100) -> list:
     """
     Finds the nearest unmitigated bullish and bearish order blocks.
     A simple definition is used: a candle whose range is engulfed by the next, leading to a break of structure.
+    Returns a list of OB dictionaries.
     """
     if not rates or len(rates) < 5: # Need enough candles for context
         return {}
@@ -153,10 +161,20 @@ def find_order_blocks(rates: Sequence[dict], lookback: int = 100) -> dict:
                         "bar_index": len(rates) - lookback + i,
                     })
 
-    return {
-        "nearest_bullish_ob": bullish_obs[0] if bullish_obs else None,
-        "nearest_bearish_ob": bearish_obs[0] if bearish_obs else None,
-    }
+    results = []
+    if bullish_obs:
+        nearest_bullish = bullish_obs[0]
+        nearest_bullish['lo'] = nearest_bullish['bottom']
+        nearest_bullish['hi'] = nearest_bullish['top']
+        nearest_bullish['type'] = 'bull'
+        results.append(nearest_bullish)
+    if bearish_obs:
+        nearest_bearish = bearish_obs[0]
+        nearest_bearish['lo'] = nearest_bearish['bottom']
+        nearest_bearish['hi'] = nearest_bearish['top']
+        nearest_bearish['type'] = 'bear'
+        results.append(nearest_bearish)
+    return results
 
 
 def analyze_premium_discount(rates: Sequence[dict], current_price: float, lookback: int = 200) -> dict | None:

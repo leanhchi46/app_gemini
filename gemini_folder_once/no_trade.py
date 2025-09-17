@@ -5,17 +5,17 @@ from typing import Tuple, List, Optional, Dict, Any
 from .config import RunConfig
 from .mt5_utils import pip_size_from_info
 from . import news
+from .safe_data import SafeMT5Data
 
 
-def check_spread(mt5_ctx: dict, cfg: RunConfig) -> Optional[str]:
+def check_spread(mt5_ctx: SafeMT5Data, cfg: RunConfig) -> Optional[str]:
     """Return reason string if current spread is too high, else None.
 
     Prefers 5m p90, falls back to median; compares using nt_spread_factor
     with a lower bound of 1.0, matching existing behavior.
     """
-    info = (mt5_ctx.get("info") or {})
-    tick_stats = (mt5_ctx.get("tick_stats_5m") or {})
-    spread_cur = info.get("spread_current")
+    tick_stats = mt5_ctx.get("tick_stats_5m", {})
+    spread_cur = mt5_ctx.get_info_value("spread_current")
     p90_sp = tick_stats.get("p90_spread")
     median_sp = tick_stats.get("median_spread")
     if spread_cur is None:
@@ -33,12 +33,11 @@ def check_spread(mt5_ctx: dict, cfg: RunConfig) -> Optional[str]:
     return None
 
 
-def check_atr_m5(mt5_ctx: dict, cfg: RunConfig) -> Optional[str]:
+def check_atr_m5(mt5_ctx: SafeMT5Data, cfg: RunConfig) -> Optional[str]:
     """Return reason string if ATR M5 (in pips) is too low, else None."""
-    info = (mt5_ctx.get("info") or {})
     vol = (mt5_ctx.get("volatility") or {}).get("ATR") or {}
     atr_m5 = vol.get("M5")
-    pip_size = pip_size_from_info(info)
+    pip_size = pip_size_from_info(mt5_ctx.get("info", {}))
     if not atr_m5 or not pip_size or pip_size <= 0:
         return None
     try:
@@ -50,9 +49,9 @@ def check_atr_m5(mt5_ctx: dict, cfg: RunConfig) -> Optional[str]:
     return None
 
 
-def check_liquidity(mt5_ctx: dict, cfg: RunConfig) -> Optional[str]:
+def check_liquidity(mt5_ctx: SafeMT5Data, cfg: RunConfig) -> Optional[str]:
     """Return reason string if ticks-per-minute is below threshold, else None."""
-    tick_stats = (mt5_ctx.get("tick_stats_5m") or {})
+    tick_stats = mt5_ctx.get("tick_stats_5m", {})
     tpm = tick_stats.get("ticks_per_min")
     if tpm is None:
         return None
@@ -64,7 +63,7 @@ def check_liquidity(mt5_ctx: dict, cfg: RunConfig) -> Optional[str]:
     return None
 
 
-def pretrade_hard_filters(mt5_ctx: dict, cfg: RunConfig) -> Tuple[bool, List[str], List[str]]:
+def pretrade_hard_filters(mt5_ctx: SafeMT5Data, cfg: RunConfig) -> Tuple[bool, List[str], List[str]]:
     """Evaluate NO-TRADE hard filters using MT5 context and run config.
 
     Returns a tuple (ok, reasons). If ok is False, reasons contains human
@@ -93,7 +92,7 @@ def pretrade_hard_filters(mt5_ctx: dict, cfg: RunConfig) -> Tuple[bool, List[str
 
 
 def evaluate(
-    mt5_ctx: dict,
+    mt5_ctx: SafeMT5Data,
     cfg: RunConfig,
     *,
     cache_events: Optional[List[Dict[str, Any]]] = None,

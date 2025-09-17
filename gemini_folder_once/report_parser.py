@@ -1,8 +1,9 @@
 from __future__ import annotations
 import json
 from typing import Any
+from .safe_data import SafeMT5Data
 
-def _generate_extract_json(data: dict[str, Any]) -> dict[str, Any]:
+def _generate_extract_json(data: SafeMT5Data) -> dict[str, Any]:
     """Helper to build the EXTRACT_JSON part of the report."""
     extract_dict = {
         "tf": {},
@@ -14,8 +15,8 @@ def _generate_extract_json(data: dict[str, Any]) -> dict[str, Any]:
     }
 
     # Populate timeframe data from the 'ict_patterns' and 'levels' keys
-    cp = data.get("tick", {}).get("bid") or data.get("tick", {}).get("last") or 0.0
-    ict_patterns = data.get("ict_patterns", {})
+    cp = data.get_tick_value("bid") or data.get_tick_value("last") or 0.0
+    ict_patterns = data.get("ict_patterns", {}) # Safely get the entire ict_patterns dictionary
 
     # Process available timeframes (H1, M15)
     for tf_str, tf_key in [("H1", "h1"), ("M15", "m15")]:
@@ -51,14 +52,12 @@ def _generate_extract_json(data: dict[str, Any]) -> dict[str, Any]:
         }
 
     # Populate risk_reward from 'rr_projection'
-    rr_projection = data.get("rr_projection", {})
-    plan = data.get("plan", {})  # A plan might be passed in the context
     extract_dict["risk_reward"] = {
-        "entry": plan.get("entry"),
-        "sl": plan.get("sl"),
-        "tp1": plan.get("tp1"),
-        "tp2": plan.get("tp2"),
-        "rr_tp1": rr_projection.get("tp1_rr")
+        "entry": data.get_plan_value("entry"),
+        "sl": data.get_plan_value("sl"),
+        "tp1": data.get_plan_value("tp1"),
+        "tp2": data.get_plan_value("tp2"),
+        "rr_tp1": data.get_rr_projection("tp1_rr")
     }
 
     # --- Inter-timeframe Comparisons ---
@@ -100,11 +99,13 @@ def _generate_extract_json(data: dict[str, Any]) -> dict[str, Any]:
     return extract_dict
 
 
-def _generate_concept_value_table(data: dict[str, Any]) -> str:
+def _generate_concept_value_table(data: SafeMT5Data, tf_data: dict) -> str:
     """Helper to build the CONCEPT_VALUE_TABLE part of the report."""
-    cp = data.get("tick", {}).get("bid") or data.get("tick", {}).get("last") or 0.0
-    point = data.get("info", {}).get("point", 0.0)
-    pip_size = (data.get("pip", {}).get("value_per_point", 0.0) / (data.get("pip", {}).get("points_per_pip", 1) or 1)) if point else 0.0
+    cp = data.get_tick_value("bid") or data.get_tick_value("last") or 0.0
+    point = data.get_info_value("point", 0.0)
+    pip_value_per_point = data.get_pip_value("value_per_point", 0.0)
+    points_per_pip = data.get_pip_value("points_per_pip", 1) or 1
+    pip_size = (pip_value_per_point / points_per_pip) if point else 0.0
 
     def format_row(tf: str, concept: str, value: float | None, confidence: str = "High") -> str | None:
         if value is None or not cp or not point:
@@ -119,20 +120,20 @@ def _generate_concept_value_table(data: dict[str, Any]) -> str:
     rows = ["E) CONCEPT_VALUE_TABLE:", "", "Timeframe | Concept | Value/Zone | RelationToPrice | Distance | Confidence", "--- | --- | --- | --- | --- | ---"]
     
     # H1 Concepts
-    h1_swing_h = data.get("tf_data", {}).get("H1", {}).get("swing", {}).get("H")
-    h1_swing_l = data.get("tf_data", {}).get("H1", {}).get("swing", {}).get("L")
+    h1_swing_h = (tf_data.get("H1", {}).get("swing") or {}).get("H")
+    h1_swing_l = (tf_data.get("H1", {}).get("swing") or {}).get("L")
     rows.append(format_row("H1", "Current Price", cp))
     rows.append(format_row("H1", "Swing High", h1_swing_h))
     rows.append(format_row("H1", "Swing Low", h1_swing_l))
-    rows.append(format_row("H1", "EQ50_D", (data.get("levels", {}).get("daily") or {}).get("eq50")))
-    rows.append(format_row("H1", "Daily VWAP", (data.get("vwap") or {}).get("day")))
-    rows.append(format_row("H1", "PDL", (data.get("levels", {}).get("prev_day") or {}).get("low")))
-    rows.append(format_row("H1", "PDH", (data.get("levels", {}).get("prev_day") or {}).get("high")))
-    rows.append(format_row("H1", "EMA50", ((data.get("trend_refs", {}).get("EMA") or {}).get("H1") or {}).get("ema50")))
+    rows.append(format_row("H1", "EQ50_D", data.get_daily_level("eq50")))
+    rows.append(format_row("H1", "Daily VWAP", data.get_vwap("day")))
+    rows.append(format_row("H1", "PDL", data.get_prev_day_level("low")))
+    rows.append(format_row("H1", "PDH", data.get_prev_day_level("high")))
+    rows.append(format_row("H1", "EMA50", data.get_ema("H1", "ema50")))
 
     # M15 Concepts
-    m15_swing_h = data.get("tf_data", {}).get("M15", {}).get("swing", {}).get("H")
-    m15_swing_l = data.get("tf_data", {}).get("M15", {}).get("swing", {}).get("L")
+    m15_swing_h = (tf_data.get("M15", {}).get("swing") or {}).get("H")
+    m15_swing_l = (tf_data.get("M15", {}).get("swing") or {}).get("L")
     rows.append(format_row("M15", "Current Price", cp))
     rows.append(format_row("M15", "Swing High", m15_swing_h))
     rows.append(format_row("M15", "Swing Low", m15_swing_l))
@@ -141,24 +142,73 @@ def _generate_concept_value_table(data: dict[str, Any]) -> str:
     return "\n".join(filter(None, rows))
 
 
-def _generate_checklist_json(data: dict[str, Any], tf_data: dict) -> dict[str, Any]:
+def _generate_checklist_json(data: SafeMT5Data, tf_data: dict) -> dict[str, Any]:
     """
     Helper to build the CHECKLIST_JSON part of the report, following the detailed ICT prompt.
+    This function now handles both "setup" and "management" modes.
     """
     from datetime import datetime
 
-    cp = data.get("tick", {}).get("bid", 0.0)
+    positions = data.get("positions")
+    if positions:
+        # --- MANAGEMENT MODE ---
+        # If there are open positions, generate a management checklist.
+        pos = positions[0]  # Assuming one position for now
+        current_price = data.get_tick_value("bid", 0.0) or data.get_tick_value("last", 0.0)
+
+        entry_price = pos.get("price_open", 0.0)
+        sl = pos.get("sl", 0.0)
+        trade_type = pos.get("type")
+
+        initial_risk = 0
+        if sl != 0 and entry_price != 0:
+            initial_risk = abs(entry_price - sl)
+
+        current_reward = 0
+        if entry_price != 0 and current_price != 0:
+            if trade_type == "BUY":
+                current_reward = current_price - entry_price
+            else:  # SELL
+                current_reward = entry_price - current_price
+        
+        current_rr = 0
+        if initial_risk > 1e-9: # Avoid division by zero
+            current_rr = current_reward / initial_risk
+
+        open_trade_monitoring = {
+            "ticket": pos.get("ticket"),
+            "type": trade_type,
+            "volume": pos.get("volume"),
+            "entry_price": entry_price,
+            "stop_loss": sl,
+            "take_profit": pos.get("tp", 0.0),
+            "current_price": current_price,
+            "current_profit": pos.get("profit"),
+            "current_rr": round(current_rr, 2) if initial_risk > 1e-9 else None,
+        }
+
+        return {
+            "cycle": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "symbol": data.get("symbol", "unknown"),
+            "mode": "management",
+            "open_trade_monitoring": open_trade_monitoring,
+        }
+
+    # --- SETUP MODE ---
+    # If no open positions, proceed with the original setup checklist logic.
+    cp = data.get_tick_value("bid", 0.0)
     setup_status = {}
     
     # --- A: Identity & Consistency ---
     setup_status["A1"] = "ĐỦ" # Assuming 4 images are of the same asset
-    setup_status["A2"] = "ĐỦ" # Assuming no open trade is detected (logic to be added)
+    # A2 is now implicitly handled by the mode check above.
+    setup_status["A2"] = "ĐỦ" 
 
     # --- B: HTF Bias (H1) ---
-    h1_mss = data.get("ict_patterns", {}).get("mss_h1", {})
-    h1_pd_info = data.get("ict_patterns", {}).get("premium_discount_h1", {})
-    h1_liquidity = tf_data.get("H1", {}).get("liquidity", {})
-    h1_fvgs = data.get("ict_patterns", {}).get("fvgs_h1", [])
+    h1_mss = data.get_ict_pattern("mss_h1", {}) or {}
+    h1_pd_info = data.get_ict_pattern("premium_discount_h1", {}) or {}
+    h1_liquidity = (tf_data.get("H1") or {}).get("liquidity", {})
+    h1_fvgs = data.get_ict_pattern("fvgs_h1", []) or []
     
     # B1: Bias by BOS/CHoCH
     h1_bias_signal = h1_mss.get("signal")
@@ -250,7 +300,6 @@ def _generate_checklist_json(data: dict[str, Any], tf_data: dict) -> dict[str, A
     conclusions, missing_conditions = _get_conclusion_from_status(setup_status)
 
     # --- Final Assembly ---
-    plan = data.get("plan", {})
     checklist = {
         "cycle": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "symbol": data.get("symbol", "unknown"),
@@ -261,9 +310,9 @@ def _generate_checklist_json(data: dict[str, Any], tf_data: dict) -> dict[str, A
         "conclusions": conclusions,
         "missing_conditions": missing_conditions,
         "proposed_plan": {
-            "direction": plan.get("direction", "null"),
-            "entry": plan.get("entry"), "sl": plan.get("sl"),
-            "tp1": plan.get("tp1"), "tp2": plan.get("tp2")
+            "direction": data.get_plan_value("direction", "null"),
+            "entry": data.get_plan_value("entry"), "sl": data.get_plan_value("sl"),
+            "tp1": data.get_plan_value("tp1"), "tp2": data.get_plan_value("tp2")
         }
     }
     return checklist
@@ -278,23 +327,24 @@ def _is_poi_fresh(poi_zone: dict, series_after: list) -> bool:
             return False  # Price has touched or gone through the POI
     return True
 
-def _find_best_m15_poi(data: dict, tf_data: dict, h1_bias: str) -> dict:
+def _find_best_m15_poi(data: SafeMT5Data, tf_data: dict, h1_bias: str) -> dict:
     """Finds and scores the best M15 POI based on confluence."""
-    cp = data.get("tick", {}).get("bid", 0.0)
-    m15_series = data.get("series", {}).get("M15", [])
+    cp = data.get_tick_value("bid", 0.0)
+    m15_series = (data.get("series") or {}).get("M15", [])
     sessions = data.get("sessions_today", {})
     killzones = {k: v for k, v in sessions.items() if "newyork" in k or "london" in k}
 
     potential_pois = []
-    m15_fvgs = tf_data.get("M15", {}).get("FVG", [])
-    m15_obs = tf_data.get("M15", {}).get("OB", [])
-    h1_fvgs = tf_data.get("H1", {}).get("FVG", [])
-    h1_obs = tf_data.get("H1", {}).get("OB", [])
+    m15_fvgs = (tf_data.get("M15") or {}).get("FVG", [])
+    m15_obs = (tf_data.get("M15") or {}).get("OB", [])
+    h1_fvgs = (tf_data.get("H1") or {}).get("FVG", [])
+    h1_obs = (tf_data.get("H1") or {}).get("OB", [])
 
     for fvg in m15_fvgs: potential_pois.append({"type": "FVG", "zone": fvg, "score": 0})
     for ob in m15_obs: potential_pois.append({"type": "OB", "zone": ob, "score": 0})
 
-    h1_pd_status = data.get("ict_patterns", {}).get("premium_discount_h1", {}).get("status")
+    h1_pd_info = data.get_ict_pattern("premium_discount_h1", {})
+    h1_pd_status = h1_pd_info.get("status") if h1_pd_info else None
     
     def is_inside(inner, outer):
         return outer["lo"] <= inner["lo"] and inner["hi"] <= outer["hi"]
@@ -405,46 +455,60 @@ def _get_conclusion_from_status(setup_status: dict) -> tuple[str, list[str]]:
     return conclusion, missing
 
 
-def parse_mt5_data_to_report(mt5_data: dict[str, Any]) -> str:
+def parse_mt5_data_to_report(mt5_data: SafeMT5Data) -> str:
     """
     Parses the raw MT5_DATA dictionary and generates a structured,
-    machine-readable report string containing CONCEPT_VALUE_TABLE,
-    CHECKLIST_JSON, and EXTRACT_JSON.
-
-    Args:
-        mt5_data: The dictionary containing all the MT5 data.
-
-    Returns:
-        A formatted string containing the full report.
+    machine-readable report string. The structure of the report depends
+    on whether there is an open position ("management" mode) or not ("setup" mode).
     """
-    # 1. Generate the EXTRACT_JSON object first, as it pre-processes some data
-    extract_dict = _generate_extract_json(mt5_data)
-    
-    # Pass the processed data to the concept table generator
-    concept_value_table = _generate_concept_value_table({**mt5_data, "tf_data": extract_dict["tf"]})
-    
-    extract_json = json.dumps(extract_dict, indent=2, ensure_ascii=False)
+    positions = mt5_data.get("positions")
 
-    # 3. Generate the CHECKLIST_JSON, which contains the master bias
-    checklist_dict = _generate_checklist_json(mt5_data, extract_dict["tf"])
+    if positions:
+        # --- MANAGEMENT MODE REPORT ---
+        # Generate the checklist for management mode. tf_data is not needed.
+        checklist_dict = _generate_checklist_json(mt5_data, {})
+        checklist_json = json.dumps(checklist_dict, indent=2, ensure_ascii=False)
+
+        # Generate a concept table for context, it's still useful
+        extract_dict_for_table = _generate_extract_json(mt5_data)
+        concept_value_table = _generate_concept_value_table(mt5_data, extract_dict_for_table["tf"])
+
+        # Assemble the report for management mode, omitting the setup-specific EXTRACT_JSON
+        report_parts = [
+            concept_value_table,
+            "2) CHECKLIST_JSON:",
+            checklist_json,
+        ]
+        return "\n".join(report_parts)
     
-    # Update the bias in the extract_dict to be consistent with the checklist's conclusion
-    final_h1_bias = checklist_dict.get("bias_H1", "unknown")
-    if "H1" in extract_dict["tf"]:
-        extract_dict["tf"]["H1"]["bias"] = final_h1_bias
+    else:
+        # --- SETUP MODE REPORT (Original Logic) ---
+        # 1. Generate the EXTRACT_JSON object first, as it pre-processes some data
+        extract_dict = _generate_extract_json(mt5_data)
+        
+        # Pass the processed data to the concept table generator
+        concept_value_table = _generate_concept_value_table(mt5_data, extract_dict["tf"])
+        
+        # 3. Generate the CHECKLIST_JSON, which contains the master bias
+        checklist_dict = _generate_checklist_json(mt5_data, extract_dict["tf"])
+        
+        # Update the bias in the extract_dict to be consistent with the checklist's conclusion
+        final_h1_bias = checklist_dict.get("bias_H1", "unknown")
+        if "H1" in extract_dict["tf"]:
+            extract_dict["tf"]["H1"]["bias"] = final_h1_bias
 
-    checklist_json = json.dumps(checklist_dict, indent=2, ensure_ascii=False)
-    
-    # Re-generate extract_json string with the updated bias
-    extract_json = json.dumps(extract_dict, indent=2, ensure_ascii=False)
+        checklist_json = json.dumps(checklist_dict, indent=2, ensure_ascii=False)
+        
+        # Re-generate extract_json string with the updated bias
+        extract_json = json.dumps(extract_dict, indent=2, ensure_ascii=False)
 
-    # Assemble the final report string
-    report_parts = [
-        concept_value_table,
-        "2) CHECKLIST_JSON:",
-        checklist_json,
-        "\n3) EXTRACT_JSON:",
-        extract_json,
-    ]
+        # Assemble the final report string
+        report_parts = [
+            concept_value_table,
+            "2) CHECKLIST_JSON:",
+            checklist_json,
+            "\n3) EXTRACT_JSON:",
+            extract_json,
+        ]
 
-    return "\n".join(report_parts)
+        return "\n".join(report_parts)

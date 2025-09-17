@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from .config import RunConfig
 
 
-def run_analysis_worker(app: "GeminiFolderOnceApp", prompt: str, model_name: str, cfg: "RunConfig"):
+def run_analysis_worker(app: "GeminiFolderOnceApp", prompt_no_entry: str, prompt_entry_run: str, model_name: str, cfg: "RunConfig"):
     """
     This is the main analysis worker thread. It handles image uploading,
     context building, Gemini API calls, and post-processing actions.
@@ -231,13 +231,24 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt: str, model_name: str
             plan = None
             context_block = ""
 
-        mt5_json_full = app._mt5_build_context(plan=plan, cfg=cfg) if cfg.mt5_enabled else ""
-        mt5_dict = {}
-        if mt5_json_full:
-            try:
-                mt5_dict = json.loads(mt5_json_full).get("MT5_DATA", {})
-            except Exception:
-                mt5_dict = {}
+        # The _mt5_build_context function now returns a SafeMT5Data object directly
+        safe_mt5_data = app._mt5_build_context(plan=plan, cfg=cfg) if cfg.mt5_enabled else None
+        mt5_dict = (safe_mt5_data.raw if safe_mt5_data and safe_mt5_data.raw else {})
+        mt5_json_full = json.dumps({"MT5_DATA": mt5_dict}, ensure_ascii=False) if mt5_dict else ""
+        
+        # --- Dynamic Prompt Selection (inside worker) ---
+        prompt = ""
+        if cfg.mt5_enabled and safe_mt5_data and safe_mt5_data.raw:
+            if safe_mt5_data.raw.get("positions"):
+                prompt = prompt_entry_run
+                app.ui_status("Worker: Phát hiện lệnh đang mở, dùng prompt Quản Lý Lệnh.")
+            else:
+                prompt = prompt_no_entry
+                app.ui_status("Worker: Không có lệnh mở, dùng prompt Tìm Lệnh Mới.")
+        else:
+            # Fallback if MT5 is disabled or data is unavailable
+            prompt = prompt_no_entry
+        # --- End Dynamic Prompt Selection ---
         
         # --- Inject News Analysis into MT5_DATA ---
         if mt5_dict:
@@ -278,7 +289,7 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt: str, model_name: str
             except Exception:
                 pass
             ok, reasons, app.ff_cache_events_local, app.ff_cache_fetch_time, meta = no_trade.evaluate(
-                mt5_dict,
+                safe_mt5_data,
                 cfg,
                 cache_events=app.ff_cache_events_local,
                 cache_fetch_time=app.ff_cache_fetch_time,
@@ -334,30 +345,10 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt: str, model_name: str
             # Instead of appending the raw MT5 JSON, we now parse it 
             # and generate the structured report.
             if mt5_dict:
-                try:
-                    # The mt5_dict is already parsed from mt5_json_full earlier
-                    structured_report = report_parser.parse_mt5_data_to_report(mt5_dict)
-                    parts_text.append("\n\n### PHÂN TÍCH TỰ ĐỘNG (máy-đọc-được)\n")
-                    parts_text.append(structured_report)
-                except Exception as e_parse:
-                    import traceback
-                    tb_str = traceback.format_exc()
-                    debug_msg = (
-                        f"--- DEBUG CRASH LOG ---\n"
-                        f"Timestamp: {datetime.now().isoformat()}\n"
-                        f"Error during report_parser.parse_mt5_data_to_report:\n{e_parse}\n\n"
-                        f"Traceback:\n{tb_str}\n\n"
-                        f"Problematic mt5_dict data:\n{json.dumps(mt5_dict, indent=2, ensure_ascii=False)}\n"
-                    )
-                    try:
-                        debug_log_path = APP_DIR / "debug_crash_log.json"
-                        debug_log_path.write_text(debug_msg, encoding="utf-8")
-                        app.ui_status(f"Lỗi nghiêm trọng, đã ghi log vào {debug_log_path}")
-                    except Exception:
-                        pass
-                    # Re-raise the exception to be caught by the outer block
-                    raise e_parse
-
+                # The mt5_dict is already parsed from mt5_json_full earlier
+                structured_report = report_parser.parse_mt5_data_to_report(safe_mt5_data)
+                parts_text.append("\n\n### PHÂN TÍCH TỰ ĐỘNG (máy-đọc-được)\n")
+                parts_text.append(structured_report)
             elif mt5_json_full:
                 # Fallback to old method if parsing failed for some reason
                 parts_text.append("\n\n[PHỤ LỤC_MT5_JSON]\n")
@@ -375,7 +366,10 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt: str, model_name: str
             app._update_progress(steps_upload + steps_process, steps_upload + steps_process + 1)
 
         except Exception as e:
-            combined_text = f"[LỖI phân tích] {e}"
+            import traceback
+            tb_str = traceback.format_exc()
+            app.ui_status(f"Lỗi nghiêm trọng trong worker: {e}")
+            combined_text = f"[LỖI PHÂN TÍCH] Đã xảy ra lỗi ở giai đoạn gọi model AI.\n\nChi tiết: {e}\n\nTraceback:\n{tb_str}"
 
         for p in paths:
             idx_real = next((i for i, r in enumerate(app.results) if r["path"] == p), None)
