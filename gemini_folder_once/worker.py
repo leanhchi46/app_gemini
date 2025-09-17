@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 # These imports are necessary for the worker function
 import google.generativeai as genai
-from . import uploader, no_run, no_trade, auto_trade, report_parser
+from . import uploader, no_run, no_trade, auto_trade, report_parser, news
 from .constants import APP_DIR
 
 if TYPE_CHECKING:
@@ -238,6 +238,38 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt: str, model_name: str
                 mt5_dict = json.loads(mt5_json_full).get("MT5_DATA", {})
             except Exception:
                 mt5_dict = {}
+        
+        # --- Inject News Analysis into MT5_DATA ---
+        if mt5_dict:
+            try:
+                app._refresh_news_cache(ttl=300, async_fetch=False, cfg=cfg)
+                
+                # Check if currently inside a news window
+                is_in_window, reason = news.is_within_news_window(
+                    events=app.ff_cache_events_local,
+                    symbol=cfg.mt5_symbol,
+                    minutes_before=cfg.nt_news_before_mins,
+                    minutes_after=cfg.nt_news_after_mins,
+                )
+                
+                # Get next upcoming events
+                upcoming = news.next_events_for_symbol(
+                    events=app.ff_cache_events_local,
+                    symbol=cfg.mt5_symbol,
+                    limit=3
+                )
+                
+                mt5_dict["news_analysis"] = {
+                    "is_in_news_window": is_in_window,
+                    "reason": reason,
+                    "upcoming_events": upcoming
+                }
+            except Exception:
+                # Ensure the key exists even if the process fails
+                mt5_dict["news_analysis"] = {
+                    "is_in_news_window": False, "reason": "News check failed", "upcoming_events": []
+                }
+
         app.ui_status(f"Context+MT5 xong trong {(_tnow()-t_ctx0):.2f}s")
 
         if cfg.nt_enabled and mt5_dict:
@@ -297,9 +329,20 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt: str, model_name: str
             if context_block:
                 parts_text.append("\n\n")
                 parts_text.append(context_block)
-            if mt5_json_full:
+            
+            # --- Integration of report_parser ---
+            # Instead of appending the raw MT5 JSON, we now parse it 
+            # and generate the structured report.
+            if mt5_dict:
+                # The mt5_dict is already parsed from mt5_json_full earlier
+                structured_report = report_parser.parse_mt5_data_to_report(mt5_dict)
+                parts_text.append("\n\n### PHÂN TÍCH TỰ ĐỘNG (máy-đọc-được)\n")
+                parts_text.append(structured_report)
+            elif mt5_json_full:
+                # Fallback to old method if parsing failed for some reason
                 parts_text.append("\n\n[PHỤ LỤC_MT5_JSON]\n")
                 parts_text.append(mt5_json_full)
+            
             prompt_final = "".join(parts_text)
 
             t_llm0 = _tnow()
