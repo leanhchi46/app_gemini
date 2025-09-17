@@ -18,8 +18,8 @@ def _generate_extract_json(data: SafeMT5Data) -> dict[str, Any]:
     cp = data.get_tick_value("bid") or data.get_tick_value("last") or 0.0
     ict_patterns = data.get("ict_patterns", {}) # Safely get the entire ict_patterns dictionary
 
-    # Process available timeframes (H1, M15)
-    for tf_str, tf_key in [("H1", "h1"), ("M15", "m15")]:
+    # Process all available timeframes (H1, M15, M5, M1)
+    for tf_str, tf_key in [("H1", "h1"), ("M15", "m15"), ("M5", "m5"), ("M1", "m1")]:
         liquidity_data = ict_patterns.get(f"liquidity_{tf_key}", {})
         bsl = liquidity_data.get("swing_highs_BSL", [])
         ssl = liquidity_data.get("swing_lows_SSL", [])
@@ -41,14 +41,6 @@ def _generate_extract_json(data: SafeMT5Data) -> dict[str, Any]:
             "OB": ict_patterns.get(f"order_blocks_{tf_key}", []),
             "FVG": ict_patterns.get(f"fvgs_{tf_key}", []),
             "BPR": []  # Not available in mt5_utils
-        }
-
-    # Add empty placeholders for M5 and M1 as per the user's format
-    for tf_str in ["M5", "M1"]:
-        extract_dict["tf"][tf_str] = {
-            "current_price": cp, "bias": "unknown", "swing": {"H": None, "L": None},
-            "premium_discount": {}, "liquidity": {"BSL": [], "SSL": [], "EQH": [], "EQL": []},
-            "OB": [], "FVG": [], "BPR": []
         }
 
     # Populate risk_reward from 'rr_projection'
@@ -137,6 +129,20 @@ def _generate_concept_value_table(data: SafeMT5Data, tf_data: dict) -> str:
     rows.append(format_row("M15", "Current Price", cp))
     rows.append(format_row("M15", "Swing High", m15_swing_h))
     rows.append(format_row("M15", "Swing Low", m15_swing_l))
+
+    # M5 Concepts
+    m5_swing_h = (tf_data.get("M5", {}).get("swing") or {}).get("H")
+    m5_swing_l = (tf_data.get("M5", {}).get("swing") or {}).get("L")
+    rows.append(format_row("M5", "Current Price", cp))
+    rows.append(format_row("M5", "Swing High", m5_swing_h))
+    rows.append(format_row("M5", "Swing Low", m5_swing_l))
+
+    # M1 Concepts
+    m1_swing_h = (tf_data.get("M1", {}).get("swing") or {}).get("H")
+    m1_swing_l = (tf_data.get("M1", {}).get("swing") or {}).get("L")
+    rows.append(format_row("M1", "Current Price", cp))
+    rows.append(format_row("M1", "Swing High", m1_swing_h))
+    rows.append(format_row("M1", "Swing Low", m1_swing_l))
 
     # Filter out None rows before joining
     return "\n".join(filter(None, rows))
@@ -287,13 +293,24 @@ def _generate_checklist_json(data: SafeMT5Data, tf_data: dict) -> dict[str, Any]
     # --- D, E: LTF Entry Model ---
     # Only analyze LTF if the HTF/MTF setup is valid
     core_conditions_met = all(setup_status.get(k) == "ĐỦ" for k in ["A1", "A2", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4", "F3"])
+    
+    # Keep default LTF statuses as CHỜ
+    setup_status.update({"D1": "CHỜ", "D2": "CHỜ", "D3": "CHỜ", "D4": "CHỜ"})
+    setup_status.update({"E1": "CHỜ", "E2": "CHỜ", "E3": "CHỜ", "E4": "CHỜ"})
+
     if core_conditions_met:
-        ltf_status = _analyze_ltf_entry_model(data, final_h1_bias)
-        setup_status.update(ltf_status)
-    else:
-        # Keep LTF statuses as CHỜ if HTF setup is not ready
-        setup_status.update({"D1": "CHỜ", "D2": "CHỜ", "D3": "CHỜ", "D4": "CHỜ"})
-        setup_status.update({"E1": "CHỜ", "E2": "CHỜ", "E3": "CHỜ", "E4": "CHỜ"})
+        # If core conditions are met, check for LTF confirmation on M5
+        m5_mss = data.get_ict_pattern("mss_m5", {}) or {}
+        m5_mss_type = m5_mss.get("type")
+
+        # D2: LTF CHoCH/BOS
+        if (final_h1_bias == "Bullish" and m5_mss_type == "Bullish") or \
+           (final_h1_bias == "Bearish" and m5_mss_type == "Bearish"):
+            setup_status["D2"] = "ĐỦ"
+        elif m5_mss_type: # If there is an MSS but it's against the bias
+            setup_status["D2"] = "SAI"
+        else: # No MSS found yet
+            setup_status["D2"] = "CHỜ"
 
 
     # --- Dynamic Conclusion ---

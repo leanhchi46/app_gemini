@@ -670,24 +670,30 @@ def build_context(
     # ICT Patterns
     ict_patterns = {}
     try:
-        ict_patterns["fvgs_m15"] = ict_analysis.find_fvgs(series.get("M15", []), cp) or {}
-        ict_patterns["fvgs_h1"] = ict_analysis.find_fvgs(series.get("H1", []), cp) or {}
-        
-        liquidity_h1 = ict_analysis.find_liquidity_levels(series.get("H1", [])) or {}
-        liquidity_m15 = ict_analysis.find_liquidity_levels(series.get("M15", [])) or {}
-        ict_patterns["liquidity_h1"] = liquidity_h1
-        ict_patterns["liquidity_m15"] = liquidity_m15
-        
-        ict_patterns["order_blocks_h1"] = ict_analysis.find_order_blocks(series.get("H1", [])) or {}
-        ict_patterns["order_blocks_m15"] = ict_analysis.find_order_blocks(series.get("M15", [])) or {}
-        ict_patterns["premium_discount_h1"] = ict_analysis.analyze_premium_discount(series.get("H1", []), cp) or {}
-        ict_patterns["premium_discount_m15"] = ict_analysis.analyze_premium_discount(series.get("M15", []), cp) or {}
-        
-        # MSS/BOS needs liquidity levels as input
-        ict_patterns["mss_h1"] = ict_analysis.find_market_structure_shift(series.get("H1", []), liquidity_h1.get("swing_highs_BSL", []), liquidity_h1.get("swing_lows_SSL", []))
-        ict_patterns["mss_m15"] = ict_analysis.find_market_structure_shift(series.get("M15", []), liquidity_m15.get("swing_highs_BSL", []), liquidity_m15.get("swing_lows_SSL", []))
-        ict_patterns["liquidity_voids_h1"] = ict_analysis.find_liquidity_voids(series.get("H1", [])) or []
-        ict_patterns["liquidity_voids_m15"] = ict_analysis.find_liquidity_voids(series.get("M15", [])) or []
+        timeframes_to_analyze = {"h1": "H1", "m15": "M15", "m5": "M5", "m1": "M1"}
+        liquidity_levels = {}
+
+        for tf_key, tf_name in timeframes_to_analyze.items():
+            tf_series = series.get(tf_name, [])
+            if not tf_series:
+                continue
+
+            # 1. Find Liquidity Levels (needed for MSS)
+            liquidity = ict_analysis.find_liquidity_levels(tf_series) or {}
+            liquidity_levels[tf_key] = liquidity
+            ict_patterns[f"liquidity_{tf_key}"] = liquidity
+
+            # 2. Find other ICT patterns
+            ict_patterns[f"fvgs_{tf_key}"] = ict_analysis.find_fvgs(tf_series, cp) or []
+            ict_patterns[f"order_blocks_{tf_key}"] = ict_analysis.find_order_blocks(tf_series) or []
+            ict_patterns[f"premium_discount_{tf_key}"] = ict_analysis.analyze_premium_discount(tf_series, cp) or {}
+            ict_patterns[f"liquidity_voids_{tf_key}"] = ict_analysis.find_liquidity_voids(tf_series) or []
+            
+            # 3. Find MSS/BOS (which depends on liquidity levels)
+            swing_highs = liquidity.get("swing_highs_BSL", [])
+            swing_lows = liquidity.get("swing_lows_SSL", [])
+            ict_patterns[f"mss_{tf_key}"] = ict_analysis.find_market_structure_shift(tf_series, swing_highs, swing_lows)
+
     except Exception:
         # If any ICT analysis fails, ensure ict_patterns is an empty dict
         ict_patterns = {}
