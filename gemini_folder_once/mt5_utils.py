@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from statistics import median
 from typing import Any, Iterable, Sequence
@@ -237,50 +237,59 @@ def adr_stats(symbol: str, n: int = 20) -> dict[str, float] | None:
 # Time/session helpers
 # ------------------------------
 
+def _is_us_dst(d: datetime) -> bool:
+    """Checks if a given date is within US Daylight Saving Time."""
+    if not isinstance(d, datetime):
+        return False
+    # DST starts on the second Sunday in March at 2 AM
+    march_first = datetime(d.year, 3, 1)
+    # Day of week: Monday is 0 and Sunday is 6.
+    march_second_sunday = march_first + timedelta(days=(6 - march_first.weekday() + 7) % 7 + 7)
+
+    # DST ends on the first Sunday in November at 2 AM
+    nov_first = datetime(d.year, 11, 1)
+    nov_first_sunday = nov_first + timedelta(days=(6 - nov_first.weekday() + 7) % 7)
+
+    # Create timezone-naive datetime objects for comparison
+    check_date = datetime(d.year, d.month, d.day)
+    return march_second_sunday <= check_date < nov_first_sunday
+
+
 def _killzone_ranges_vn(d: datetime | None = None, target_tz: str | None = None) -> dict[str, dict[str, str]]:
     """
-    Build London/NY killzones in Vietnam time (Asia/Ho_Chi_Minh),
-    converting from local market times with DST handled via zoneinfo.
-    - London: 08:00–11:00 Europe/London (local)
-    - New York (pre): 08:30–11:00 America/New_York (local)
-    - New York (post): 13:30–16:00 America/New_York (local)
-    Returns dict of {name: {start: HH:MM, end: HH:MM}}
+    Build London/NY killzones in Vietnam time based on US DST.
     """
-    tz_vn = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
-    tz_uk = ZoneInfo("Europe/London")
-    tz_us = ZoneInfo("America/New_York")
     if d is None:
+        tz_vn = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
         d = datetime.now(tz=tz_vn)
 
-    def _fmt(dt_local_tzaware: datetime) -> str:
-        return dt_local_tzaware.astimezone(tz_vn).strftime("%H:%M")
+    is_summer = _is_us_dst(d)
 
-    def _local_range(tz, h0, m0, h1, m1):
-        s = datetime(d.year, d.month, d.day, h0, m0, tzinfo=tz)
-        e = datetime(d.year, d.month, d.day, h1, m1, tzinfo=tz)
-        return _fmt(s), _fmt(e)
-
-    l_st, l_ed = _local_range(tz_uk, 8, 0, 11, 0)
-    ny_pre_st, ny_pre_ed = _local_range(tz_us, 8, 30, 11, 0)
-    ny_post_st, ny_post_ed = _local_range(tz_us, 13, 30, 16, 0)
-
-    return {
-        "london": {"start": l_st, "end": l_ed},
-        "newyork_pre": {"start": ny_pre_st, "end": ny_pre_ed},
-        "newyork_post": {"start": ny_post_st, "end": ny_post_ed},
-    }
+    if is_summer:
+        # Mùa hè (Tháng 3 – Tháng 11, US DST)
+        return {
+            "london": {"start": "14:00", "end": "17:00"},
+            "newyork_am": {"start": "19:30", "end": "22:00"},
+            "newyork_pm": {"start": "00:00", "end": "03:00"},
+        }
+    else:
+        # Mùa đông (Tháng 11 – Tháng 3, US Standard Time)
+        return {
+            "london": {"start": "15:00", "end": "18:00"},
+            "newyork_am": {"start": "20:30", "end": "23:00"},
+            "newyork_pm": {"start": "01:00", "end": "04:00"},
+        }
 
 
 def session_ranges_today(m1_rates: Sequence[dict] | None) -> dict[str, dict]:
     """
-    Compute session ranges for Asia/London/NY (split NY into pre/post) in local VN time.
+    Compute session ranges for Asia/London/NY (split NY into AM/PM) in local VN time.
     Input: M1 rates with keys {time:"YYYY-MM-DD HH:MM:SS", high, low, close, vol}.
     """
-    if not m1_rates:
-        return {}
-
-    # Session schedule in VN time with DST-aware conversion for London/NY.
-    kills = _killzone_ranges_vn()
+    # The m1_rates are not strictly needed anymore since we use system time,
+    # but we keep the signature for compatibility. It can be used to check historical sessions.
+    # For now, we pass `None` to `_killzone_ranges_vn` to use the current system time.
+    kills = _killzone_ranges_vn(d=None)
     sessions = {"asia": {"start": "06:00", "end": "09:00"}, **kills}
     return sessions
 

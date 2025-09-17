@@ -78,6 +78,7 @@ from gemini_folder_once import no_trade, news, auto_trade
 from gemini_folder_once.chart_tab import ChartTabTV
 from gemini_folder_once import uploader
 from gemini_folder_once import mt5_utils
+from gemini_folder_once import no_run
 from gemini_folder_once.utils import _tg_html_escape
 
 class GeminiFolderOnceApp:
@@ -187,6 +188,9 @@ class GeminiFolderOnceApp:
 
         self.ff_cache_events_local = []
         self.ff_cache_fetch_time   = 0.0
+
+        self.norun_weekend_var = tk.BooleanVar(value=True)
+        self.norun_killzone_var = tk.BooleanVar(value=True)
 
         # Persist last NO-TRADE evaluation for Chart tab
         self.last_no_trade_ok = None
@@ -659,6 +663,16 @@ class GeminiFolderOnceApp:
         ttk.Spinbox(r9, from_=0, to=180, textvariable=self.trade_news_block_after_min_var, width=6).pack(side="left")
         ttk.Label(r9, text="Nguồn: Forex Factory (High)").pack(side="left", padx=(12,0))
 
+        norun_tab = ttk.Frame(opts_nb, padding=8)
+        opts_nb.add(norun_tab, text="No Run")
+        norun_tab.columnconfigure(0, weight=1)
+        card_norun = ttk.LabelFrame(norun_tab, text="Điều kiện không chạy phân tích tự động", padding=8)
+        card_norun.grid(row=0, column=0, sticky="ew")
+        ttk.Checkbutton(card_norun, text="Không chạy vào Thứ 7 và Chủ Nhật",
+                        variable=self.norun_weekend_var).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(card_norun, text="Chỉ chạy trong thời gian Kill Zone",
+                        variable=self.norun_killzone_var).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
         ws_tab = ttk.Frame(opts_nb, padding=8)
         opts_nb.add(ws_tab, text="Workspace")
         for i in range(3):
@@ -1125,7 +1139,6 @@ class GeminiFolderOnceApp:
         return context_builder.compose_context(self, cfg, budget_chars)
 
     def _worker_run_whole_folder(self, prompt: str, model_name: str, cfg: RunConfig):
-
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
         Tham số:
@@ -1194,6 +1207,25 @@ class GeminiFolderOnceApp:
         early_exit     = False
 
         try:
+            # ==================================================================
+            # == CHECK 1: NO-RUN CONDITIONS (WEEKEND, KILLZONE, ETC.)
+            # ==================================================================
+            try:
+                should_run, reason = no_run.check_no_run_conditions(self)
+                if not should_run:
+                    self.ui_status(reason)
+                    self._log_trade_decision({
+                        "stage": "no-run-skip",
+                        "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "reason": reason
+                    }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+                    
+                    # Still perform BE/trailing sweep even if analysis is skipped
+                    self._quick_be_trailing_sweep(cfg)
+                    raise SystemExit
+            except Exception as e:
+                # Avoid crashing the whole worker if the check fails for some reason
+                self.ui_status(f"Lỗi kiểm tra No-Run: {e}")
 
             t_up0 = _tnow()
             cache = uploader.UploadCache.load() if cfg.cache_enabled else {}
@@ -3553,6 +3585,8 @@ class GeminiFolderOnceApp:
             "news_block_before_min": int(self.trade_news_block_before_min_var.get()),
             "news_block_after_min": int(self.trade_news_block_after_min_var.get()),
 
+            "norun_weekend": bool(self.norun_weekend_var.get()),
+            "norun_killzone": bool(self.norun_killzone_var.get()),
         }
         try:
             WORKSPACE_JSON.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3781,6 +3815,9 @@ class GeminiFolderOnceApp:
         self.trade_news_block_before_min_var.set(before)
         self.trade_news_block_after_min_var.set(after)
 
+        self.norun_weekend_var.set(bool(data.get("norun_weekend", True)))
+        self.norun_killzone_var.set(bool(data.get("norun_killzone", True)))
+
     def _delete_workspace(self):
         """
         Mục đích: Đọc/ghi cấu hình workspace, cache upload và các trạng thái phiên làm việc.
@@ -3812,8 +3849,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-

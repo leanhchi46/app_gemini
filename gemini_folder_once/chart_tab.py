@@ -28,7 +28,7 @@ class ChartTabTV:
         self.n_candles_var = tk.IntVar(value=100)
         self.refresh_secs_var = tk.IntVar(value=1)
         # Kiểu hiển thị biểu đồ: "Đường" hoặc "Nến"
-        self.chart_type_var = tk.StringVar(value="Đường")
+        self.chart_type_var = tk.StringVar(value="Nến")
 
         self._after_job = None
         self._running = False
@@ -73,16 +73,6 @@ class ChartTabTV:
         ttk.Label(ctrl, text="Làm mới (s):").grid(row=0, column=8, sticky="w")
         ttk.Spinbox(ctrl, from_=1, to=3600, textvariable=self.refresh_secs_var, width=6)\
             .grid(row=0, column=9, sticky="w", padx=(4, 10))
-
-        self.btn_start = ttk.Button(ctrl, text="► Bắt đầu", command=self.start)
-        self.btn_start.grid(row=0, column=10, sticky="w")
-        self.btn_stop = ttk.Button(ctrl, text="□ Dừng", command=self.stop, state="disabled")
-        self.btn_stop.grid(row=0, column=11, sticky="w", padx=(6, 10))
-        try:
-            self.btn_start.grid_remove()
-            self.btn_stop.grid_remove()
-        except Exception:
-            pass
 
         self.root.after(200, self.start)
 
@@ -205,8 +195,6 @@ class ChartTabTV:
         except Exception:
             pass
         self._running = True
-        self.btn_start.configure(state="disabled")
-        self.btn_stop.configure(state="normal")
         self._tick()
 
     def stop(self):
@@ -214,8 +202,6 @@ class ChartTabTV:
         if self._after_job:
             self.root.after_cancel(self._after_job)
             self._after_job = None
-        self.btn_start.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
 
     def _populate_symbol_list(self):
         try:
@@ -258,29 +244,39 @@ class ChartTabTV:
         except Exception:
             self.acc_status.set("Chưa cài MetaTrader5 (pip install MetaTrader5)")
             return False
+
+        # If app says it's initialized, trust it but verify account if needed
         if getattr(self.app, "mt5_initialized", False):
             if want_account and mt5.account_info() is None:
                 self.acc_status.set("MT5: chưa đăng nhập (account_info=None)")
                 return False
             return True
-        if getattr(self.app, "mt5_enabled_var", None) and self.app.mt5_enabled_var.get():
-            try:
-                self.app._mt5_connect()
-            except Exception:
-                pass
-            if getattr(self.app, "mt5_initialized", False):
-                if want_account and mt5.account_info() is None:
-                    self.acc_status.set("MT5: chưa đăng nhập (account_info=None)")
-                    return False
-                return True
-        return False
+
+        # If not initialized, try to initialize directly here
+        try:
+            if not mt5.initialize():
+                self.acc_status.set(f"MT5 init failed: {mt5.last_error()}")
+                return False
+            # If successful, update the app's state flag
+            if hasattr(self.app, "mt5_initialized"):
+                self.app.mt5_initialized = True
+        except Exception as e:
+            self.acc_status.set(f"MT5 connect error: {e}")
+            return False
+
+        # Re-check account info after trying to connect
+        if want_account and mt5.account_info() is None:
+            self.acc_status.set("MT5: chưa đăng nhập (account_info=None)")
+            return False
+
+        return True
 
     def _rates_to_df(self, symbol, tf_code, count: int):
         try:
             import MetaTrader5 as mt5
             import pandas as pd
         except Exception:
-            return None
+            return None, "Không thể import MetaTrader5 hoặc pandas"
         try:
             # Normalize inputs
             symbol = (symbol or "").strip()
@@ -290,52 +286,51 @@ class ChartTabTV:
                 cnt = 100
 
             if not symbol or tf_code is None:
-                return None
+                return None, "Ký hiệu hoặc khung thời gian trống"
 
-            # Ensure symbol is selected/visible in Market Watch
-            try:
-                info = mt5.symbol_info(symbol)
-            except Exception:
-                info = None
-            if not info:
-                # Try to find a broker-specific alias e.g. XAUUSD.i, XAUUSDm, etc.
+            # Ensure symbol is selected/visible in Market Watch.
+            info = mt5.symbol_info(symbol)
+            if info is None:
                 try:
                     cands = mt5.symbols_get(f"{symbol}*") or mt5.symbols_get(f"*{symbol}*") or []
-                except Exception:
-                    cands = []
-                if cands:
-                    symbol = getattr(cands[0], "name", symbol)
-                    try:
-                        self.symbol_var.set(symbol)
-                    except Exception:
-                        pass
-                    try:
-                        mt5.symbol_select(symbol, True)
-                    except Exception:
-                        pass
-                else:
-                    return None
-            else:
-                try:
-                    if not getattr(info, "visible", True):
-                        mt5.symbol_select(symbol, True)
+                    if cands:
+                        new_symbol = getattr(cands[0], "name", None)
+                        if new_symbol:
+                            symbol = new_symbol
+                            try:
+                                self.symbol_var.set(symbol)
+                            except Exception:
+                                pass
+                            info = mt5.symbol_info(symbol)
                 except Exception:
                     pass
 
+            if info is None:
+                return None, f"Ký hiệu '{symbol}' không tồn tại"
+
+            if not info.visible:
+                try:
+                    if not mt5.symbol_select(symbol, True):
+                        return None, f"Không thể chọn ký hiệu '{symbol}'"
+                    __import__("time").sleep(0.1)  # Wait a bit for terminal
+                except Exception as e:
+                    return None, f"Lỗi khi chọn ký hiệu: {e}"
+
             # Fetch rates
             rates = mt5.copy_rates_from_pos(symbol, tf_code, 0, cnt)
-            if not rates:
-                return None
-            import pandas as pd
+            if rates is None or len(rates) == 0:
+                err = mt5.last_error()
+                return None, f"Không có dữ liệu rates: {err}"
+
             df = pd.DataFrame(rates)
             if df.empty:
-                return None
-            import datetime as _dt
+                return None, "DataFrame trống sau khi chuyển đổi"
+
             df["time"] = pd.to_datetime(df["time"], unit="s")
             df.set_index("time", inplace=True)
-            return df
-        except Exception:
-            return None
+            return df, None
+        except Exception as e:
+            return None, f"Lỗi ngoại lệ: {e}"
 
     def _style(self):
         try:
@@ -362,9 +357,9 @@ class ChartTabTV:
                 self.acc_margin.set(f"{ai.margin_free:.2f}")
                 self.acc_leverage.set(str(getattr(ai, "leverage", "-")))
                 self.acc_currency.set(getattr(ai, "currency", "-"))
-                self.acc_status.set("K?t n?i MT5 OK")
+                self.acc_status.set("Kết nối MT5 OK")
             else:
-                self.acc_status.set("MT5: chua dang nh?p (account_info=None)")
+                self.acc_status.set("MT5: Chưa đăng nhập (account_info=None)")
         except Exception:
             pass
 
@@ -440,10 +435,10 @@ class ChartTabTV:
         # `sym` was already read above; keep using it
         tf_code = self._mt5_tf(self.tf_var.get())
         cnt = int(self.n_candles_var.get() or 100)
-        df = self._rates_to_df(sym, tf_code, cnt)
+        df, err_msg = self._rates_to_df(sym, tf_code, cnt)
         if df is None or df.empty:
             self.ax_price.clear()
-            self.ax_price.set_title("Không có dữ liệu")
+            self.ax_price.set_title(err_msg or "Không có dữ liệu")
             self.canvas.draw_idle()
             return
         self.ax_price.clear()
@@ -492,7 +487,7 @@ class ChartTabTV:
                 if tp:
                     self.ax_price.axhline(tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
                 label = f"{'BUY' if typ_i==0 else 'SELL'} {getattr(p,'volume',0):.2f} @{self._fmt(entry, digits)}"
-                self.ax_price.text(df.index[-1], entry, "  " + label, va="center", color=col, fontsize=8)
+                self.ax_price.text(1.01, entry, " " + label, va="center", color=col, fontsize=8, transform=self.ax_price.get_yaxis_transform())
 
             ords = mt5.orders_get(symbol=sym) or []
             def _otype_txt(t):
@@ -512,23 +507,30 @@ class ChartTabTV:
                 pend_col = "#8b5cf6"
                 self.ax_price.axhline(px, color=pend_col, ls="--", lw=1.1, alpha=0.95)
                 txt = f"PEND {_otype_txt(otype)} {lots:.2f} @{self._fmt(px, digits)}"
-                self.ax_price.text(df.index[-1], px, "  " + txt, va="center", color=pend_col, fontsize=8)
+                self.ax_price.text(1.01, px, " " + txt, va="center", color=pend_col, fontsize=8, transform=self.ax_price.get_yaxis_transform())
                 if sl:
                     self.ax_price.axhline(sl, color="#ef4444", ls=":", lw=1.0, alpha=0.85)
                     self.ax_price.text(df.index[-1], sl, "  SL", va="center", color="#ef4444", fontsize=7)
                 if tp:
                     self.ax_price.axhline(tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
                     self.ax_price.text(df.index[-1], tp, "  TP", va="center", color="#22c55e", fontsize=7)
+
+            # Draw current price line
+            tick = mt5.symbol_info_tick(sym)
+            if tick:
+                current_price = getattr(tick, "bid", 0.0)
+                if current_price > 0:
+                    self.ax_price.axhline(current_price, color='black', ls='--', lw=0.8, alpha=0.9)
+                    self.ax_price.text(1.01, current_price, f" {self._fmt(current_price, digits)}",
+                                       va="center", color='black', fontsize=8,
+                                       bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', boxstyle='round,pad=0.1'),
+                                       transform=self.ax_price.get_yaxis_transform())
         except Exception:
             pass
 
         self.ax_price.set_title(f"{sym}  •  {self.tf_var.get()}  •  {len(df)} bars")
-        self.ax_price.set_title(f"{sym}  •  {self.tf_var.get()}  •  {len(df)} bars")
+        self.fig.subplots_adjust(right=0.75)
         self.canvas.draw_idle()
-
-        self._update_account_info(sym)
-        self._fill_positions_table(sym)
-        self._fill_history_table(sym)
 
     def _redraw_safe(self):
         try:
@@ -540,6 +542,20 @@ class ChartTabTV:
                 self.canvas.draw_idle()
             except Exception:
                 pass
+
+        # Always update account info, regardless of chart success
+        sym = ""
+        try:
+            sym = self.symbol_var.get().strip()
+        except Exception:
+            pass
+        try:
+            self._update_account_info(sym)
+            self._fill_positions_table(sym)
+            self._fill_history_table(sym)
+        except Exception:
+            pass
+
         try:
             self._update_notrade_panel()
         except Exception:
@@ -593,7 +609,7 @@ class ChartTabTV:
             if getattr(self.app, "trade_allow_session_london_var", None) and self.app.trade_allow_session_london_var.get():
                 ok = ok or _in(ss.get("london"))
             if getattr(self.app, "trade_allow_session_ny_var", None) and self.app.trade_allow_session_ny_var.get():
-                ok = ok or _in(ss.get("newyork_pre")) or _in(ss.get("newyork_post"))
+                ok = ok or _in(ss.get("newyork_am")) or _in(ss.get("newyork_pm"))
             # If no restriction flags checked, allow
             flags = [
                 bool(getattr(self.app, "trade_allow_session_asia_var", None) and self.app.trade_allow_session_asia_var.get()),
@@ -644,8 +660,3 @@ class ChartTabTV:
             self.nt_events.set("\n".join(events_fmt) if events_fmt else "(none)")
         except Exception:
             self.nt_events.set("(none)")
-
-
-
-
-
