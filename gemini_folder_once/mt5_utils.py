@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo
 from statistics import median
 from typing import Any, Iterable, Sequence
 
+from . import ict_analysis
+
 
 try:
     import MetaTrader5 as mt5  # type: ignore
@@ -344,6 +346,8 @@ def _nearby_key_levels(cp: float, info: Any, daily: dict | None, prev_day: dict 
     return out
 
 
+
+
 def build_context(
     symbol: str,
     *,
@@ -482,6 +486,8 @@ def build_context(
 
     # Sessions and VWAPs
     sessions_today = session_ranges_today(series["M1"]) if series["M1"] else {}
+    now_hhmm_for_sessions = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%H:%M")
+    session_liquidity = ict_analysis.get_session_liquidity(series.get("M15", []), sessions_today, now_hhmm_for_sessions)
     vwap_day = vwap_from_rates([r for r in series["M1"] if str(r["time"])[:10] == datetime.now().strftime("%Y-%m-%d")])
     vwaps: dict[str, float | None] = {"day": vwap_day}
     for sess in ["asia", "london", "newyork_pre", "newyork_post"]:
@@ -550,6 +556,7 @@ def build_context(
     # Killzone detection using DST-aware VN schedule
     kills = _killzone_ranges_vn()
     now_hhmm = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%H:%M")
+    is_silver_bullet = ict_analysis.is_silver_bullet_window(now_hhmm, kills)
     kill_active = None
     mins_to_next = None
     try:
@@ -624,6 +631,27 @@ def build_context(
         except Exception:
             pass
 
+    # ICT Patterns
+    ict_patterns = {}
+    ict_patterns["fvgs_m15"] = ict_analysis.find_fvgs(series.get("M15", []), cp)
+    ict_patterns["fvgs_h1"] = ict_analysis.find_fvgs(series.get("H1", []), cp)
+    
+    liquidity_h1 = ict_analysis.find_liquidity_levels(series.get("H1", []))
+    liquidity_m15 = ict_analysis.find_liquidity_levels(series.get("M15", []))
+    ict_patterns["liquidity_h1"] = liquidity_h1
+    ict_patterns["liquidity_m15"] = liquidity_m15
+    
+    ict_patterns["order_blocks_h1"] = ict_analysis.find_order_blocks(series.get("H1", []))
+    ict_patterns["order_blocks_m15"] = ict_analysis.find_order_blocks(series.get("M15", []))
+    ict_patterns["premium_discount_h1"] = ict_analysis.analyze_premium_discount(series.get("H1", []), cp)
+    ict_patterns["premium_discount_m15"] = ict_analysis.analyze_premium_discount(series.get("M15", []), cp)
+    
+    # MSS/BOS needs liquidity levels as input
+    ict_patterns["mss_h1"] = ict_analysis.find_market_structure_shift(series.get("H1", []), liquidity_h1.get("swing_highs_BSL", []), liquidity_h1.get("swing_lows_SSL", []))
+    ict_patterns["mss_m15"] = ict_analysis.find_market_structure_shift(series.get("M15", []), liquidity_m15.get("swing_highs_BSL", []), liquidity_m15.get("swing_lows_SSL", []))
+    ict_patterns["liquidity_voids_h1"] = ict_analysis.find_liquidity_voids(series.get("H1", []))
+    ict_patterns["liquidity_voids_m15"] = ict_analysis.find_liquidity_voids(series.get("M15", []))
+
     payload = {
         "MT5_DATA": {
             "symbol": symbol,
@@ -656,16 +684,19 @@ def build_context(
             "day_range_pct_of_adr20": (float(day_range_pct) if day_range_pct is not None else None),
             "position_in_day_range": (float(pos_in_day) if pos_in_day is not None else None),
             "sessions_today": sessions_today or None,
+            "session_liquidity": session_liquidity,
             "volatility": {"ATR": atr_block},
             "volatility_regime": vol_regime,
             "trend_refs": {"EMA": ema_block},
             "vwap": vwaps,
             "kills": kills,
+            "is_silver_bullet_window": is_silver_bullet,
             "killzone_active": kill_active,
             "mins_to_next_killzone": mins_to_next,
             "key_levels_nearby": key_near,
             "round_levels": round_levels or None,
             "atr_norm": atr_norm,
+            "ict_patterns": ict_patterns,
             "risk_model": risk_model,
             "rr_projection": rr_projection,
         }
