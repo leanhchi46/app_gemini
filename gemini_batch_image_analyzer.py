@@ -743,6 +743,9 @@ class GeminiFolderOnceApp:
             trade_allow_session_ny=bool(self.trade_allow_session_ny_var.get()),
             trade_news_block_before_min=int(self.trade_news_block_before_min_var.get()),
             trade_news_block_after_min=int(self.trade_news_block_after_min_var.get()),
+            # News controls not yet exposed in UI: keep enabled with sane TTL
+            trade_news_block_enabled=True,
+            news_cache_ttl_sec=300,
         )
 
     def _load_env(self):
