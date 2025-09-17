@@ -107,6 +107,7 @@ class GeminiFolderOnceApp:
         self.root.minsize(1024, 660)
         self._trade_log_lock = threading.Lock()
         self._proposed_trade_log_lock = threading.Lock()
+        self._vector_db_lock = threading.Lock()
 
         self._ui_log_lock = threading.Lock()
 
@@ -1237,6 +1238,41 @@ class GeminiFolderOnceApp:
             p.parent.mkdir(parents=True, exist_ok=True)
 
             with self._proposed_trade_log_lock:
+                need_leading_newline = False
+                if p.exists():
+                    try:
+                        sz = p.stat().st_size
+                        if sz > 0:
+                            with open(p, "rb") as fr:
+                                fr.seek(-1, os.SEEK_END)
+                                need_leading_newline = (fr.read(1) != b"\n")
+                    except Exception:
+                        need_leading_newline = False
+                
+                with open(p, "ab") as f:
+                    if need_leading_newline:
+                        f.write(b"\n")
+                    f.write(line)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _log_vector_data(self, data: dict, folder_override: str | None = None):
+        try:
+            d = self._get_reports_dir(folder_override=folder_override)
+            if not d:
+                return
+
+            p = d / "vector_database.jsonl"
+            line = (json.dumps(data, ensure_ascii=False, separators=(',', ':')) + "\n").encode("utf-8")
+
+            p.parent.mkdir(parents=True, exist_ok=True)
+
+            with self._vector_db_lock:
                 need_leading_newline = False
                 if p.exists():
                     try:

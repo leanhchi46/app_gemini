@@ -8,6 +8,7 @@ from typing import Any
 
 from .mt5_utils import pip_size_from_info
 from . import backtester
+from . import vectorizer
 
 
 """
@@ -33,6 +34,24 @@ def parse_proposed_trades_file(reports_dir: Path) -> list[dict]:
     except Exception:
         return [] # Return empty list on parsing error
     return trades
+
+
+def parse_vector_database_file(reports_dir: Path) -> list[dict]:
+    if not reports_dir:
+        return []
+    log_file = reports_dir / "vector_database.jsonl"
+    if not log_file.exists():
+        return []
+    
+    vectors = []
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    vectors.append(json.loads(line))
+    except Exception:
+        return []
+    return vectors
 
 
 def parse_ctx_json_files(reports_dir: Path, max_n: int = 5) -> list[dict]:
@@ -280,6 +299,50 @@ def compose_context(app, cfg, budget_chars: int = 1800) -> str:
             "mt5_lite": (mt5_ctx_lite or None),
         }
     }
+
+    # --- Vectorization and Similarity Search ---
+    similar_scenarios = None
+    if mt5full:
+        try:
+            current_vector = vectorizer.vectorize_market_state(mt5full)
+            if current_vector:
+                # Log the current vector for future comparisons
+                vector_payload = {
+                    "id": run_meta["analysis_id"],
+                    "timestamp_utc": run_meta["analysis_id"],
+                    "vector": current_vector,
+                    "ctx_filename": f"ctx_{run_meta['analysis_id'].replace(':', '').replace('-', '').replace('T', '_').replace('Z', '')}.json"
+                }
+                # Note: The ctx_filename is an approximation but should be very close
+                app._log_vector_data(vector_payload, folder_override=cfg.folder)
+
+                # Find similar past scenarios
+                reports_dir = app._get_reports_dir(folder_override=cfg.folder)
+                historical_vectors = parse_vector_database_file(reports_dir)
+                
+                # Limit to last 500 vectors for performance
+                similar_vectors = vectorizer.find_similar_vectors(current_vector, historical_vectors[-500:], top_n=3)
+                
+                if similar_vectors:
+                    similar_scenarios = []
+                    for sim in similar_vectors:
+                        try:
+                            # Find the corresponding ctx file and extract its summary
+                            ctx_path = reports_dir / sim["id"].split("'ctx_filename': '")[1].split("'")[0]
+                            if ctx_path.exists():
+                                past_ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+                                seven_lines = past_ctx.get("seven_lines")
+                                if seven_lines:
+                                    similar_scenarios.append({
+                                        "similarity": f"{sim['similarity']:.2%}",
+                                        "past_summary": "\n".join(seven_lines)
+                                    })
+                        except Exception:
+                            continue
+        except Exception:
+            pass # Fail silently
+
+    composed["CONTEXT_COMPOSED"]["similar_past_scenarios"] = similar_scenarios
 
     # Optional: log decision start
     try:
