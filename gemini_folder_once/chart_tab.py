@@ -27,6 +27,8 @@ class ChartTabTV:
         self.tf_var = tk.StringVar(value="M1")
         self.n_candles_var = tk.IntVar(value=100)
         self.refresh_secs_var = tk.IntVar(value=1)
+        # Kiểu hiển thị biểu đồ: "Đường" hoặc "Nến"
+        self.chart_type_var = tk.StringVar(value="Đường")
 
         self._after_job = None
         self._running = False
@@ -40,17 +42,17 @@ class ChartTabTV:
 
         ctrl = ttk.Frame(self.tab)
         ctrl.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
-        for i in range(10):
+        for i in range(12):
             ctrl.columnconfigure(i, weight=0)
-        ctrl.columnconfigure(9, weight=1)
+        ctrl.columnconfigure(11, weight=1)
 
-        ttk.Label(ctrl, text="Symbol:").grid(row=0, column=0, sticky="w")
+        ttk.Label(ctrl, text="Ký hiệu:").grid(row=0, column=0, sticky="w")
         self.cbo_symbol = ttk.Combobox(ctrl, width=16, textvariable=self.symbol_var, state="normal", values=[])
         self.cbo_symbol.grid(row=0, column=1, sticky="w", padx=(4, 10))
         self.cbo_symbol.bind("<<ComboboxSelected>>", lambda e: self._redraw_safe())
         self._populate_symbol_list()
 
-        ttk.Label(ctrl, text="TF:").grid(row=0, column=2, sticky="w")
+        ttk.Label(ctrl, text="Khung:").grid(row=0, column=2, sticky="w")
         self.cbo_tf = ttk.Combobox(
             ctrl, width=6, state="readonly", values=["M1", "M5", "M15", "H1", "H4", "D1"], textvariable=self.tf_var
         )
@@ -61,14 +63,21 @@ class ChartTabTV:
         ttk.Spinbox(ctrl, from_=50, to=5000, textvariable=self.n_candles_var, width=8, command=self._redraw_safe)\
             .grid(row=0, column=5, sticky="w", padx=(4, 10))
 
-        ttk.Label(ctrl, text="Làm mới (s):").grid(row=0, column=6, sticky="w")
-        ttk.Spinbox(ctrl, from_=1, to=3600, textvariable=self.refresh_secs_var, width=6)\
-            .grid(row=0, column=7, sticky="w", padx=(4, 10))
+        ttk.Label(ctrl, text="Kiểu:").grid(row=0, column=6, sticky="w")
+        self.cbo_chart_type = ttk.Combobox(
+            ctrl, width=8, state="readonly", values=["Đường", "Nến"], textvariable=self.chart_type_var
+        )
+        self.cbo_chart_type.grid(row=0, column=7, sticky="w", padx=(4, 10))
+        self.cbo_chart_type.bind("<<ComboboxSelected>>", lambda e: self._redraw_safe())
 
-        self.btn_start = ttk.Button(ctrl, text="► Start", command=self.start)
-        self.btn_start.grid(row=0, column=8, sticky="w")
-        self.btn_stop = ttk.Button(ctrl, text="□ Stop", command=self.stop, state="disabled")
-        self.btn_stop.grid(row=0, column=9, sticky="w", padx=(6, 10))
+        ttk.Label(ctrl, text="Làm mới (s):").grid(row=0, column=8, sticky="w")
+        ttk.Spinbox(ctrl, from_=1, to=3600, textvariable=self.refresh_secs_var, width=6)\
+            .grid(row=0, column=9, sticky="w", padx=(4, 10))
+
+        self.btn_start = ttk.Button(ctrl, text="► Bắt đầu", command=self.start)
+        self.btn_start.grid(row=0, column=10, sticky="w")
+        self.btn_stop = ttk.Button(ctrl, text="□ Dừng", command=self.stop, state="disabled")
+        self.btn_stop.grid(row=0, column=11, sticky="w", padx=(6, 10))
         try:
             self.btn_start.grid_remove()
             self.btn_stop.grid_remove()
@@ -84,7 +93,7 @@ class ChartTabTV:
 
         if Figure is None or FigureCanvasTkAgg is None:
             # Minimal fallback if matplotlib is not present
-            label = ttk.Label(chart_wrap, text="Matplotlib not available")
+            label = ttk.Label(chart_wrap, text="Không có Matplotlib")
             label.grid(row=0, column=0, sticky="w")
             return
 
@@ -108,7 +117,7 @@ class ChartTabTV:
         for i in range(1):
             right_col.columnconfigure(i, weight=1)
 
-        acc_box = ttk.LabelFrame(right_col, text="Account info", padding=8)
+        acc_box = ttk.LabelFrame(right_col, text="Thông tin tài khoản", padding=8)
         acc_box.grid(row=0, column=0, sticky="nsew")
         for i in range(2):
             acc_box.columnconfigure(i, weight=1)
@@ -137,7 +146,7 @@ class ChartTabTV:
         grids.columnconfigure(1, weight=1)
         grids.rowconfigure(0, weight=1)
 
-        pos_box = ttk.LabelFrame(grids, text="Open positions", padding=6)
+        pos_box = ttk.LabelFrame(grids, text="Lệnh đang mở", padding=6)
         pos_box.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
         pos_box.rowconfigure(0, weight=1)
         pos_box.columnconfigure(0, weight=1)
@@ -151,7 +160,7 @@ class ChartTabTV:
         self.tree_pos.configure(yscrollcommand=scr1.set)
         scr1.grid(row=0, column=1, sticky="ns")
 
-        his_box = ttk.LabelFrame(grids, text="History (deals gần nhất)", padding=6)
+        his_box = ttk.LabelFrame(grids, text="Lịch sử (deals gần nhất)", padding=6)
         his_box.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
         his_box.rowconfigure(0, weight=1)
         his_box.columnconfigure(0, weight=1)
@@ -170,19 +179,19 @@ class ChartTabTV:
         self.nt_reasons = tk.StringVar(value="")
         self.nt_events = tk.StringVar(value="")
 
-        nt_box = ttk.LabelFrame(right_col, text="No-Trade", padding=8)
+        nt_box = ttk.LabelFrame(right_col, text="Không giao dịch", padding=8)
         nt_box.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
         nt_box.columnconfigure(0, weight=1)
 
-        ttk.Label(nt_box, text="Session gate:").grid(row=0, column=0, sticky="w")
+        ttk.Label(nt_box, text="Phiên giao dịch:").grid(row=0, column=0, sticky="w")
         self.lbl_nt_session = ttk.Label(nt_box, textvariable=self.nt_session_gate)
         self.lbl_nt_session.grid(row=0, column=1, sticky="e")
 
-        ttk.Label(nt_box, text="Reasons:").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(nt_box, text="Lý do:").grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.lbl_nt_reasons = ttk.Label(nt_box, textvariable=self.nt_reasons, wraplength=260, justify="left")
         self.lbl_nt_reasons.grid(row=2, column=0, columnspan=2, sticky="w")
 
-        ttk.Label(nt_box, text="Upcoming events:").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(nt_box, text="Sự kiện sắp tới:").grid(row=3, column=0, sticky="w", pady=(6, 0))
         self.lbl_nt_events = ttk.Label(nt_box, textvariable=self.nt_events, wraplength=260, justify="left")
         self.lbl_nt_events.grid(row=4, column=0, columnspan=2, sticky="w")
 
@@ -403,7 +412,7 @@ class ChartTabTV:
         except Exception:
             try:
                 self.ax_price.clear()
-                self.ax_price.set_title("MetaTrader5 not available")
+                self.ax_price.set_title("Không có MetaTrader5")
                 self.canvas.draw_idle()
             except Exception:
                 pass
@@ -412,7 +421,7 @@ class ChartTabTV:
         if not self._ensure_mt5(want_account=False):
             try:
                 self.ax_price.clear()
-                self.ax_price.set_title("MT5 not ready")
+                self.ax_price.set_title("MT5 chưa sẵn sàng")
                 self.canvas.draw_idle()
             except Exception:
                 pass
@@ -423,7 +432,7 @@ class ChartTabTV:
         except Exception:
             try:
                 self.ax_price.clear()
-                self.ax_price.set_title("pandas not installed (pip install pandas)")
+                self.ax_price.set_title("Chưa cài pandas (pip install pandas)")
                 self.canvas.draw_idle()
             except Exception:
                 pass
@@ -434,13 +443,34 @@ class ChartTabTV:
         df = self._rates_to_df(sym, tf_code, cnt)
         if df is None or df.empty:
             self.ax_price.clear()
-            self.ax_price.set_title("No data")
+            self.ax_price.set_title("Không có dữ liệu")
             self.canvas.draw_idle()
             return
         self.ax_price.clear()
         try:
             import matplotlib.dates as mdates
-            self.ax_price.plot(df.index, df["close"], color="#0ea5e9", lw=1.2)
+            kind = (self.chart_type_var.get() or "Đường").strip()
+            if kind == "Nến":
+                try:
+                    try:
+                        from mplfinance.original_flavor import candlestick_ohlc  # type: ignore
+                    except Exception:
+                        from mpl_finance import candlestick_ohlc  # type: ignore
+                except Exception:
+                    candlestick_ohlc = None  # type: ignore
+
+                if candlestick_ohlc is None:
+                    self.ax_price.plot(df.index, df["close"], color="#0ea5e9", lw=1.2)
+                else:
+                    import numpy as _np
+                    xs = mdates.date2num(df.index.to_pydatetime())
+                    ohlc = _np.column_stack((xs, df["open"].values, df["high"].values, df["low"].values, df["close"].values))
+                    step = float(_np.median(_np.diff(xs))) if len(xs) > 1 else (1.0 / (24 * 60))
+                    width = step * 0.7
+                    candlestick_ohlc(self.ax_price, ohlc, width=width, colorup="#22c55e", colordown="#ef4444", alpha=0.9)
+                    self.ax_price.xaxis_date()
+            else:
+                self.ax_price.plot(df.index, df["close"], color="#0ea5e9", lw=1.2)
             self.ax_price.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
         except Exception:
             pass
@@ -492,6 +522,7 @@ class ChartTabTV:
         except Exception:
             pass
 
+        self.ax_price.set_title(f"{sym}  •  {self.tf_var.get()}  •  {len(df)} bars")
         self.ax_price.set_title(f"{sym}  •  {self.tf_var.get()}  •  {len(df)} bars")
         self.canvas.draw_idle()
 
