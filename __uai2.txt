@@ -1,0 +1,20 @@
+def _update_account_info(self, symbol: str):
+        try:
+            import MetaTrader5 as mt5
+            ai = mt5.account_info()
+            if ai:
+                self.acc_balance.set(f"{ai.balance:.2f}")
+                self.acc_equity.set(f"{ai.equity:.2f}")
+                self.acc_margin.set(f"{ai.margin_free:.2f}")
+                self.acc_leverage.set(str(getattr(ai, "leverage", "-")))
+                self.acc_currency.set(getattr(ai, "currency", "-"))
+                self.acc_status.set("Kết nối MT5 OK")
+        except Exception:
+            pass
+
+    def _fill_positions_table(self, symbol: str):
+        try:
+            import MetaTrader5 as mt5
+            poss = mt5.positions_get(symbol=symbol) or []
+            self.tree_pos.delete(*self.tree_pos.get_children())
+            

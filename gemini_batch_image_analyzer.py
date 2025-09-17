@@ -27,8 +27,8 @@ from tkinter.scrolledtext import ScrolledText
 
 HAS_MPL = False
 try:
+    # Only matplotlib is required for the Chart tab; mplfinance is optional.
     import matplotlib  # type: ignore
-    import mplfinance  # type: ignore
     HAS_MPL = True
 except Exception:
     HAS_MPL = False
@@ -184,8 +184,6 @@ class GeminiFolderOnceApp:
 
         self.trade_news_block_before_min_var = tk.IntVar(value=15)
         self.trade_news_block_after_min_var  = tk.IntVar(value=15)
-        self.trade_news_block_enabled_var    = tk.BooleanVar(value=True)
-        self.news_cache_ttl_sec_var          = tk.IntVar(value=300)
 
         self.ff_cache_events_local = []
         self.ff_cache_fetch_time   = 0.0
@@ -213,78 +211,7 @@ class GeminiFolderOnceApp:
 
         # Warm the news cache shortly after start (non-blocking)
         try:
-            self._refresh_news_cache(ttl=int(self.news_cache_ttl_sec_var.get() or 300))
-        except Exception:
-            pass
-
-    def _log_no_trade(self, reasons, codes, ctx: dict | None = None):
-        """
-        Write a consolidated no-trade log line to APP_DIR/no_trade.log.
-        Includes time, symbol, session flags, reasons, codes, and matched news if any.
-        Simple size cap rotation at ~2MB -> rotates to no_trade.log.1.
-        """
-        try:
-            from gemini_folder_once.constants import APP_DIR
-        except Exception:
-            APP_DIR = Path('.')
-        try:
-            APP_DIR.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-        log_path = APP_DIR / 'no_trade.log'
-        try:
-            # Rotate if file too big (~2MB)
-            if log_path.exists() and log_path.stat().st_size > 2 * 1024 * 1024:
-                bak = APP_DIR / 'no_trade.log.1'
-                try:
-                    if bak.exists():
-                        bak.unlink()
-                except Exception:
-                    pass
-                try:
-                    log_path.rename(bak)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        try:
-            sym = self.mt5_symbol_var.get().strip()
-        except Exception:
-            sym = ''
-        sess_flags = {
-            'asia': bool(getattr(self, 'trade_allow_session_asia_var', None) and self.trade_allow_session_asia_var.get()),
-            'london': bool(getattr(self, 'trade_allow_session_london_var', None) and self.trade_allow_session_london_var.get()),
-            'ny': bool(getattr(self, 'trade_allow_session_ny_var', None) and self.trade_allow_session_ny_var.get()),
-        }
-        codes = list(codes or [])
-        reasons = list(reasons or [])
-        news_hit = None
-        try:
-            if isinstance(ctx, dict):
-                news_hit = ctx.get('news_hit') or ctx.get('meta', {}).get('news_hit')
-        except Exception:
-            news_hit = None
-        news_txt = ''
-        try:
-            if isinstance(news_hit, dict):
-                t = news_hit.get('when')
-                tstr = t.strftime('%Y-%m-%d %H:%M') if hasattr(t, 'strftime') else str(t)
-                news_txt = f"{news_hit.get('title','')}" + (f" [{news_hit.get('curr')}]" if news_hit.get('curr') else '') + f" @ {tstr}"
-        except Exception:
-            news_txt = ''
-        line = {
-            't': ts,
-            'sym': sym,
-            'session': sess_flags,
-            'codes': codes,
-            'reasons': reasons,
-            'news': news_txt,
-        }
-        try:
-            with open(log_path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(line, ensure_ascii=False) + '\n')
+            self._refresh_news_cache(ttl=300)
         except Exception:
             pass
 
@@ -499,7 +426,7 @@ class GeminiFolderOnceApp:
             ttk.Label(
                 tab_chart_placeholder,
                 text="Chức năng Chart yêu cầu matplotlib + mplfinance.\n"
-                    "Cài: pip install matplotlib mplfinance",
+                    "Cài: pip install matplotlib",
                 foreground="#666"
             ).pack(anchor="w")
 
@@ -732,11 +659,6 @@ class GeminiFolderOnceApp:
         ttk.Spinbox(r9, from_=0, to=180, textvariable=self.trade_news_block_after_min_var, width=6).pack(side="left")
         ttk.Label(r9, text="Nguồn: Forex Factory (High)").pack(side="left", padx=(12,0))
 
-        r10 = ttk.Frame(auto_card); r10.grid(row=10, column=0, columnspan=3, sticky="w", pady=(4,0))
-        ttk.Checkbutton(r10, text="Block around news", variable=self.trade_news_block_enabled_var).pack(side="left")
-        ttk.Label(r10, text="News cache TTL (gi�y):").pack(side="left", padx=(12,2))
-        ttk.Spinbox(r10, from_=60, to=7200, textvariable=self.news_cache_ttl_sec_var, width=8).pack(side="left", padx=(6,12))
-
         ws_tab = ttk.Frame(opts_nb, padding=8)
         opts_nb.add(ws_tab, text="Workspace")
         for i in range(3):
@@ -821,8 +743,6 @@ class GeminiFolderOnceApp:
             trade_allow_session_ny=bool(self.trade_allow_session_ny_var.get()),
             trade_news_block_before_min=int(self.trade_news_block_before_min_var.get()),
             trade_news_block_after_min=int(self.trade_news_block_after_min_var.get()),
-            trade_news_block_enabled=bool(self.trade_news_block_enabled_var.get()),
-            news_cache_ttl_sec=int(self.news_cache_ttl_sec_var.get()),
         )
 
     def _load_env(self):
@@ -1449,7 +1369,7 @@ class GeminiFolderOnceApp:
             if cfg.nt_enabled and mt5_dict:
                 # Ensure news cache is fresh to share across features
                 try:
-                    self._refresh_news_cache(ttl=int(getattr(cfg, 'news_cache_ttl_sec', 300) or 300), async_fetch=False, cfg=cfg)
+                    self._refresh_news_cache(ttl=300, async_fetch=False, cfg=cfg)
                 except Exception:
                     pass
                 ok, reasons, self.ff_cache_events_local, self.ff_cache_fetch_time, meta = no_trade.evaluate(
@@ -1457,7 +1377,7 @@ class GeminiFolderOnceApp:
                     cfg,
                     cache_events=self.ff_cache_events_local,
                     cache_fetch_time=self.ff_cache_fetch_time,
-                    ttl_sec=int(getattr(cfg, 'news_cache_ttl_sec', 300) or 300),
+                    ttl_sec=300,
                 )
                 # Persist latest evaluation on app for UI
                 try:
@@ -1468,12 +1388,24 @@ class GeminiFolderOnceApp:
                 if not ok:
 
                     try:
-                        self._log_no_trade(reasons, (meta or {}).get('codes', []), {'news_hit': (meta or {}).get('news_hit')})
+                        self._log_trade_decision({
+                            "stage": "no-trade",
+                            "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "reasons": reasons
+                        }, folder_override=(self.mt5_symbol_var.get().strip() or None))
                     except Exception:
                         pass
                     note = "NO-TRADE: Điều kiện giao dịch không thỏa.\n- " + "\n- ".join(reasons)
 
-                    
+                    try:
+                        self._log_trade_decision({
+                            "stage": "no-trade",
+                            "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "reasons": reasons,
+
+                        }, folder_override=(self.mt5_symbol_var.get().strip() or None))
+                    except Exception:
+                        pass
                     if context_block:
                         note += "\n\n" + context_block
                     if mt5_json_full:
@@ -3617,8 +3549,6 @@ class GeminiFolderOnceApp:
             "trade_allow_session_ny": bool(self.trade_allow_session_ny_var.get()),
             "news_block_before_min": int(self.trade_news_block_before_min_var.get()),
             "news_block_after_min": int(self.trade_news_block_after_min_var.get()),
-            "news_block_enabled": bool(self.trade_news_block_enabled_var.get()),
-            "news_cache_ttl_sec": int(self.news_cache_ttl_sec_var.get()),
 
         }
         try:
@@ -3627,7 +3557,7 @@ class GeminiFolderOnceApp:
         except Exception as e:
             self.ui_message("error", "Workspace", str(e))
 
-    def _load_workspace(self):
+    def _load_workspace_dup(self):
         """
         Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
         Tham số: (không)
@@ -3729,18 +3659,8 @@ class GeminiFolderOnceApp:
 
         self.trade_news_block_before_min_var.set(before)
         self.trade_news_block_after_min_var.set(after)
-        self.trade_news_block_enabled_var.set(bool(data.get("news_block_enabled", True)))
-        try:
-            self.news_cache_ttl_sec_var.set(int(data.get("news_cache_ttl_sec", 300)))
-        except Exception:
-            self.news_cache_ttl_sec_var.set(300)
-        self.trade_news_block_enabled_var.set(bool(data.get("news_block_enabled", True)))
-        try:
-            self.news_cache_ttl_sec_var.set(int(data.get("news_cache_ttl_sec", 300)))
-        except Exception:
-            self.news_cache_ttl_sec_var.set(300)
 
-    def _delete_workspace(self):
+    def _delete_workspace_dup(self):
         """
         Mục đích: Đọc/ghi cấu hình workspace, cache upload và các trạng thái phiên làm việc.
         Tham số: (không)

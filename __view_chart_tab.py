@@ -273,48 +273,7 @@ class ChartTabTV:
         except Exception:
             return None
         try:
-            # Normalize inputs
-            symbol = (symbol or "").strip()
-            try:
-                cnt = int(count)
-            except Exception:
-                cnt = 100
-
-            if not symbol or tf_code is None:
-                return None
-
-            # Ensure symbol is selected/visible in Market Watch
-            try:
-                info = mt5.symbol_info(symbol)
-            except Exception:
-                info = None
-            if not info:
-                # Try to find a broker-specific alias e.g. XAUUSD.i, XAUUSDm, etc.
-                try:
-                    cands = mt5.symbols_get(f"{symbol}*") or mt5.symbols_get(f"*{symbol}*") or []
-                except Exception:
-                    cands = []
-                if cands:
-                    symbol = getattr(cands[0], "name", symbol)
-                    try:
-                        self.symbol_var.set(symbol)
-                    except Exception:
-                        pass
-                    try:
-                        mt5.symbol_select(symbol, True)
-                    except Exception:
-                        pass
-                else:
-                    return None
-            else:
-                try:
-                    if not getattr(info, "visible", True):
-                        mt5.symbol_select(symbol, True)
-                except Exception:
-                    pass
-
-            # Fetch rates
-            rates = mt5.copy_rates_from_pos(symbol, tf_code, 0, cnt)
+            rates = mt5.copy_rates_from_pos(symbol, tf_code, 0, int(count))
             if not rates:
                 return None
             import pandas as pd
@@ -393,11 +352,6 @@ class ChartTabTV:
             pass
 
     def _draw_chart(self):
-        # Ensure `sym` is always bound even if an early error occurs
-        try:
-            sym = self.symbol_var.get().strip()
-        except Exception:
-            sym = ""
         try:
             import MetaTrader5 as mt5
         except Exception:
@@ -428,7 +382,7 @@ class ChartTabTV:
             except Exception:
                 pass
             return
-        # `sym` was already read above; keep using it
+        sym = self.symbol_var.get().strip()
         tf_code = self._mt5_tf(self.tf_var.get())
         cnt = int(self.n_candles_var.get() or 100)
         df = self._rates_to_df(sym, tf_code, cnt)
@@ -613,6 +567,7 @@ class ChartTabTV:
             self.nt_events.set("\n".join(events_fmt) if events_fmt else "(none)")
         except Exception:
             self.nt_events.set("(none)")
+
 
 
 

@@ -1,0 +1,15 @@
+def _draw_chart(self):
+        try:
+            import MetaTrader5 as mt5
+        except Exception:
+            try:
+                self.ax_price.clear()
+                self.ax_price.set_title("MetaTrader5 not available")
+                self.canvas.draw_idle()
+            except Exception:
+                pass
+            return
+        sym = self.symbol_var.get().strip()
+        tf_code = self._mt5_tf(self.tf_var.get())
+        cnt = int(self.n_candles_var.get() or 100)
+        df = self._ra
