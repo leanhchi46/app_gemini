@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .mt5_utils import pip_size_from_info
+from . import backtester
 
 
 """
@@ -14,6 +15,24 @@ Note: MT5 info helpers are centralized in gemini_folder_once.mt5_utils and
 accept both dicts (our JSON schema) and MT5 objects. Import and reuse them
 here to avoid divergence.
 """
+
+
+def parse_proposed_trades_file(reports_dir: Path) -> list[dict]:
+    if not reports_dir:
+        return []
+    log_file = reports_dir / "proposed_trades.jsonl"
+    if not log_file.exists():
+        return []
+    
+    trades = []
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    trades.append(json.loads(line))
+    except Exception:
+        return [] # Return empty list on parsing error
+    return trades
 
 
 def parse_ctx_json_files(reports_dir: Path, max_n: int = 5) -> list[dict]:
@@ -93,17 +112,21 @@ def compose_context(app, cfg, budget_chars: int = 1800) -> str:
     mt5_flags: dict | None = {}
     mt5full = None
 
-    # Load previous context jsons and derive trend/plan
-    ctx_items = parse_ctx_json_files(app._get_reports_dir(folder_override=cfg.folder), max_n=cfg.ctx_json_n)
-    trend = summarize_checklist_trend(ctx_items)
+    # --- Time-weighted Context ---
+    # 1. Load a larger window of historical contexts (e.g., last 20)
+    all_ctx_items = parse_ctx_json_files(app._get_reports_dir(folder_override=cfg.folder), max_n=20)
+    
+    # 2. Use all of them for long-term trend analysis
+    trend = summarize_checklist_trend(all_ctx_items)
 
-    latest_7 = None
+    # 3. Extract detailed context ONLY from the most recent items (e.g., last 3)
+    detailed_ctx_items = all_ctx_items[:3]
+    recent_history_summary = []
     plan = None
-    latest_blocks = None
-    if ctx_items:
-        latest = ctx_items[0]
-        latest_7 = latest.get("seven_lines")
-        latest_blocks = latest.get("blocks") or []
+    
+    if detailed_ctx_items:
+        # Extract the plan from the absolute latest context
+        latest_blocks = detailed_ctx_items[0].get("blocks") or []
         for blk in latest_blocks:
             try:
                 o = json.loads(blk)
@@ -112,6 +135,23 @@ def compose_context(app, cfg, budget_chars: int = 1800) -> str:
                     break
             except Exception:
                 pass
+        
+        # Build a summary from the last few reports
+        for i, item in enumerate(detailed_ctx_items):
+            tf_map = item.get("images_tf_map", {})
+            tf_string = ""
+            if tf_map:
+                # Create a compact string like "(H1, M15, M5)"
+                unique_tfs = sorted(list(set(tf_map.values())))
+                tf_string = f" (Images: {', '.join(unique_tfs)})"
+
+            header = f"--- Context T-{i} ({item.get('cycle', 'unknown time')}){tf_string} ---\n"
+            seven_lines = item.get("seven_lines")
+            if seven_lines and isinstance(seven_lines, list):
+                summary = header + "\n".join(seven_lines)
+                recent_history_summary.append(summary)
+
+    latest_7_lines_DEPRECATED = None # This is now replaced by recent_history_summary
 
     mt5_ctx_full_text = ""
     if cfg.mt5_enabled:
@@ -191,7 +231,7 @@ def compose_context(app, cfg, budget_chars: int = 1800) -> str:
 
     pass_cnt = 0
     total = 0
-    for it in ctx_items:
+    for it in all_ctx_items:
         blks = it.get("blocks") or []
         for blk in blks:
             try:
@@ -203,11 +243,16 @@ def compose_context(app, cfg, budget_chars: int = 1800) -> str:
                     break
             except Exception:
                 continue
+    
+    # --- Backtesting Integration ---
+    proposed_trades = parse_proposed_trades_file(app._get_reports_dir(folder_override=cfg.folder))
+    # Limit to last 50 trades to keep it fast
+    backtest_results = backtester.evaluate_trade_outcomes(proposed_trades[-50:], cfg.mt5_symbol)
+
     stats5 = (mt5full.get("tick_stats_5m") if mt5full else None) or {}
     running_stats = {
         "checklist_pass_ratio": (pass_cnt / total if total else None),
-        "hit_rate_high_prob": None,
-        "avg_rr_tp1": None,
+        "backtest_results": backtest_results,
         "median_spread": stats5.get("median_spread"),
         "median_ticks_per_min": stats5.get("ticks_per_min"),
     }
@@ -226,7 +271,7 @@ def compose_context(app, cfg, budget_chars: int = 1800) -> str:
             "session": mt5_ctx_lite.get("session_active") if isinstance(mt5_ctx_lite, dict) else None,
             "trend_checklist": trend,
             "latest_plan": plan,
-            "latest_7_lines": latest_7,
+            "recent_history_summary": "\n\n".join(recent_history_summary) if recent_history_summary else None,
             "run_meta": run_meta,
             "running_stats": running_stats,
             "risk_rules": risk_rules,
@@ -258,7 +303,9 @@ def compose_context(app, cfg, budget_chars: int = 1800) -> str:
         slim["mt5"] = None
         text = json.dumps(composed, ensure_ascii=False)
         if len(text) > budget_chars:
-            slim["latest_7_lines"] = (slim.get("latest_7_lines") or [])[:3]
+            # If still too long, trim the recent history summary
+            if slim.get("recent_history_summary"):
+                slim["recent_history_summary"] = slim["recent_history_summary"][:1000] + "..."
             text = json.dumps(composed, ensure_ascii=False)
     except Exception:
         pass

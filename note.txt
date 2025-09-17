@@ -1,0 +1,66 @@
+Chào bạn, tôi rất sẵn lòng phân tích khối xử lý chính của luồng phân tích trong phần mềm. Đây là "trái tim" của ứng dụng, nơi tất cả các tác vụ được điều phối và thực thi sau khi bạn nhấn "Bắt đầu".
+
+Luồng xử lý này nằm trong hàm `_worker_run_whole_folder` của tệp `gemini_batch_image_analyzer.py` và có thể được chia thành 7 giai đoạn chính:
+
+---
+
+__Giai đoạn 1: Kiểm tra Sơ bộ (Pre-flight Checks)__
+
+- __Kiểm tra "No Run":__ Đây là khối logic chúng ta vừa thêm vào. Nó sẽ kiểm tra các điều kiện như có phải cuối tuần hay ngoài giờ "Kill Zone" không. Nếu không thỏa mãn, nó sẽ ghi log và bỏ qua lần chạy này, sau đó lên lịch cho lần chạy kế tiếp.
+- __Kiểm tra Tệp ảnh:__ Đảm bảo rằng thư mục được chọn có chứa tệp ảnh hợp lệ. Nếu không có ảnh, luồng sẽ dừng lại.
+
+__Giai đoạn 2: Upload Ảnh và Tối ưu Cache__
+
+- __Mục tiêu:__ Đưa các tệp ảnh lên máy chủ của Gemini để model có thể "nhìn thấy".
+
+- __Cơ chế Cache thông minh:__ Trước khi upload một ảnh, phần mềm sẽ kiểm tra xem tệp ảnh này (dựa trên nội dung) đã từng được upload trước đó chưa.
+
+  - Nếu __đã có__, nó sẽ tái sử dụng lại tệp đã upload trên máy chủ Gemini mà không cần upload lại, giúp tiết kiệm rất nhiều thời gian và băng thông.
+  - Nếu __chưa có__, ảnh sẽ được đưa vào hàng đợi để upload.
+
+- __Upload song song:__ Để tăng tốc, phần mềm sử dụng nhiều luồng (workers) để upload đồng thời nhiều tệp ảnh mới, thay vì phải chờ từng tệp một.
+
+__Giai đoạn 3: Tổng hợp Ngữ cảnh (Context Composition)__
+
+- __Mục tiêu:__ Cung cấp cho model Gemini càng nhiều thông tin liên quan càng tốt để đưa ra phân tích chất lượng cao.
+
+- __Ngữ cảnh Lịch sử:__ Tự động đọc các báo cáo (`.md`) và tóm tắt (`.json`) từ những lần chạy trước để model hiểu được diễn biến của thị trường gần đây.
+
+- __Ngữ cảnh MT5 (Thời gian thực):__ Nếu được bật, phần mềm sẽ kết nối với MT5 để lấy dữ liệu thị trường mới nhất, bao gồm:
+
+  - Dữ liệu nến (M1, M5, M15, H1).
+  - Các chỉ số quan trọng như ATR (đo lường biến động), Spread hiện tại, VWAP.
+  - Các mức cản quan trọng như Đỉnh/Đáy ngày hôm trước (PDH/PDL).
+
+__Giai đoạn 4: Kiểm tra "NO-TRADE" Cứng__
+
+- __Mục tiêu:__ Một lớp bảo vệ bổ sung để tránh phân tích (và giao dịch) trong điều kiện thị trường cực kỳ xấu.
+
+- Dựa trên dữ liệu từ MT5, nó sẽ kiểm tra các yếu tố như:
+
+  - Spread có bị giãn quá mức không?
+  - Thị trường có quá ít biến động (ATR quá thấp) không?
+
+- Nếu một trong các điều kiện này xảy ra, luồng phân tích sẽ dừng lại và ghi log "NO-TRADE".
+
+__Giai đoạn 5: Gọi Gemini API__
+
+- Đây là bước chính. Phần mềm sẽ gửi tất cả mọi thứ đã chuẩn bị ở các bước trên đến model Gemini:
+
+  1. Toàn bộ các tệp ảnh đã được upload.
+  2. Một "prompt" (câu lệnh) cuối cùng được ghép lại từ: prompt gốc của bạn + Ngữ cảnh lịch sử + Dữ liệu MT5.
+
+- Sau đó, nó sẽ chờ model Gemini xử lý và trả về kết quả phân tích dưới dạng văn bản.
+
+__Giai đoạn 6: Xử lý Kết quả và Hành động__
+
+- __Hiển thị và Lưu trữ:__ Kết quả phân tích từ Gemini sẽ được hiển thị trên giao diện và tự động lưu thành một tệp báo cáo `.md` trong thư mục `Reports`. Một tệp tóm tắt `.json` cũng được tạo ra để phục vụ cho các lần chạy sau.
+- __Gửi Thông báo:__ Nếu trong báo cáo có tín hiệu "xác suất cao", một thông báo sẽ được gửi qua Telegram.
+- __Tự động Giao dịch (Auto-Trade):__ Nếu được bật, phần mềm sẽ phân tích báo cáo để tìm các thông số giao dịch (lệnh Mua/Bán, Entry, SL, TP). Nếu tìm thấy, nó sẽ tự động đặt lệnh tương ứng trên MT5.
+
+__Giai đoạn 7: Dọn dẹp và Lên lịch lại__
+
+- Đây là bước cuối cùng và rất quan trọng. Sau khi luồng chạy hoàn tất (dù là chạy thành công hay bị bỏ qua bởi "No Run"), nó sẽ thực hiện các tác vụ dọn dẹp.
+- Quan trọng nhất, nó sẽ gọi lại hàm `_schedule_next_autorun` để __lên lịch cho lần chạy tự động tiếp theo__, đảm bảo vòng lặp được duy trì liên tục.
+
+Hy vọng phần phân tích chi tiết này sẽ giúp bạn hiểu rõ hơn về cách phần mềm hoạt động.

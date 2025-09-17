@@ -79,6 +79,7 @@ from gemini_folder_once.chart_tab import ChartTabTV
 from gemini_folder_once import uploader
 from gemini_folder_once import mt5_utils
 from gemini_folder_once import no_run
+from gemini_folder_once import worker
 from gemini_folder_once.utils import _tg_html_escape
 
 class GeminiFolderOnceApp:
@@ -105,6 +106,7 @@ class GeminiFolderOnceApp:
         self.root.geometry("1180x780")
         self.root.minsize(1024, 660)
         self._trade_log_lock = threading.Lock()
+        self._proposed_trade_log_lock = threading.Lock()
 
         self._ui_log_lock = threading.Lock()
 
@@ -939,8 +941,8 @@ class GeminiFolderOnceApp:
 
         cfg = self._snapshot_config()
         t = threading.Thread(
-            target=self._worker_run_whole_folder,
-            args=(prompt, self.model_var.get(), cfg),
+            target=worker.run_analysis_worker,
+            args=(self, prompt, self.model_var.get(), cfg),
             daemon=True
         )
         t.start()
@@ -1126,7 +1128,6 @@ class GeminiFolderOnceApp:
         return context_builder.folder_signature(names)
 
     def compose_context(self, cfg: RunConfig, budget_chars=1800):
-
         """
         Mục đích: Xây dựng/ngắt ghép ngữ cảnh (text/JSON) để truyền vào prompt của Gemini.
         Tham số:
@@ -1137,412 +1138,6 @@ class GeminiFolderOnceApp:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
         return context_builder.compose_context(self, cfg, budget_chars)
-
-    def _worker_run_whole_folder(self, prompt: str, model_name: str, cfg: RunConfig):
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số:
-          - prompt: str — (tự suy luận theo ngữ cảnh sử dụng).
-          - model_name: str — (tự suy luận theo ngữ cảnh sử dụng).
-          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        def _tnow():
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số: (không)
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            return time.perf_counter()
-
-        def _gen_with_retry(_model, _parts, tries=2, base_delay=2.0):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - _model — (tự suy luận theo ngữ cảnh sử dụng).
-              - _parts — (tự suy luận theo ngữ cảnh sử dụng).
-              - tries — (tự suy luận theo ngữ cảnh sử dụng).
-              - base_delay — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            last = None
-            for i in range(tries):
-                try:
-                    return _model.generate_content(_parts, request_options={"timeout": 1200})
-                except Exception as e:
-                    last = e
-                    if i == tries - 1:
-                        raise
-                    time.sleep(base_delay)
-                    base_delay *= 1.7
-            raise last
-
-        paths = [r["path"] for r in self.results]
-        names = [r["name"] for r in self.results]
-        max_files = max(0, int(cfg.max_files))
-        if max_files > 0 and len(paths) > max_files:
-            paths, names = paths[:max_files], names[:max_files]
-        total_imgs = len(paths)
-        if total_imgs == 0:
-            self.ui_status("Không có ảnh để phân tích.")
-            self._enqueue(self._finalize_stopped)
-            return
-
-        try:
-            model = genai.GenerativeModel(model_name=model_name)
-        except Exception as e:
-            self.ui_message("error", "Model", str(e))
-            self._enqueue(self._finalize_stopped)
-            return
-
-        uploaded_files = []
-        file_slots     = [None] * len(paths)
-        combined_text  = ""
-        early_exit     = False
-
-        try:
-            # ==================================================================
-            # == CHECK 1: NO-RUN CONDITIONS (WEEKEND, KILLZONE, ETC.)
-            # ==================================================================
-            try:
-                should_run, reason = no_run.check_no_run_conditions(self)
-                if not should_run:
-                    self.ui_status(reason)
-                    self._log_trade_decision({
-                        "stage": "no-run-skip",
-                        "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "reason": reason
-                    }, folder_override=(self.mt5_symbol_var.get().strip() or None))
-                    
-                    # Still perform BE/trailing sweep even if analysis is skipped
-                    self._quick_be_trailing_sweep(cfg)
-                    raise SystemExit
-            except Exception as e:
-                # Avoid crashing the whole worker if the check fails for some reason
-                self.ui_status(f"Lỗi kiểm tra No-Run: {e}")
-
-            t_up0 = _tnow()
-            cache = uploader.UploadCache.load() if cfg.cache_enabled else {}
-
-            prepared_map = {}
-            to_upload = []
-            for i, (p, n) in enumerate(zip(paths, names)):
-                cached_remote = uploader.UploadCache.lookup(cache, p) if cache else ""
-                if cached_remote:
-                    try:
-                        f = genai.get_file(cached_remote)
-                        if getattr(getattr(f, "state", None), "name", None) == "ACTIVE":
-                            file_slots[i] = f
-                            prepared_map[i] = None
-                            continue
-                    except Exception:
-                        pass
-                upath = uploader.prepare_image(p, optimize=bool(cfg.optimize_lossless), app_dir=APP_DIR)
-                to_upload.append((i, p, n, upath))
-                prepared_map[i] = upath
-
-            if cfg.only_generate_if_changed and len(to_upload) == 0 and all(file_slots):
-                plan = None
-                composed = ""
-                context_block = ""
-                try:
-                    composed = self.compose_context(cfg, budget_chars=max(800, int(cfg.ctx_limit))) or ""
-                    if composed:
-                        try:
-                            _obj = json.loads(composed)
-                            plan = (_obj.get("CONTEXT_COMPOSED") or {}).get("latest_plan")
-                        except Exception:
-                            plan = None
-                        context_block = "\n\n[CONTEXT_COMPOSED]\n" + composed
-                except Exception:
-                    composed = ""
-                    plan = None
-                    context_block = ""
-
-                mt5_ctx_text = self._mt5_build_context(plan=plan, cfg=cfg) if cfg.mt5_enabled else ""
-                text = "Ảnh không đổi so với lần gần nhất."
-                if context_block:
-                    text += "\n\n" + context_block
-                if mt5_ctx_text:
-                    text += "\n\n[PHỤ LỤC_MT5_JSON]\n" + mt5_ctx_text
-
-                self.combined_report_text = text
-                self.ui_detail_replace(text)
-                _ = self._auto_save_report(text, cfg)
-                self.ui_refresh_history_list()
-
-                try:
-                    mt5_dict_cache = {}
-                    if mt5_ctx_text:
-                        try:
-                            mt5_dict_cache = json.loads(mt5_ctx_text).get("MT5_DATA", {})
-                        except Exception:
-                            mt5_dict_cache = {}
-                    if mt5_dict_cache:
-                        auto_trade.mt5_manage_be_trailing(self,mt5_dict_cache, cfg)
-                except Exception:
-                    pass
-                early_exit = True
-                raise SystemExit
-
-            for (i, p, n, upath) in to_upload:
-                self.results[i]["status"] = "Đang upload..."
-                self._update_tree_row(i, "Đang upload...")
-
-            if to_upload:
-                max_workers = max(1, min(len(to_upload), int(cfg.upload_workers)))
-                with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                    futs = {
-                        ex.submit(uploader.upload_one_file_for_worker, (p, n, upath)): (i, p)
-                        for (i, p, n, upath) in to_upload
-                    }
-                    done_cnt = 0
-                    steps_upload   = len(to_upload)
-                    steps_process  = 1
-                    total_steps    = steps_upload + steps_process + 1
-
-                    for fut in as_completed(futs):
-                        if self.stop_flag:
-                            for f_cancel in futs:
-                                try:
-                                    f_cancel.cancel()
-                                except Exception:
-                                    pass
-                            self._quick_be_trailing_sweep(cfg)
-                            early_exit = True
-                            raise SystemExit
-
-                        (p_ret, fobj) = fut.result()
-                        i, p = futs[fut]
-                        file_slots[i] = fobj
-                        uploaded_files.append((fobj, p))
-
-                        done_cnt += 1
-                        self._update_progress(done_cnt, total_steps)
-
-                        self.results[i]["status"] = "Đã upload"
-                        self._update_tree_row(i, "Đã upload")
-
-                self.ui_status(f"Upload xong trong {(_tnow()-t_up0):.2f}s")
-            else:
-                steps_upload   = 0
-                steps_process  = 1
-                total_steps    = steps_upload + steps_process + 1
-
-            if cfg.cache_enabled:
-                for (f, p) in uploaded_files:
-                    try:
-                        uploader.UploadCache.put(cache, p, f.name)
-                    except Exception:
-                        pass
-                uploader.UploadCache.save(cache)
-
-            if self.stop_flag:
-                self._quick_be_trailing_sweep(cfg)
-                early_exit = True
-                raise SystemExit
-
-            all_media = []
-            for i in range(len(paths)):
-                f = file_slots[i]
-                if f is None:
-
-                    all_media.append(uploader.as_inline_media_part(prepared_map.get(i) or paths[i]))
-                else:
-                    all_media.append(uploader.file_or_inline_for_model(
-                        f,
-                        prepared_map.get(i),
-                        paths[i]
-                    ))
-
-            if cfg.cache_enabled:
-                for (f, p) in uploaded_files:
-                    try:
-                        uploader.UploadCache.put(cache, p, f.name)
-                    except Exception:
-                        pass
-                uploader.UploadCache.save(cache)
-
-            if self.stop_flag:
-                self._quick_be_trailing_sweep(cfg)
-                early_exit = True
-                raise SystemExit
-
-            t_ctx0 = _tnow()
-            plan = None
-            composed = ""
-            context_block = ""
-            try:
-                composed = self.compose_context(cfg, budget_chars=max(800, int(cfg.ctx_limit))) or ""
-                if composed:
-                    try:
-                        _obj = json.loads(composed)
-                        plan = (_obj.get("CONTEXT_COMPOSED") or {}).get("latest_plan")
-                    except Exception:
-                        plan = None
-                    context_block = "\n\n[CONTEXT_COMPOSED]\n" + composed
-            except Exception:
-                composed = ""
-                plan = None
-                context_block = ""
-
-            mt5_json_full = self._mt5_build_context(plan=plan, cfg=cfg) if cfg.mt5_enabled else ""
-            mt5_dict = {}
-            if mt5_json_full:
-                try:
-                    mt5_dict = json.loads(mt5_json_full).get("MT5_DATA", {})
-                except Exception:
-                    mt5_dict = {}
-            self.ui_status(f"Context+MT5 xong trong {(_tnow()-t_ctx0):.2f}s")
-
-            if cfg.nt_enabled and mt5_dict:
-                # Ensure news cache is fresh to share across features
-                try:
-                    self._refresh_news_cache(ttl=300, async_fetch=False, cfg=cfg)
-                except Exception:
-                    pass
-                ok, reasons, self.ff_cache_events_local, self.ff_cache_fetch_time, meta = no_trade.evaluate(
-                    mt5_dict,
-                    cfg,
-                    cache_events=self.ff_cache_events_local,
-                    cache_fetch_time=self.ff_cache_fetch_time,
-                    ttl_sec=300,
-                )
-                # Persist latest evaluation on app for UI
-                try:
-                    self.last_no_trade_ok = bool(ok)
-                    self.last_no_trade_reasons = list(reasons or [])
-                except Exception:
-                    pass
-                if not ok:
-
-                    try:
-                        self._log_trade_decision({
-                            "stage": "no-trade",
-                            "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "reasons": reasons
-                        }, folder_override=(self.mt5_symbol_var.get().strip() or None))
-                    except Exception:
-                        pass
-                    note = "NO-TRADE: Điều kiện giao dịch không thỏa.\n- " + "\n- ".join(reasons)
-
-                    try:
-                        self._log_trade_decision({
-                            "stage": "no-trade",
-                            "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "reasons": reasons,
-
-                        }, folder_override=(self.mt5_symbol_var.get().strip() or None))
-                    except Exception:
-                        pass
-                    if context_block:
-                        note += "\n\n" + context_block
-                    if mt5_json_full:
-                        note += "\n\n[PHỤ LỤC_MT5_JSON]\n" + mt5_json_full
-                    self.combined_report_text = note
-                    self.ui_detail_replace(note)
-                    _ = self._auto_save_report(note, cfg)
-                    self.ui_refresh_history_list()
-
-                    try:
-                        if mt5_dict:
-                            auto_trade.mt5_manage_be_trailing(self,mt5_dict, cfg)
-                    except Exception:
-                        pass
-                    early_exit = True
-                    raise SystemExit
-
-            self.ui_status("Đang phân tích toàn bộ thư mục...")
-            try:
-                tf_section = self._build_timeframe_section([Path(p).name for p in paths]).strip()
-
-                parts_text = []
-                if tf_section:
-                    parts_text.append("### Nhãn khung thời gian (tự nhận từ tên tệp)\n")
-                    parts_text.append(tf_section)
-                    parts_text.append("\n\n")
-                parts_text.append(prompt)
-                if context_block:
-                    parts_text.append("\n\n")
-                    parts_text.append(context_block)
-                if mt5_json_full:
-                    parts_text.append("\n\n[PHỤ LỤC_MT5_JSON]\n")
-                    parts_text.append(mt5_json_full)
-                prompt_final = "".join(parts_text)
-
-                t_llm0 = _tnow()
-                parts = all_media + [prompt_final]
-                resp = _gen_with_retry(model, parts, tries=2, base_delay=2.0)
-
-                combined_text = (getattr(resp, "text", "") or "").strip() or "[Không có nội dung trả về]"
-                self.ui_status(f"Model trả lời trong {(_tnow()-t_llm0):.2f}s")
-
-                self._update_progress(steps_upload + steps_process, steps_upload + steps_process + 1)
-
-            except Exception as e:
-                combined_text = f"[LỖI phân tích] {e}"
-
-            for p in paths:
-                idx_real = next((i for i, r in enumerate(self.results) if r["path"] == p), None)
-                if idx_real is not None:
-                    self.results[idx_real]["status"] = "Hoàn tất"
-                    self.results[idx_real]["text"] = ""
-                    self._update_tree_row(idx_real, "Hoàn tất")
-
-            self.combined_report_text = combined_text
-            self.ui_detail_replace(combined_text)
-
-            saved_path = self._auto_save_report(combined_text, cfg)
-            if cfg.create_ctx_json:
-                try:
-                    self._auto_save_json_from_report(combined_text, cfg)
-                except Exception:
-                    pass
-            self.ui_refresh_history_list()
-            self.ui_refresh_json_list()
-
-            if not self.stop_flag and not early_exit:
-                try:
-                    self._maybe_notify_telegram(combined_text, saved_path, cfg)
-                except Exception:
-                    pass
-                try:
-                    auto_trade.auto_trade_if_high_prob(self,combined_text, mt5_dict, cfg)
-                except Exception as e:
-                    self.ui_status(f"Auto-Trade lỗi: {e}")
-
-                try:
-                    if mt5_dict:
-                        auto_trade.mt5_manage_be_trailing(self,mt5_dict, cfg)
-                except Exception:
-                    pass
-
-            self._update_progress(steps_upload + steps_process + 1, steps_upload + steps_process + 1)
-
-        except SystemExit:
-
-            pass
-        except Exception as e:
-            self.ui_message("error", "Lỗi", str(e))
-
-        finally:
-
-            if not cfg.cache_enabled and cfg.delete_after:
-                for uf, _ in uploaded_files:
-                    try:
-                        self._maybe_delete(uf)
-                    except Exception:
-                        pass
-
-            self._enqueue(self._finalize_done if not self.stop_flag else self._finalize_stopped)
-
-    
 
     def _quick_be_trailing_sweep(self, cfg: RunConfig):
         """
@@ -1565,7 +1160,7 @@ class GeminiFolderOnceApp:
         except Exception:
             pass
 
-    def _auto_save_json_from_report(self, text: str, cfg: RunConfig):
+    def _auto_save_json_from_report(self, text: str, cfg: RunConfig, names: list[str], context_obj: dict):
         """
         Mục đích: Ghi/Xuất dữ liệu (báo cáo .md, JSON tóm tắt, cache...).
         Tham số:
@@ -1595,10 +1190,75 @@ class GeminiFolderOnceApp:
             payload["seven_lines"] = lines
             payload["signature"] = sig
             payload["high_prob"] = bool(high)
+        
         payload["cycle"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        payload["images_tf_map"] = self._images_tf_map(names)
+
         out = d / f"ctx_{ts}.json"
         out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # --- Log proposed trade for backtesting ---
+        try:
+            setup = self._parse_setup_from_report(text)
+            if setup and setup.get("direction") and setup.get("entry"):
+                # Extract context snapshot for logging
+                ctx_snapshot = {}
+                if context_obj:
+                    inner_ctx = context_obj.get("CONTEXT_COMPOSED", {})
+                    ctx_snapshot = {
+                        "session": inner_ctx.get("session"),
+                        "trend_checklist": inner_ctx.get("trend_checklist", {}).get("trend"),
+                        "volatility_regime": (inner_ctx.get("environment_flags") or {}).get("volatility_regime"),
+                        "trend_regime": (inner_ctx.get("environment_flags") or {}).get("trend_regime"),
+                    }
+
+                trade_log_payload = {
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    "symbol": cfg.mt5_symbol,
+                    "report_file": out.name,
+                    "setup": setup,
+                    "context_snapshot": ctx_snapshot
+                }
+                self._log_proposed_trade(trade_log_payload, folder_override=cfg.folder)
+        except Exception:
+            pass # Silently fail if parsing/logging fails
+
         return out
+
+    def _log_proposed_trade(self, data: dict, folder_override: str | None = None):
+        try:
+            d = self._get_reports_dir(folder_override=folder_override)
+            if not d:
+                return
+
+            p = d / "proposed_trades.jsonl"
+            line = (json.dumps(data, ensure_ascii=False, separators=(',', ':')) + "\n").encode("utf-8")
+
+            p.parent.mkdir(parents=True, exist_ok=True)
+
+            with self._proposed_trade_log_lock:
+                need_leading_newline = False
+                if p.exists():
+                    try:
+                        sz = p.stat().st_size
+                        if sz > 0:
+                            with open(p, "rb") as fr:
+                                fr.seek(-1, os.SEEK_END)
+                                need_leading_newline = (fr.read(1) != b"\n")
+                    except Exception:
+                        need_leading_newline = False
+                
+                with open(p, "ab") as f:
+                    if need_leading_newline:
+                        f.write(b"\n")
+                    f.write(line)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def _pick_ca_bundle(self):
         """
