@@ -267,9 +267,11 @@ def _killzone_ranges_vn(d: datetime | None = None, target_tz: str | None = None)
 
     is_summer = _is_us_dst(d)
 
+    asia_session = {"start": "06:00", "end": "09:00"}
     if is_summer:
         # Mùa hè (Tháng 3 – Tháng 11, US DST)
         return {
+            "asia": asia_session,
             "london": {"start": "14:00", "end": "17:00"},
             "newyork_am": {"start": "19:30", "end": "22:00"},
             "newyork_pm": {"start": "00:00", "end": "03:00"},
@@ -277,6 +279,7 @@ def _killzone_ranges_vn(d: datetime | None = None, target_tz: str | None = None)
     else:
         # Mùa đông (Tháng 11 – Tháng 3, US Standard Time)
         return {
+            "asia": asia_session,
             "london": {"start": "15:00", "end": "18:00"},
             "newyork_am": {"start": "20:30", "end": "23:00"},
             "newyork_pm": {"start": "01:00", "end": "04:00"},
@@ -291,9 +294,7 @@ def session_ranges_today(m1_rates: Sequence[dict] | None) -> dict[str, dict]:
     # The m1_rates are not strictly needed anymore since we use system time,
     # but we keep the signature for compatibility. It can be used to check historical sessions.
     # For now, we pass `None` to `_killzone_ranges_vn` to use the current system time.
-    kills = _killzone_ranges_vn(d=None)
-    sessions = {"asia": {"start": "06:00", "end": "09:00"}, **kills}
-    return sessions
+    return _killzone_ranges_vn(d=None)
 
 
 def _series_from_mt5(symbol: str, tf_code: int, bars: int) -> list[dict]:
@@ -490,7 +491,7 @@ def build_context(
     session_liquidity = ict_analysis.get_session_liquidity(series.get("M15", []), sessions_today, now_hhmm_for_sessions)
     vwap_day = vwap_from_rates([r for r in series["M1"] if str(r["time"])[:10] == datetime.now().strftime("%Y-%m-%d")])
     vwaps: dict[str, float | None] = {"day": vwap_day}
-    for sess in ["asia", "london", "newyork_pre", "newyork_post"]:
+    for sess in ["asia", "london", "newyork_am", "newyork_pm"]:
         rng = sessions_today.get(sess, {})
         sub: list[dict] = []
         if rng and rng.get("start") and rng.get("end"):
@@ -565,17 +566,28 @@ def build_context(
             h2, m2 = map(int, t2.split(":"))
             return (h2 - h1) * 60 + (m2 - m1)
 
-        order = ["london", "newyork_pre", "newyork_post"]
+        order = ["asia", "london", "newyork_am", "newyork_pm"]
         for k in order:
-            st, ed = kills[k]["start"], kills[k]["end"]
-            if st <= now_hhmm < ed:
+            kz = kills.get(k)
+            if not kz:
+                continue
+            st, ed = kz["start"], kz["end"]
+            if st > ed:  # Handles overnight sessions like NY PM
+                if now_hhmm >= st or now_hhmm < ed:
+                    kill_active = k
+                    break
+            elif st <= now_hhmm < ed:
                 kill_active = k
                 break
         if kill_active is None:
-            for k in order:
-                st = kills[k]["start"]
-                if now_hhmm < st:
-                    mins_to_next = _mins(now_hhmm, st)
+            # Sort session start times to find the next one accurately
+            sorted_sessions = sorted(
+                [(k, v["start"]) for k, v in kills.items()],
+                key=lambda item: item[1]
+            )
+            for name, start_time in sorted_sessions:
+                if now_hhmm < start_time:
+                    mins_to_next = _mins(now_hhmm, start_time)
                     break
     except Exception:
         pass

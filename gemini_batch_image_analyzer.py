@@ -442,20 +442,34 @@ class GeminiFolderOnceApp:
         tab_prompt.columnconfigure(0, weight=1)
         tab_prompt.rowconfigure(1, weight=1)
 
-        pr = ttk.Frame(tab_prompt)
-        pr.grid(row=0, column=0, sticky="ew")
+        # --- Prompt Actions ---
+        pr_actions = ttk.Frame(tab_prompt)
+        pr_actions.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(pr_actions, text="Tải lại prompt từ file", command=self._load_prompts_from_disk).pack(side="left")
+        ttk.Button(pr_actions, text="Lưu prompt hiện tại", command=self._save_current_prompt_to_disk).pack(side="left", padx=(6,0))
+        ttk.Button(pr_actions, text="Định dạng lại", command=self._reformat_prompt_area).pack(side="left", padx=(6, 0))
 
-        ttk.Button(pr, text="Tải PROMPT.txt", command=self._auto_load_prompt_for_current_folder).pack(side="left")
-        ttk.Button(pr, text="Chọn file…", command=self._pick_prompt_file).pack(side="left", padx=(6, 0))
-        ttk.Button(pr, text="Định dạng lại", command=self._reformat_prompt_area).pack(side="left", padx=(6, 0))
-        ttk.Checkbutton(pr, text="Tự động nạp khi chọn thư mục",
-                        variable=self.auto_load_prompt_txt_var).pack(side="left", padx=(10, 0))
+        # --- Prompt Notebook (Tabs) ---
+        self.prompt_nb = ttk.Notebook(tab_prompt)
+        self.prompt_nb.grid(row=1, column=0, sticky="nsew")
 
-        self.prompt_text = ScrolledText(tab_prompt, wrap="word", height=18)
-        self.prompt_text.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        # --- Tab 1: No Entry ---
+        prompt_tab_no_entry = ttk.Frame(self.prompt_nb, padding=(0, 8, 0, 0))
+        self.prompt_nb.add(prompt_tab_no_entry, text="Tìm Lệnh Mới (No Entry)")
+        prompt_tab_no_entry.columnconfigure(0, weight=1)
+        prompt_tab_no_entry.rowconfigure(0, weight=1)
+        self.prompt_no_entry_text = ScrolledText(prompt_tab_no_entry, wrap="word", height=18)
+        self.prompt_no_entry_text.grid(row=0, column=0, sticky="nsew")
 
-        if not self._load_prompt_from_file(silent=True):
-            self.ui_status("Chưa nạp PROMPT.txt — hãy bấm 'Tải PROMPT.txt' hoặc 'Chọn file…'")
+        # --- Tab 2: Entry Run ---
+        prompt_tab_entry_run = ttk.Frame(self.prompt_nb, padding=(0, 8, 0, 0))
+        self.prompt_nb.add(prompt_tab_entry_run, text="Quản Lý Lệnh (Entry Run)")
+        prompt_tab_entry_run.columnconfigure(0, weight=1)
+        prompt_tab_entry_run.rowconfigure(0, weight=1)
+        self.prompt_entry_run_text = ScrolledText(prompt_tab_entry_run, wrap="word", height=18)
+        self.prompt_entry_run_text.grid(row=0, column=0, sticky="nsew")
+
+        self._load_prompts_from_disk()
 
         tab_opts = ttk.Frame(self.nb, padding=8)
         self.nb.add(tab_opts, text="Options")
@@ -852,7 +866,6 @@ class GeminiFolderOnceApp:
             return
         self.folder_path.set(folder)
         self._load_files(folder)
-        self._auto_load_prompt_for_current_folder()
         self._refresh_history_list()
         self._refresh_json_list()
 
@@ -911,12 +924,38 @@ class GeminiFolderOnceApp:
         self._load_files(folder)
         if len(self.results) == 0:
             return
-        prompt = self.prompt_text.get("1.0", "end").strip()
-        if not prompt and self._load_prompt_from_file(silent=True):
-            prompt = self.prompt_text.get("1.0", "end").strip()
+
+        # --- Dynamic Prompt Selection ---
+        prompt = ""
+        cfg = self._snapshot_config()
+        try:
+            if cfg.mt5_enabled:
+                # Build a temporary context to check for open trades
+                mt5_json_full = self._mt5_build_context(plan=None, cfg=cfg)
+                if mt5_json_full:
+                    mt5_data = json.loads(mt5_json_full).get("MT5_DATA", {})
+                    # Check if there are any open positions
+                    if mt5_data.get("positions"):
+                        prompt = self.prompt_entry_run_text.get("1.0", "end").strip()
+                        self.ui_status("Phát hiện lệnh đang mở, dùng prompt Quản Lý Lệnh.")
+                    else:
+                        prompt = self.prompt_no_entry_text.get("1.0", "end").strip()
+                        self.ui_status("Không có lệnh mở, dùng prompt Tìm Lệnh Mới.")
+                else:
+                    # Fallback if MT5 connection fails
+                    prompt = self.prompt_no_entry_text.get("1.0", "end").strip()
+            else:
+                # Default to no_entry prompt if MT5 is disabled
+                prompt = self.prompt_no_entry_text.get("1.0", "end").strip()
+        except Exception as e:
+            self.ui_message("error", "Lỗi chọn Prompt", f"Không thể xác định trạng thái lệnh MT5, dùng prompt mặc định. Lỗi: {e}")
+            prompt = self.prompt_no_entry_text.get("1.0", "end").strip()
+
         if not prompt:
-            self.ui_message("warning", "Thiếu prompt", "Vui lòng nhập hoặc nạp PROMPT.txt trước khi chạy.")
+            self.ui_message("warning", "Thiếu prompt", "Vui lòng nhập nội dung cho cả hai tab prompt trước khi chạy.")
             return
+        # --- End Dynamic Prompt Selection ---
+
         api_key = self.api_key_var.get().strip() or os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             self.ui_message("warning", "Thiếu API key", "Vui lòng nhập API key hoặc đặt biến môi trường GOOGLE_API_KEY.")
@@ -940,7 +979,7 @@ class GeminiFolderOnceApp:
         self.stop_btn.configure(state="normal")
         self.export_btn.configure(state="disabled")
 
-        cfg = self._snapshot_config()
+        # Note: cfg was already created for prompt selection
         t = threading.Thread(
             target=worker.run_analysis_worker,
             args=(self, prompt, self.model_var.get(), cfg),
@@ -2033,7 +2072,7 @@ class GeminiFolderOnceApp:
             return bool(r and r.get("start") and r.get("end") and r["start"] <= now < r["end"])
         if cfg.trade_allow_session_asia   and _in(ss.get("asia")): ok = True
         if cfg.trade_allow_session_london and _in(ss.get("london")): ok = True
-        if cfg.trade_allow_session_ny     and ( _in(ss.get("newyork_pre")) or _in(ss.get("newyork_post")) ):
+        if cfg.trade_allow_session_ny     and ( _in(ss.get("newyork_am")) or _in(ss.get("newyork_pm")) ):
             ok = True
 
         if not (cfg.trade_allow_session_asia or cfg.trade_allow_session_london or cfg.trade_allow_session_ny):
@@ -3105,11 +3144,6 @@ class GeminiFolderOnceApp:
         except Exception:
             pass
 
-        if s.count("") >= 3 and s.count("\n") <= s.count(""):
-            s = (s.replace("", "\n")
-                 .replace("\\t", "\t")
-                 .replace('\\"', '"')
-                 .replace("\\'", "'"))
         return s
 
     def _reformat_prompt_area(self):
@@ -3120,90 +3154,66 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        raw = self.prompt_text.get("1.0", "end")
-        pretty = self._normalize_prompt_text(raw)
-        self.prompt_text.delete("1.0", "end")
-        self.prompt_text.insert("1.0", pretty)
+        try:
+            selected_tab_index = self.prompt_nb.index(self.prompt_nb.select())
+            if selected_tab_index == 0:
+                widget = self.prompt_no_entry_text
+            else:
+                widget = self.prompt_entry_run_text
+            
+            raw = widget.get("1.0", "end")
+            pretty = self._normalize_prompt_text(raw)
+            widget.delete("1.0", "end")
+            widget.insert("1.0", pretty)
+        except Exception:
+            pass # Ignore if no tab is selected
 
-    def _find_prompt_file(self):
+    def _load_prompts_from_disk(self, silent=False):
         """
-        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
-        Tham số: (không)
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        Loads content for both prompt tabs from their respective files.
         """
-        cand = []
-        pfp = self.prompt_file_path_var.get().strip()
-        if pfp:
-            cand.append(Path(pfp))
-        folder = self.folder_path.get().strip()
-        if folder:
-            for name in ("PROMPT.txt", "Prompt.txt", "prompt.txt"):
-                cand.append(Path(folder) / name)
-        cand.append(APP_DIR / "PROMPT.txt")
-        for p in cand:
+        files_to_load = {
+            "no_entry": (APP_DIR / "prompt_no_entry.txt", self.prompt_no_entry_text),
+            "entry_run": (APP_DIR / "prompt_entry_run.txt", self.prompt_entry_run_text),
+        }
+        loaded_count = 0
+        for key, (path, widget) in files_to_load.items():
             try:
-                if p and p.exists() and p.is_file():
-                    return p
-            except Exception:
-                pass
-        return None
+                if path.exists():
+                    raw = path.read_text(encoding="utf-8", errors="ignore")
+                    text = self._normalize_prompt_text(raw)
+                    widget.delete("1.0", "end")
+                    widget.insert("1.0", text)
+                    loaded_count += 1
+                elif not silent:
+                    widget.delete("1.0", "end")
+                    widget.insert("1.0", f"[LỖI] Không tìm thấy file: {path.name}")
+            except Exception as e:
+                if not silent:
+                    self.ui_message("error", "Prompt", f"Lỗi nạp {path.name}: {e}")
+        
+        if loaded_count > 0 and not silent:
+            self.ui_status(f"Đã nạp {loaded_count} prompt từ file.")
 
-    def _load_prompt_from_file(self, path=None, silent=False):
+    def _save_current_prompt_to_disk(self):
         """
-        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
-        Tham số:
-          - path — (tự suy luận theo ngữ cảnh sử dụng).
-          - silent — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        Saves the content of the currently active prompt tab to its file.
         """
         try:
-            p = Path(path) if path else self._find_prompt_file()
-            if not p:
-                if not silent:
-                    self.ui_message("warning", "Prompt", "Không tìm thấy PROMPT.txt trong thư mục đã chọn hoặc APP_DIR.")
-                return False
-            raw = p.read_text(encoding="utf-8", errors="ignore")
-            text = self._normalize_prompt_text(raw)
-            self.prompt_text.delete("1.0", "end")
-            self.prompt_text.insert("1.0", text)
-            self.prompt_file_path_var.set(str(p))
-            self.ui_status(f"Đã nạp prompt từ: {p.name}")
-            return True
+            selected_tab_index = self.prompt_nb.index(self.prompt_nb.select())
+            if selected_tab_index == 0:
+                widget = self.prompt_no_entry_text
+                path = APP_DIR / "prompt_no_entry.txt"
+            else:
+                widget = self.prompt_entry_run_text
+                path = APP_DIR / "prompt_entry_run.txt"
+
+            content = widget.get("1.0", "end-1c") # -1c to exclude trailing newline
+            path.write_text(content, encoding="utf-8")
+            self.ui_message("info", "Prompt", f"Đã lưu thành công vào {path.name}")
+
         except Exception as e:
-            if not silent:
-                self.ui_message("error", "Prompt", f"Lỗi nạp PROMPT.txt: {e}")
-            return False
-
-    def _pick_prompt_file(self):
-        """
-        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
-        Tham số: (không)
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        path = filedialog.askopenfilename(
-            title="Chọn PROMPT.txt",
-            filetypes=[("Text", "*.txt"), ("Tất cả", "*.*")]
-        )
-        if not path:
-            return
-        self._load_prompt_from_file(path)
-
-    def _auto_load_prompt_for_current_folder(self):
-        """
-        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
-        Tham số: (không)
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        if self.auto_load_prompt_txt_var.get():
-            self._load_prompt_from_file(silent=True)
+            self.ui_message("error", "Prompt", f"Lỗi lưu file: {e}")
 
     def _save_workspace(self):
         """

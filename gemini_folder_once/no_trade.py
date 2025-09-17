@@ -92,45 +92,6 @@ def pretrade_hard_filters(mt5_ctx: dict, cfg: RunConfig) -> Tuple[bool, List[str
     return (len(reasons) == 0), reasons, codes
 
 
-def _allowed_session_now(mt5_ctx: dict, cfg: RunConfig) -> bool:
-    """Return True if current time falls within any allowed session.
-
-    Uses `mt5_ctx["sessions_today"]` with keys: asia, london, newyork_pre, newyork_post
-    and RunConfig flags trade_allow_session_asia/london/ny.
-    If all three flags are False (no explicit restriction), allow all times.
-    """
-    try:
-        ss = (mt5_ctx.get("sessions_today") or {})
-        from datetime import datetime
-
-        now = datetime.now().strftime("%H:%M")
-
-        def _in(r: Optional[Dict[str, Any]]) -> bool:
-            return bool(r and r.get("start") and r.get("end") and r["start"] <= now < r["end"])
-
-        ok = False
-        if getattr(cfg, "trade_allow_session_asia", False) and _in(ss.get("asia")):
-            ok = True
-        if getattr(cfg, "trade_allow_session_london", False) and _in(ss.get("london")):
-            ok = True
-        if getattr(cfg, "trade_allow_session_ny", False) and (
-            _in(ss.get("newyork_pre")) or _in(ss.get("newyork_post"))
-        ):
-            ok = True
-
-        if not (
-            getattr(cfg, "trade_allow_session_asia", False)
-            or getattr(cfg, "trade_allow_session_london", False)
-            or getattr(cfg, "trade_allow_session_ny", False)
-        ):
-            # No restrictions configured -> allow
-            ok = True
-        return ok
-    except Exception:
-        # On any error, do not block by session
-        return True
-
-
 def evaluate(
     mt5_ctx: dict,
     cfg: RunConfig,
@@ -148,11 +109,8 @@ def evaluate(
     # Start with existing hard filters
     ok_hard, reasons, codes = pretrade_hard_filters(mt5_ctx, cfg)
 
-    # Session gate
-    sess_ok = _allowed_session_now(mt5_ctx, cfg)
-    if not sess_ok:
-        reasons.append("Ngoai phien cho phep")
-        codes.append("session")
+    # Session gate (REMOVED - logic is now handled by no_run.py)
+    sess_ok = True
 
     # News window gate
     events: List[Dict[str, Any]] = cache_events or []

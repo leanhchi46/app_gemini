@@ -32,7 +32,7 @@ def check_no_run_conditions(app: "GeminiFolderOnceApp") -> tuple[bool, str | Non
         is_in_killzone = False
 
         # Lặp qua tất cả các kill zone đã định nghĩa
-        for session in ["london", "newyork_am", "newyork_pm"]:
+        for session in ["asia", "london", "newyork_am", "newyork_pm"]:
             kz = kills.get(session)
             if kz and kz.get("start") and kz.get("end"):
                 # Xử lý trường hợp kill zone qua nửa đêm (ví dụ: 00:00 - 03:00)

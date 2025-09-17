@@ -584,17 +584,10 @@ class ChartTabTV:
     # -------------------------
     def _compute_sessions_today(self, symbol: str) -> dict:
         try:
-            import MetaTrader5 as mt5
             from . import mt5_utils as _mt5u
-        except Exception:
-            return {}
-        try:
-            # Minimal: any non-empty list unlocks session schedule
-            arr = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 5) or []
-            if not arr:
-                return {}
-            rows = [{"time": str(x.get("time"))} for x in arr]
-            return _mt5u.session_ranges_today(rows) or {}
+            # The session ranges are now based on system time, not rates.
+            # We can call the helper directly without fetching MT5 data here.
+            return _mt5u.session_ranges_today(None) or {}
         except Exception:
             return {}
 

@@ -124,11 +124,11 @@ def _generate_concept_value_table(data: dict[str, Any]) -> str:
     rows.append(format_row("H1", "Current Price", cp))
     rows.append(format_row("H1", "Swing High", h1_swing_h))
     rows.append(format_row("H1", "Swing Low", h1_swing_l))
-    rows.append(format_row("H1", "EQ50_D", data.get("levels", {}).get("daily", {}).get("eq50")))
-    rows.append(format_row("H1", "Daily VWAP", data.get("vwap", {}).get("day")))
-    rows.append(format_row("H1", "PDL", data.get("levels", {}).get("prev_day", {}).get("low")))
-    rows.append(format_row("H1", "PDH", data.get("levels", {}).get("prev_day", {}).get("high")))
-    rows.append(format_row("H1", "EMA50", data.get("trend_refs", {}).get("EMA", {}).get("H1", {}).get("ema50")))
+    rows.append(format_row("H1", "EQ50_D", (data.get("levels", {}).get("daily") or {}).get("eq50")))
+    rows.append(format_row("H1", "Daily VWAP", (data.get("vwap") or {}).get("day")))
+    rows.append(format_row("H1", "PDL", (data.get("levels", {}).get("prev_day") or {}).get("low")))
+    rows.append(format_row("H1", "PDH", (data.get("levels", {}).get("prev_day") or {}).get("high")))
+    rows.append(format_row("H1", "EMA50", ((data.get("trend_refs", {}).get("EMA") or {}).get("H1") or {}).get("ema50")))
 
     # M15 Concepts
     m15_swing_h = data.get("tf_data", {}).get("M15", {}).get("swing", {}).get("H")

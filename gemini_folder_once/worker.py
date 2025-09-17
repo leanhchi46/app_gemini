@@ -334,10 +334,30 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt: str, model_name: str
             # Instead of appending the raw MT5 JSON, we now parse it 
             # and generate the structured report.
             if mt5_dict:
-                # The mt5_dict is already parsed from mt5_json_full earlier
-                structured_report = report_parser.parse_mt5_data_to_report(mt5_dict)
-                parts_text.append("\n\n### PHÂN TÍCH TỰ ĐỘNG (máy-đọc-được)\n")
-                parts_text.append(structured_report)
+                try:
+                    # The mt5_dict is already parsed from mt5_json_full earlier
+                    structured_report = report_parser.parse_mt5_data_to_report(mt5_dict)
+                    parts_text.append("\n\n### PHÂN TÍCH TỰ ĐỘNG (máy-đọc-được)\n")
+                    parts_text.append(structured_report)
+                except Exception as e_parse:
+                    import traceback
+                    tb_str = traceback.format_exc()
+                    debug_msg = (
+                        f"--- DEBUG CRASH LOG ---\n"
+                        f"Timestamp: {datetime.now().isoformat()}\n"
+                        f"Error during report_parser.parse_mt5_data_to_report:\n{e_parse}\n\n"
+                        f"Traceback:\n{tb_str}\n\n"
+                        f"Problematic mt5_dict data:\n{json.dumps(mt5_dict, indent=2, ensure_ascii=False)}\n"
+                    )
+                    try:
+                        debug_log_path = APP_DIR / "debug_crash_log.json"
+                        debug_log_path.write_text(debug_msg, encoding="utf-8")
+                        app.ui_status(f"Lỗi nghiêm trọng, đã ghi log vào {debug_log_path}")
+                    except Exception:
+                        pass
+                    # Re-raise the exception to be caught by the outer block
+                    raise e_parse
+
             elif mt5_json_full:
                 # Fallback to old method if parsing failed for some reason
                 parts_text.append("\n\n[PHỤ LỤC_MT5_JSON]\n")
