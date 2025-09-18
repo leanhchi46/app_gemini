@@ -152,36 +152,22 @@ def _generate_concept_value_table(data: SafeMT5Data, tf_data: dict) -> str:
 
 def _generate_checklist_json(data: SafeMT5Data, tf_data: dict) -> dict[str, Any]:
     """
-    Helper to build the CHECKLIST_JSON part of the report, following the detailed ICT prompt.
-    This function now handles both "setup" and "management" modes.
+    Generates a JSON template for the AI to fill out. It no longer calculates the status itself.
+    It still provides the open trade monitoring data if in management mode.
     """
     from datetime import datetime
 
     positions = data.get("positions")
     if positions:
         # --- MANAGEMENT MODE ---
-        # If there are open positions, generate a management checklist.
-        pos = positions[0]  # Assuming one position for now
+        pos = positions[0]
         current_price = data.get_tick_value("bid", 0.0) or data.get_tick_value("last", 0.0)
-
         entry_price = pos.get("price_open", 0.0)
         sl = pos.get("sl", 0.0)
-        trade_type = pos.get("type")
-
-        initial_risk = 0
-        if sl != 0 and entry_price != 0:
-            initial_risk = abs(entry_price - sl)
-
-        current_reward = 0
-        if entry_price != 0 and current_price != 0:
-            if trade_type == "BUY":
-                current_reward = current_price - entry_price
-            else:  # SELL
-                current_reward = entry_price - current_price
-        
-        current_rr = 0
-        if initial_risk > 1e-9: # Avoid division by zero
-            current_rr = current_reward / initial_risk
+        trade_type = "BUY" if pos.get("type") == 0 else "SELL"
+        initial_risk = abs(entry_price - sl) if sl != 0 and entry_price != 0 else 0
+        current_reward = (current_price - entry_price) if trade_type == "BUY" else (entry_price - current_price)
+        current_rr = (current_reward / initial_risk) if initial_risk > 1e-9 else 0
 
         open_trade_monitoring = {
             "ticket": pos.get("ticket"),
@@ -192,9 +178,10 @@ def _generate_checklist_json(data: SafeMT5Data, tf_data: dict) -> dict[str, Any]
             "take_profit": pos.get("tp", 0.0),
             "current_price": current_price,
             "current_profit": pos.get("profit"),
-            "current_rr": round(current_rr, 2) if initial_risk > 1e-9 else None,
+            "current_rr": round(current_rr, 2),
         }
 
+        # Return the data needed for the management prompt
         return {
             "cycle": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "symbol": data.get("symbol", "unknown"),
@@ -202,139 +189,34 @@ def _generate_checklist_json(data: SafeMT5Data, tf_data: dict) -> dict[str, Any]
             "open_trade_monitoring": open_trade_monitoring,
         }
 
-    # --- SETUP MODE ---
-    # If no open positions, proceed with the original setup checklist logic.
-    cp = data.get_tick_value("bid", 0.0)
-    setup_status = {}
-    
-    # --- A: Identity & Consistency ---
-    setup_status["A1"] = "ĐỦ" # Assuming 4 images are of the same asset
-    # A2 is now implicitly handled by the mode check above.
-    setup_status["A2"] = "ĐỦ" 
-
-    # --- B: HTF Bias (H1) ---
-    h1_mss = data.get_ict_pattern("mss_h1", {}) or {}
-    h1_pd_info = data.get_ict_pattern("premium_discount_h1", {}) or {}
-    h1_liquidity = (tf_data.get("H1") or {}).get("liquidity", {})
-    h1_fvgs = data.get_ict_pattern("fvgs_h1", []) or []
-    
-    # B1: Bias by BOS/CHoCH
-    h1_bias_signal = h1_mss.get("signal")
-    setup_status["B1"] = "ĐỦ" if h1_bias_signal in ["bullish", "bearish"] else "SAI"
-    
-    # B2: HTF Liquidity Target
-    if h1_bias_signal == "bullish" and h1_liquidity.get("BSL"):
-        setup_status["B2"] = "ĐỦ"
-    elif h1_bias_signal == "bearish" and h1_liquidity.get("SSL"):
-        setup_status["B2"] = "ĐỦ"
-    else:
-        setup_status["B2"] = "CHỜ"
-
-    # B3: Premium/Discount Alignment
-    h1_pd_status = h1_pd_info.get("status")
-    if h1_bias_signal == "bullish" and h1_pd_status == "discount":
-        setup_status["B3"] = "ĐỦ"
-    elif h1_bias_signal == "bearish" and h1_pd_status == "premium":
-        setup_status["B3"] = "ĐỦ"
-    else:
-        setup_status["B3"] = "CHỜ"
-
-    # B4: Displacement Confirmation
-    if h1_bias_signal != "neutral" and h1_mss.get("start_time"):
-        # Check for strong FVG after the market structure shift
-        displacement_fvg_found = False
-        for fvg in h1_fvgs:
-            if fvg["start_time"] > h1_mss["start_time"]:
-                if (h1_bias_signal == "bullish" and fvg["dir"] == "up") or \
-                   (h1_bias_signal == "bearish" and fvg["dir"] == "down"):
-                    displacement_fvg_found = True
-                    break
-        setup_status["B4"] = "ĐỦ" if displacement_fvg_found else "CHỜ"
-    else:
-        setup_status["B4"] = "CHỜ"
-        
-    final_h1_bias = h1_bias_signal if setup_status["B1"] == "ĐỦ" else "sideways"
-
-    # --- C: MTF POI (M15) ---
-    best_poi_info = _find_best_m15_poi(data, tf_data, final_h1_bias)
-    poi_details = best_poi_info["details"]
-    setup_status["C1"] = "ĐỦ" if poi_details["type"] != "None" else "SAI"
-    setup_status["C2"] = "ĐỦ" if best_poi_info["has_confluence"] else "CHỜ"
-    
-    # C3: Price in POI
-    try:
-        if poi_details["type"] != "None":
-            zone_parts = poi_details["price_zone"].split('-')
-            lo, hi = float(zone_parts[0]), float(zone_parts[1])
-            # Price is considered "near" if it's within a small range of the POI
-            if (lo - 0.1 * (hi-lo)) <= cp <= (hi + 0.1 * (hi-lo)):
-                setup_status["C3"] = "ĐỦ"
-            else:
-                setup_status["C3"] = "CHỜ"
-        else:
-            setup_status["C3"] = "SAI"
-    except Exception:
-        setup_status["C3"] = "CHỜ"
-
-    # C4: POI in High-Prob Session
-    killzone_active = data.get("killzone_active")
-    setup_status["C4"] = "ĐỦ" if killzone_active in ["london", "newyork_am"] else "CHỜ"
-
-    # --- D, E, F: Placeholders ---
-    setup_status.update({"D1": "CHỜ", "D2": "CHỜ", "D3": "CHỜ", "D4": "CHỜ"})
-    setup_status.update({"E1": "CHỜ", "E2": "CHỜ", "E3": "CHỜ", "E4": "CHỜ"})
-    
-    # F1, F2 are assumed true for now. F3 depends on news data.
-    setup_status.update({"F1": "ĐỦ", "F2": "ĐỦ"})
-    news_analysis = data.get("news_analysis", {})
-    if news_analysis.get("is_in_news_window"):
-        setup_status["F3"] = "SAI"
-    else:
-        setup_status["F3"] = "ĐỦ"
-
-    # --- D, E: LTF Entry Model ---
-    # Only analyze LTF if the HTF/MTF setup is valid
-    core_conditions_met = all(setup_status.get(k) == "ĐỦ" for k in ["A1", "A2", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4", "F3"])
-    
-    # Keep default LTF statuses as CHỜ
-    setup_status.update({"D1": "CHỜ", "D2": "CHỜ", "D3": "CHỜ", "D4": "CHỜ"})
-    setup_status.update({"E1": "CHỜ", "E2": "CHỜ", "E3": "CHỜ", "E4": "CHỜ"})
-
-    if core_conditions_met:
-        # If core conditions are met, check for LTF confirmation on M5
-        m5_mss = data.get_ict_pattern("mss_m5", {}) or {}
-        m5_mss_type = m5_mss.get("type")
-
-        # D2: LTF CHoCH/BOS
-        if (final_h1_bias == "Bullish" and m5_mss_type == "Bullish") or \
-           (final_h1_bias == "Bearish" and m5_mss_type == "Bearish"):
-            setup_status["D2"] = "ĐỦ"
-        elif m5_mss_type: # If there is an MSS but it's against the bias
-            setup_status["D2"] = "SAI"
-        else: # No MSS found yet
-            setup_status["D2"] = "CHỜ"
-
-
-    # --- Dynamic Conclusion ---
-    conclusions, missing_conditions = _get_conclusion_from_status(setup_status)
-
-    # --- Final Assembly ---
-    checklist = {
-        "cycle": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    # --- SETUP MODE (TEMPLATE ONLY) ---
+    # Returns a blank checklist structure for the AI to fill.
+    checklist_template = {
+        "cycle": "[ĐIỀN THỜI GIAN HIỆN TẠI, ví dụ: 2025-09-18 18:00]",
         "symbol": data.get("symbol", "unknown"),
         "mode": "setup",
-        "bias_H1": final_h1_bias,
-        "poi_M15": poi_details,
-        "setup_status": setup_status,
-        "conclusions": conclusions,
-        "missing_conditions": missing_conditions,
-        "proposed_plan": {
-            "direction": data.get_plan_value("direction", "null"),
-            "entry": data.get_plan_value("entry"), "sl": data.get_plan_value("sl"),
-            "tp1": data.get_plan_value("tp1"), "tp2": data.get_plan_value("tp2")
+        "bias_H1": "[KẾT LUẬN TỪ B1, ví dụ: Bullish/Bearish/Sideways]",
+        "poi_M15": {
+            "type": "[LOẠI POI TỪ C1, ví dụ: FVG/OB]",
+            "price_zone": "[VÙNG GIÁ POI TỪ C1]"
+        },
+        "setup_status": {
+            "A1": "[ĐỦ/CHỜ/SAI]", "A2": "[ĐỦ/CHỜ/SAI]",
+            "B1": "[ĐỦ/CHỜ/SAI]", "B2": "[ĐỦ/CHỜ/SAI]", "B3": "[ĐỦ/CHỜ/SAI]", "B4": "[ĐỦ/CHỜ/SAI]",
+            "C1": "[ĐỦ/CHỜ/SAI]", "C2": "[ĐỦ/CHỜ/SAI]", "C3": "[ĐỦ/CHỜ/SAI]", "C4": "[ĐỦ/CHỜ/SAI]",
+            "D1": "[ĐỦ/CHỜ/SAI]", "D2": "[ĐỦ/CHỜ/SAI]", "D3": "[ĐỦ/CHỜ/SAI]", "D4": "[ĐỦ/CHỜ/SAI]",
+            "E1": "[ĐỦ/CHỜ/SAI]", "E2": "[ĐỦ/CHỜ/SAI]", "E3": "[ĐỦ/CHỜ/SAI]", "E4": "[ĐỦ/CHỜ/SAI]",
+            "F1": "[ĐỦ/CHỜ/SAI]", "F2": "[ĐỦ/CHỜ/SAI]", "F3": "[ĐỦ/CHỜ/SAI]"
+        },
+        "conclusions": "[KẾT LUẬN TỔNG THỂ, ví dụ: ĐỦ/CHƯA ĐỦ/SAI]",
+        "missing_conditions": [ "[LIỆT KÊ CÁC ĐIỀU KIỆN CÒN 'CHỜ']" ],
+        "reasoning": {
+            "B1": "Lý do cho quyết định B1...",
+            "B2": "Lý do cho quyết định B2...",
+            "...": "..."
         }
     }
-    return checklist
+    return checklist_template
 
 def _is_poi_fresh(poi_zone: dict, series_after: list) -> bool:
     """Checks if a POI has been touched by subsequent price action."""
@@ -446,32 +328,21 @@ def _analyze_ltf_entry_model(data: dict, h1_bias: str) -> dict:
     # This function will be fully implemented later. For now, it returns placeholders.
     return ltf_status
 
-def _get_conclusion_from_status(setup_status: dict) -> tuple[str, list[str]]:
-    """Generates conclusion and missing conditions from the setup status dict."""
-    condition_map = {
-        "A1": "Asset/TF Identity", "A2": "No Open Trade",
-        "B1": "H1 Bias by Structure", "B2": "HTF Liquidity Target", "B3": "P/D Alignment", "B4": "Displacement Confirmation",
-        "C1": "Valid M15 POI", "C2": "POI Confluence", "C3": "Price in/near POI", "C4": "POI in High-Prob Session",
-        "D1": "LTF Inducement/Sweep", "D2": "LTF CHoCH/BOS", "D3": "LTF Displacement", "D4": "Refined Entry Zone",
-        "E1": "M1 Trigger Shift", "E2": "Pullback to M1 Zone", "E3": "Valid SL/TP", "E4": "RR >= 1:2",
-        "F1": "Trade Management Plan", "F2": "No H1 Invalidation", "F3": "News/Session Check"
-    }
+def parse_ai_response(text: str) -> dict:
+    """
+    Parses the AI's full response text to find and extract the completed
+    CHECKLIST_JSON or MANAGEMENT_JSON object.
+    """
+    # Find the first occurrence of a JSON object in the text
+    match = re.search(r"\{[\s\S]*?\}", text)
+    if not match:
+        return {"error": "No JSON object found in the AI response."}
     
-    if any(v == "SAI" for v in setup_status.values()):
-        conclusion = "SAI"
-        missing = [f"{condition_map.get(k)} is invalid" for k, v in setup_status.items() if v == "SAI"]
-        return conclusion, missing
-
-    # Check core conditions for a valid, high-probability setup before LTF entry
-    core_conditions = ["A1", "A2", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4", "F3"]
-    if all(setup_status.get(k) == "ĐỦ" for k in core_conditions):
-        conclusion = "ĐỦ" # Sufficient for high-level setup, pending M1 trigger
-        missing = [f"Waiting for {condition_map.get(k)}" for k, v in setup_status.items() if v == "CHỜ" and k.startswith(('D', 'E'))]
-    else:
-        conclusion = "CHƯA ĐỦ"
-        missing = [f"Waiting for {condition_map.get(k)}" for k, v in setup_status.items() if v == "CHỜ"]
-        
-    return conclusion, missing
+    json_str = match.group(0)
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        return {"error": "Failed to decode the JSON object from the AI response."}
 
 
 def parse_mt5_data_to_report(mt5_data: SafeMT5Data) -> str:

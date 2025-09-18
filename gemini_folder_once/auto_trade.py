@@ -12,6 +12,7 @@ except Exception:  # pragma: no cover - optional dependency
 from .config import RunConfig
 from . import mt5_utils
 from . import no_trade
+from . import report_parser
 
 
 def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConfig):
@@ -60,13 +61,33 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
         # Fail-open: if evaluate crashes, proceed without blocking
         pass
 
-    setup = app._parse_setup_from_report(combined_text)
+    # --- MODIFIED: Prioritize parsing structured JSON from AI response ---
+    setup = {}
+    bias = ""
+    try:
+        ai_json = report_parser.parse_ai_response(combined_text)
+        if ai_json and not ai_json.get("error"):
+            # Check for a clear "ĐỦ" conclusion from the AI's checklist
+            if ai_json.get("conclusions") == "ĐỦ":
+                setup = ai_json.get("proposed_plan", {})
+                bias = str(ai_json.get("bias_H1") or "").lower()
+                app.ui_status("Auto-Trade: Dùng setup từ Vision JSON.")
+    except Exception:
+        pass # Fallback to text parsing if JSON fails
+
+    # Fallback to parsing the 7-line text summary if JSON parsing fails or is inconclusive
+    if not setup:
+        app.ui_status("Auto-Trade: Vision JSON không kết luận, dùng text parsing.")
+        setup = app._parse_setup_from_report(combined_text)
+        # Bias is not available in the simple text parse, this is a limitation of the old method
+        bias = "" 
+
     direction = setup.get("direction")
     entry = setup.get("entry")
     sl = setup.get("sl")
     tp1 = setup.get("tp1")
     tp2 = setup.get("tp2")
-    bias = str(setup.get("bias_h1") or "").lower()
+    # Bias is now handled by the new JSON parsing logic above
 
     # Resolve MT5 context variables
     try:

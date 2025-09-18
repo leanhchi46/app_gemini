@@ -245,17 +245,24 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt_no_entry: str, prompt
         mt5_json_full = json.dumps({"MT5_DATA": mt5_dict}, ensure_ascii=False) if mt5_dict else ""
         
         # --- Dynamic Prompt Selection (inside worker) ---
+        # MODIFIED: Load Vision-based prompts directly.
         prompt = ""
-        if cfg.mt5_enabled and safe_mt5_data and safe_mt5_data.raw:
-            if safe_mt5_data.raw.get("positions"):
-                prompt = prompt_entry_run
-                app.ui_status("Worker: Phát hiện lệnh đang mở, dùng prompt Quản Lý Lệnh.")
+        try:
+            if cfg.mt5_enabled and safe_mt5_data and safe_mt5_data.raw and safe_mt5_data.raw.get("positions"):
+                prompt_path = APP_DIR / "prompt_entry_run_vision.txt"
+                prompt = prompt_path.read_text(encoding="utf-8")
+                app.ui_status("Worker: Lệnh đang mở, dùng prompt Vision Quản Lý Lệnh.")
             else:
+                prompt_path = APP_DIR / "prompt_no_entry_vision.txt"
+                prompt = prompt_path.read_text(encoding="utf-8")
+                app.ui_status("Worker: Không có lệnh mở, dùng prompt Vision Tìm Lệnh Mới.")
+        except Exception as e:
+             app.ui_status(f"Lỗi đọc prompt: {e}")
+             # Fallback to old prompts if new ones fail
+             if cfg.mt5_enabled and safe_mt5_data and safe_mt5_data.raw.get("positions"):
+                prompt = prompt_entry_run
+             else:
                 prompt = prompt_no_entry
-                app.ui_status("Worker: Không có lệnh mở, dùng prompt Tìm Lệnh Mới.")
-        else:
-            # Fallback if MT5 is disabled or data is unavailable
-            prompt = prompt_no_entry
         # --- End Dynamic Prompt Selection ---
         
         # --- Inject News Analysis into MT5_DATA ---
@@ -345,24 +352,40 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt_no_entry: str, prompt
                 parts_text.append(tf_section)
                 parts_text.append("\n\n")
             parts_text.append(prompt)
-            if context_block:
-                parts_text.append("\n\n")
-                parts_text.append(context_block)
-            
             # --- Integration of report_parser ---
-            # Instead of appending the raw MT5 JSON, we now parse it 
-            # and generate the structured report.
+            # MODIFIED: Generate structured data and inject it into the Vision prompt
             if mt5_dict:
                 # The mt5_dict is already parsed from mt5_json_full earlier
                 structured_report = report_parser.parse_mt5_data_to_report(safe_mt5_data)
-                parts_text.append("\n\n### PHÂN TÍCH TỰ ĐỘNG (máy-đọc-được)\n")
-                parts_text.append(structured_report)
-            elif mt5_json_full:
-                # Fallback to old method if parsing failed for some reason
-                parts_text.append("\n\n[PHỤ LỤC_MT5_JSON]\n")
-                parts_text.append(mt5_json_full)
-            
-            prompt_final = "".join(parts_text)
+                # Inject the generated data tables into the prompt template
+                prompt = prompt.replace(
+                    "[Dữ liệu từ `CONCEPT_VALUE_TABLE` và `EXTRACT_JSON` sẽ được chèn vào đây]",
+                    "DỮ LIỆU SỐ THAM KHẢO:\n" + structured_report
+                )
+                # Inject the historical context block if it exists
+                if context_block:
+                    prompt = prompt.replace(
+                        "[Dữ liệu từ `CONTEXT_COMPOSED` sẽ được chèn vào đây]",
+                        "DỮ LIỆU LỊCH SỬ (VÒNG TRƯỚC):\n" + context_block
+                    )
+                else:
+                    # Remove the placeholder if there is no historical context
+                    prompt = prompt.replace(
+                        "**DỮ LIỆU LỊCH SỬ (NẾU CÓ):**\n[Dữ liệu từ `CONTEXT_COMPOSED` sẽ được chèn vào đây]",
+                        ""
+                    )
+                
+                # Clear parts_text and add the fully constructed prompt
+                parts_text = [prompt]
+            else:
+                 # Fallback if MT5 data is missing
+                parts_text.append(prompt)
+                if mt5_json_full:
+                    parts_text.append("\n\n[PHỤ LỤC_MT5_JSON]\n")
+                    parts_text.append(mt5_json_full)
+
+            # Remove any duplicate prompts that might have been added before
+            prompt_final = "".join(list(dict.fromkeys(parts_text)))
 
             t_llm0 = _tnow()
             parts = all_media + [prompt_final]

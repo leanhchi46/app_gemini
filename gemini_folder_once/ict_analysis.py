@@ -212,47 +212,82 @@ def analyze_premium_discount(rates: Sequence[dict], current_price: float, lookba
 
 def find_market_structure_shift(rates: Sequence[dict], swing_highs: list, swing_lows: list) -> dict | None:
     """
-    Detects the most recent Market Structure Shift (MSS) or Break of Structure (BOS).
-    Finds the most recent swing high/low and checks for a body close beyond it.
+    Advanced MSS detection that identifies a sequence of major swings to determine
+    trend and differentiates between BOS and CHoCH.
     """
-    if not rates or len(rates) < 5 or (not swing_highs and not swing_lows):
+    if not rates or len(rates) < 20:
         return None
 
-    # The lists are sorted by price, so we re-sort by bar_index to find the most recent temporal swing point
-    latest_swing_high = sorted(swing_highs, key=lambda x: x['bar_index'], reverse=True)[0] if swing_highs else None
-    latest_swing_low = sorted(swing_lows, key=lambda x: x['bar_index'], reverse=True)[0] if swing_lows else None
+    # Combine and sort all swings by index
+    all_swings = sorted(swing_highs + swing_lows, key=lambda x: x['bar_index'])
+    
+    if len(all_swings) < 4: # Need at least two highs and two lows for a trend
+        return None
+
+    # 1. Identify the sequence of the last 4 major swings to determine trend
+    last_four_swings = all_swings[-4:]
+    
+    # Identify last two highs and lows from the last four swings
+    last_highs = [s for s in last_four_swings if s['price'] in [h['price'] for h in swing_highs]]
+    last_lows = [s for s in last_four_swings if s['price'] in [l['price'] for l in swing_lows]]
+
+    if len(last_highs) < 2 or len(last_lows) < 2:
+        return None # Not enough swings to determine trend reliably
+
+    recent_high = max(last_highs, key=lambda x: x['bar_index'])
+    p_high = min(last_highs, key=lambda x: x['bar_index'])
+    recent_low = max(last_lows, key=lambda x: x['bar_index'])
+    p_low = min(last_lows, key=lambda x: x['bar_index'])
+
+    # 2. Determine trend based on the last two highs and lows
+    trend = "Undetermined"
+    # Bullish: Higher High and Higher Low
+    if recent_high['price'] > p_high['price'] and recent_low['price'] > p_low['price']:
+        trend = "Bullish"
+    # Bearish: Lower High and Lower Low
+    elif recent_high['price'] < p_high['price'] and recent_low['price'] < p_low['price']:
+        trend = "Bearish"
 
     mss = None
-
-    # Check for bearish MSS (breaking the latest swing low)
-    if latest_swing_low:
-        start_index = latest_swing_low['bar_index'] + 1
-        # Ensure we don't look past the end of the main rates array
-        if start_index < len(rates):
-            for i in range(start_index, len(rates)):
-                if rates[i]['close'] < latest_swing_low['price']:
-                    mss = {
-                        "type": "Bearish",
-                        "price_level": latest_swing_low['price'],
-                        "break_bar_index": i,
-                    }
-                    break # Found the first break
-
-    # Check for bullish MSS (breaking the latest swing high)
-    if latest_swing_high:
-        start_index = latest_swing_high['bar_index'] + 1
-        if start_index < len(rates):
-            for i in range(start_index, len(rates)):
-                if rates[i]['close'] > latest_swing_high['price']:
-                    # If a bearish MSS was found, only overwrite if this one is more recent
-                    if mss is None or i > mss.get('break_bar_index', -1):
-                         mss = {
-                            "type": "Bullish",
-                            "price_level": latest_swing_high['price'],
-                            "break_bar_index": i,
-                        }
-                    break # Found the first break
     
+    # 3. Scan from the last major swing onwards for a break
+    scan_start_index = min(recent_high['bar_index'], recent_low['bar_index']) + 1
+    if scan_start_index >= len(rates):
+        return None
+
+    for i in range(scan_start_index, len(rates)):
+        current_close = rates[i]['close']
+        
+        # In a bullish trend, a break of the recent_high is a BOS
+        # A break of the recent_low is a CHoCH
+        if trend == "Bullish":
+            if current_close > recent_high['price']:
+                mss = {"type": "Bullish", "event": "BOS", "price_level": recent_high['price'], "break_bar_index": i}
+                break
+            if current_close < recent_low['price']:
+                mss = {"type": "Bearish", "event": "CHoCH", "price_level": recent_low['price'], "break_bar_index": i}
+                break # CHoCH has priority
+
+        # In a bearish trend, a break of the recent_low is a BOS
+        # A break of the recent_high is a CHoCH
+        elif trend == "Bearish":
+            if current_close < recent_low['price']:
+                mss = {"type": "Bearish", "event": "BOS", "price_level": recent_low['price'], "break_bar_index": i}
+                break
+            if current_close > recent_high['price']:
+                mss = {"type": "Bullish", "event": "CHoCH", "price_level": recent_high['price'], "break_bar_index": i}
+                break # CHoCH has priority
+        
+        # If trend is undetermined, just look for break of most recent swing
+        elif i == scan_start_index: # Only check once
+            latest_swing = max(recent_high, recent_low, key=lambda x: x['bar_index'])
+            if latest_swing['price'] == recent_high['price'] and current_close > latest_swing['price']:
+                 mss = {"type": "Bullish", "event": "BOS", "price_level": latest_swing['price'], "break_bar_index": i}
+                 break
+            elif latest_swing['price'] == recent_low['price'] and current_close < latest_swing['price']:
+                 mss = {"type": "Bearish", "event": "BOS", "price_level": latest_swing['price'], "break_bar_index": i}
+                 break
+
     return mss
 
 

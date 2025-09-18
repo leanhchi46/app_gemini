@@ -67,8 +67,12 @@ class UploadCache:
 
 
 def prepare_image(path: str, *, optimize: bool, app_dir: Path = APP_DIR) -> str:
-    """Optionally convert the image to an optimized PNG copy, else return original path.
-    If optimization produces a larger file, keeps the original.
+    """
+    Optionally convert the image to an optimized JPEG copy, else return the original path.
+    - Resizes to a max width of 1600px.
+    - Converts to JPEG at 85% quality.
+    - Fills transparent backgrounds with white.
+    - If optimization produces a larger file, keeps the original.
     """
     if not optimize or Image is None:
         return path
@@ -76,23 +80,36 @@ def prepare_image(path: str, *, optimize: bool, app_dir: Path = APP_DIR) -> str:
         src = Path(path)
         tmpdir = app_dir / "tmp_upload"
         tmpdir.mkdir(parents=True, exist_ok=True)
-        out = tmpdir / (src.stem + "_opt.png")
+        # Output as JPEG
+        out = tmpdir / (src.stem + "_opt.jpg")
 
-        with Image.open(src) as im:  # type: ignore[attr-defined]
+        with Image.open(src) as im:
             im.load()
-            has_alpha = (im.mode in ("RGBA", "LA")) or ("transparency" in im.info)
-            work = im.convert("RGBA") if has_alpha else im.convert("RGB")
-        work.save(out, format="PNG", optimize=True)  # type: ignore[attr-defined]
-        work.close()  # type: ignore[union-attr]
 
-        try:
-            if out.stat().st_size >= src.stat().st_size:
-                try:
-                    out.unlink()
-                except Exception:
-                    pass
-                return str(src)
-        except Exception:
+            # Resize if wider than 1600px
+            max_width = 1600
+            if im.width > max_width:
+                aspect_ratio = im.height / im.width
+                new_height = int(max_width * aspect_ratio)
+                work = im.resize((max_width, new_height), Image.Resampling.LANCZOS)
+            else:
+                work = im.copy()
+
+            # Handle transparency by pasting onto a white background
+            if work.mode in ("RGBA", "LA") or "transparency" in work.info:
+                background = Image.new("RGB", work.size, (255, 255, 255))
+                background.paste(work, (0, 0), work)
+                work.close()
+                work = background
+            elif work.mode != "RGB":
+                work = work.convert("RGB")
+
+            # Save as JPEG with specified quality
+            work.save(out, format="JPEG", quality=85, optimize=True)
+            work.close()
+
+        # Keep original if the optimized version is larger
+        if out.stat().st_size >= src.stat().st_size:
             try:
                 out.unlink()
             except Exception:
@@ -101,6 +118,7 @@ def prepare_image(path: str, *, optimize: bool, app_dir: Path = APP_DIR) -> str:
 
         return str(out)
     except Exception:
+        # Fallback to original path on any error
         return path
 
 
@@ -149,4 +167,3 @@ def upload_one_file_for_worker(item) -> Tuple[str, object]:
         retries -= 1
         delay = min(delay * 1.5, 3.0)
     return (p, uf)
-
