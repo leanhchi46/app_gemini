@@ -83,7 +83,8 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
         if len(combined_text) < 200:
             return False
         app.ui_status("Auto-Trade: Vision JSON không kết luận, dùng text parsing.")
-        setup = app._parse_setup_from_report(combined_text)
+        # MODIFICATION: Call the method from the report_parser module
+        setup = report_parser.parse_setup_from_report(combined_text)
         # Bias is not available in the simple text parse, this is a limitation of the old method
         bias = ""
 

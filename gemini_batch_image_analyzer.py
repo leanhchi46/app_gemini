@@ -1599,138 +1599,6 @@ class GeminiFolderOnceApp:
         """
         return report_parser.parse_direction_from_line1(line1)
 
-    def _parse_setup_from_report(self, text: str):
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số:
-          - text: str — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        return report_parser.parse_setup_from_report(text)
-        out = {
-            "direction": None, "entry": None, "sl": None, "tp1": None, "tp2": None,
-            "bias_h1": None, "enough": False
-        }
-        if not text:
-            return out
-
-        obj = None
-        if hasattr(self, "_extract_json_block_prefer"):
-            obj = self._extract_json_block_prefer(text)
-
-        if obj is None:
-            for m in re.finditer(r"\{[\s\S]*?\}", text):
-                try:
-                    obj = json.loads(m.group(0)); break
-                except Exception:
-                    pass
-
-        def _num(x):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - x — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            if x is None: return None
-            if isinstance(x, (int, float)) and math.isfinite(x): return float(x)
-            if isinstance(x, str):
-                xs = x.strip().replace(",", "")
-                try: return float(xs)
-                except Exception: return None
-            return None
-
-        def _dir(x):
-            """
-            Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-            Tham số:
-              - x — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            if not x: return None
-            s = str(x).strip().lower()
-            if s in ("long","buy","mua","bull","bullish"): return "long"
-            if s in ("short","sell","bán","ban","bear","bearish"): return "short"
-            return None
-
-        def _pick_from_json(root):
-            """
-            Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
-            Tham số:
-              - root — (tự suy luận theo ngữ cảnh sử dụng).
-            Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-            Ghi chú:
-              - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-            """
-            if not isinstance(root, dict): return None
-
-            chk = root.get("CHECKLIST_JSON") or root.get("checklist") or root
-            if isinstance(chk, dict) and ("setup_status" in chk or "conclusions" in chk):
-                out["bias_h1"] = (chk.get("bias_H1") or chk.get("bias_h1") or "").lower() or out["bias_h1"]
-                concl = (chk.get("conclusions") or "").upper()
-                out["enough"] = out["enough"] or ("ĐỦ" in concl or "DU" in concl)
-
-            cands = []
-            for k in ("proposed_plan","plan","trade","signal","setup"):
-                if isinstance(root.get(k), dict):
-                    cands.append(root[k])
-
-            for v in root.values():
-                if isinstance(v, dict):
-                    for k in ("proposed_plan","plan","trade","signal","setup"):
-                        if isinstance(v.get(k), dict):
-                            cands.append(v[k])
-            for c in cands:
-                d = {
-                    "direction": _dir(c.get("direction") or c.get("dir") or c.get("side")),
-                    "entry": _num(c.get("entry") or c.get("price") or c.get("ep")),
-                    "sl":    _num(c.get("sl")    or c.get("stop")  or c.get("stop_loss")),
-                    "tp1":   _num(c.get("tp1")   or c.get("tp_1")  or c.get("take_profit_1") or c.get("tp")),
-                    "tp2":   _num(c.get("tp2")   or c.get("tp_2")  or c.get("take_profit_2")),
-                }
-                if d["tp1"] is None and d["tp2"] is not None:
-                    d["tp1"] = d["tp2"]
-                if d["direction"] in ("long","short") and all(d[k] is not None for k in ("entry","sl","tp1")):
-                    return d
-            return None
-
-        plan = _pick_from_json(obj) if obj else None
-        if plan:
-            out.update(plan)
-            return out
-
-        lines_sig = None
-        try:
-            lines, lines_sig, _ = self._extract_seven_lines(text)
-        except Exception:
-            lines = None
-        if lines:
-            out["direction"] = self._parse_direction_from_line1(lines[0])
-
-            def _lastnum(s):
-                """
-                Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-                Tham số:
-                  - s — (tự suy luận theo ngữ cảnh sử dụng).
-                Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-                Ghi chú:
-                  - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-                """
-                if not s: return None
-                s = re.sub(r"^\s*\d+\s*[\.\)\-–:]\s*", "", s.strip())
-                nums = re.findall(r"[-+]?\d+(?:\.\d+)?", s.replace(",", ""))
-                return float(nums[-1]) if nums else None
-            out["entry"] = _lastnum(lines[1] if len(lines)>1 else None)
-            out["sl"]    = _lastnum(lines[2] if len(lines)>2 else None)
-            out["tp1"]   = _lastnum(lines[3] if len(lines)>3 else None)
-            out["tp2"]   = _lastnum(lines[4] if len(lines)>4 else None)
-        return out
 
     def _order_send_safe(self, req, retry=2):
         """
@@ -2153,8 +2021,24 @@ class GeminiFolderOnceApp:
         """
         self.ui_queue.put(func)
 
-    def ui_status(self, text: str):
+    def _log_status(self, text: str):
+        """Logs a status message to the trade log file in a background thread."""
+        def _do_log():
+            try:
+                folder_override = self.mt5_symbol_var.get().strip() or None
+                self._log_trade_decision({
+                    "stage": "status_update",
+                    "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "message": text
+                }, folder_override=folder_override)
+            except Exception:
+                # Fail silently to not disrupt the main application flow
+                pass
+        
+        # Run logging in a separate thread to avoid blocking the caller
+        threading.Thread(target=_do_log, daemon=True).start()
 
+    def ui_status(self, text: str):
         """
         Mục đích: Cập nhật UI theo cơ chế thread-safe (hàng đợi, status, progress, khu vực chi tiết).
         Tham số:
@@ -2164,6 +2048,8 @@ class GeminiFolderOnceApp:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
         self._enqueue(lambda: self.status_var.set(text))
+        # Also log the status message
+        self._log_status(text)
 
     def ui_detail_replace(self, text: str):
         """
@@ -2177,7 +2063,8 @@ class GeminiFolderOnceApp:
         self._enqueue(lambda: (
             self.detail_text.config(state="normal"),
             self.detail_text.delete("1.0", "end"),
-            self.detail_text.insert("1.0", text)
+            self.detail_text.insert("1.0", text),
+            self.detail_text.see("end")  # MODIFICATION: Auto-scroll to the end
         ))
 
     def ui_message(self, kind: str, title: str, text: str, auto_close_ms: int = 60000, log: bool = True):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Any, Optional
+from datetime import datetime
 
 class SafeMT5Data:
     """
@@ -57,3 +58,29 @@ class SafeMT5Data:
     def get_plan_value(self, key: str, default: Any = None) -> Any:
         """Safely gets a value from the 'plan' dictionary."""
         return (self._data.get("plan") or {}).get(key, default)
+
+    def get_active_session(self) -> Optional[str]:
+        """Determines the currently active trading session."""
+        sessions = self._data.get("sessions_today", {})
+        if not sessions:
+            return None
+        
+        now_hhmm = datetime.now().strftime("%H:%M")
+        
+        for session_name, details in sessions.items():
+            start = details.get("start")
+            end = details.get("end")
+            if start and end and start <= now_hhmm < end:
+                return session_name
+        return None
+
+    def get_atr_pips(self, timeframe: str, default: float = 0.0) -> float:
+        """Safely gets the ATR for a timeframe and converts it to pips."""
+        try:
+            atr_val = (self._data.get("volatility", {}).get("ATR", {}) or {}).get(timeframe)
+            pip_size = self.get_pip_value("size")
+            if atr_val is not None and pip_size is not None and pip_size > 0:
+                return atr_val / pip_size
+        except (TypeError, ValueError):
+            pass
+        return default

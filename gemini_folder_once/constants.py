@@ -2,7 +2,7 @@ from pathlib import Path
 
 # Supported image extensions and default model name
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".tif"}
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-1.5-flash"
 
 # App directory and common files
 APP_DIR = Path.home() / ".gemini_folder_analyze"

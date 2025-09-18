@@ -1,451 +1,294 @@
 from __future__ import annotations
-import re
-import json
+
 import hashlib
-from typing import Any
-from .safe_data import SafeMT5Data
+import json
+import re
+import math
+from typing import Any, Tuple
 
-def _generate_extract_json(data: SafeMT5Data) -> dict[str, Any]:
-    """Helper to build the EXTRACT_JSON part of the report."""
-    extract_dict = {
-        "tf": {},
-        "comparisons": [],  # This will be populated below
-        "risk_reward": {},
-        "tolerance": {"method": "mt5", "value": "~0%"},  # Placeholder
-        "conclusion": "CHƯA ĐỦ",  # Placeholder
-        "missing": []  # Placeholder
-    }
 
-    # Populate timeframe data from the 'ict_patterns' and 'levels' keys
-    cp = data.get_tick_value("bid") or data.get_tick_value("last") or 0.0
-    ict_patterns = data.get("ict_patterns", {}) # Safely get the entire ict_patterns dictionary
+def find_balanced_json_after(text: str, start_idx: int) -> Tuple[str | None, int | None]:
+    depth, i = 0, start_idx
+    while i < len(text):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start_idx:i+1], i+1
+        i += 1
+    return None, None
 
-    # Process all available timeframes (H1, M15, M5, M1)
-    for tf_str, tf_key in [("H1", "h1"), ("M15", "m15"), ("M5", "m5"), ("M1", "m1")]:
-        liquidity_data = ict_patterns.get(f"liquidity_{tf_key}", {})
-        bsl = liquidity_data.get("swing_highs_BSL", [])
-        ssl = liquidity_data.get("swing_lows_SSL", [])
-        
-        swing_h = bsl[0]['price'] if bsl else None
-        swing_l = ssl[0]['price'] if ssl else None
 
-        extract_dict["tf"][tf_str] = {
-            "current_price": cp,
-            "bias": "unknown",  # This will be updated later
-            "swing": {"H": swing_h, "L": swing_l},
-            "premium_discount": ict_patterns.get(f"premium_discount_{tf_key}", {}),
-            "liquidity": {
-                "BSL": [p['price'] for p in bsl],
-                "SSL": [p['price'] for p in ssl],
-                "EQH": [],  # Not directly available, needs logic
-                "EQL": [],  # Not directly available, needs logic
-            },
-            "OB": ict_patterns.get(f"order_blocks_{tf_key}", []),
-            "FVG": ict_patterns.get(f"fvgs_{tf_key}", []),
-            "BPR": []  # Not available in mt5_utils
+def extract_json_block_prefer(text: str) -> dict | None:
+    fence = re.findall(r"```json\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
+    for blob in fence:
+        try:
+            return json.loads(blob)
+        except Exception:
+            pass
+
+    keywords = ["CHECKLIST_JSON", "MANAGEMENT_JSON", "EXTRACT_JSON", "setup", "trade", "signal"]
+    lowered = text.lower()
+    for kw in keywords:
+        idx = lowered.find(kw.lower())
+        if idx >= 0:
+            brace = text.find("{", idx)
+            if brace >= 0:
+                js, _ = find_balanced_json_after(text, brace)
+                if js:
+                    try:
+                        return json.loads(js)
+                    except Exception:
+                        pass
+
+    first_brace = text.find("{")
+    while first_brace >= 0:
+        js, nxt = find_balanced_json_after(text, first_brace)
+        if js:
+            try:
+                return json.loads(js)
+            except Exception:
+                pass
+            first_brace = text.find("{", nxt if nxt else first_brace + 1)
+        else:
+            break
+    return None
+
+
+def coerce_setup_from_json(obj: Any) -> dict | None:
+    if obj is None:
+        return None
+
+    candidates = []
+    if isinstance(obj, dict):
+        candidates.append(obj)
+        for k in ("CHECKLIST_JSON", "EXTRACT_JSON", "setup", "trade", "signal", "proposed_plan"):
+            v = obj.get(k)
+            if isinstance(v, dict):
+                candidates.append(v)
+
+    def _num(x):
+        if x is None: return None
+        if isinstance(x, (int, float)) and math.isfinite(x): return float(x)
+        if isinstance(x, str):
+            xs = x.strip().replace(",", "")
+            try: return float(xs)
+            except Exception: return None
+        return None
+
+    def _dir(x):
+        if not x: return None
+        s = str(x).strip().lower()
+        if s in ("long", "buy", "mua", "bull", "bullish"): return "long"
+        if s in ("short", "sell", "bán", "ban", "bear", "bearish"): return "short"
+        return None
+
+    for c in candidates:
+        d = {
+            "direction": _dir(c.get("direction") or c.get("dir") or c.get("side")),
+            "entry": _num(c.get("entry") or c.get("price") or c.get("ep")),
+            "sl":    _num(c.get("sl")    or c.get("stop")  or c.get("stop_loss")),
+            "tp1":   _num(c.get("tp1")   or c.get("tp_1")  or c.get("take_profit_1") or c.get("tp")),
+            "tp2":   _num(c.get("tp2")   or c.get("tp_2")  or c.get("take_profit_2")),
         }
+        if d["tp1"] is None and d["tp2"] is not None:
+            d["tp1"] = d["tp2"]
+        if d["direction"] in ("long","short") and all(d[k] is not None for k in ("entry","sl","tp1")):
+            return d
+    return None
 
-    # Populate risk_reward from 'rr_projection'
-    extract_dict["risk_reward"] = {
-        "entry": data.get_plan_value("entry"),
-        "sl": data.get_plan_value("sl"),
-        "tp1": data.get_plan_value("tp1"),
-        "tp2": data.get_plan_value("tp2"),
-        "rr_tp1": data.get_rr_projection("tp1_rr")
-    }
 
-    # --- Inter-timeframe Comparisons ---
+def parse_float(s: str | None) -> float | None:
+    if not s:
+        return None
+    s = re.sub(r"^\s*\d+\s*[\.\)\-–:]\s*", "", s.strip())
+    nums = re.findall(r"[-+]?\d+(?:\.\d+)?", s.replace(",", ""))
+    return float(nums[-1]) if nums else None
+
+
+def parse_direction_from_line1(line1: str | None) -> str | None:
+    if not line1:
+        return None
+    s = line1.lower()
+    if "long" in s or "buy" in s or "mua" in s:
+        return "long"
+    if "short" in s or "sell" in s or "bán" in s:
+        return "short"
+    return None
+
+
+def extract_seven_lines(text: str) -> Tuple[list[str] | None, str | None, bool]:
+    if not text:
+        return None, None, False
+    
+    lines = [ln.strip() for ln in text.splitlines()]
+    
+    # Find the start of the 7-line summary
+    start_idx = -1
+    for i, ln in enumerate(lines):
+        # Match patterns like "1. Lệnh:", "1) Lệnh", "Lệnh:"
+        if re.match(r"^\s*(?:1\s*[\.\)]\s*)?Lệnh\s*:", ln, re.IGNORECASE):
+            start_idx = i
+            break
+            
+    if start_idx == -1:
+        return None, None, False
+        
+    # Extract the 7 lines
+    seven_lines = lines[start_idx : start_idx + 7]
+    if len(seven_lines) < 7:
+        return None, None, False # Not a full block
+
+    # Create a signature from the core trade parameters
     try:
-        h1_fvgs = extract_dict["tf"].get("H1", {}).get("FVG", [])
-        h1_obs = extract_dict["tf"].get("H1", {}).get("OB", [])
-        m15_fvgs = extract_dict["tf"].get("M15", {}).get("FVG", [])
-        m15_obs = extract_dict["tf"].get("M15", {}).get("OB", [])
-
-        def is_inside(inner_zone, outer_zone):
-            return outer_zone["lo"] <= inner_zone["lo"] and inner_zone["hi"] <= outer_zone["hi"]
-
-        # Check if M15 OBs are inside H1 structures
-        for m15_ob in m15_obs:
-            for h1_fvg in h1_fvgs:
-                if is_inside(m15_ob, h1_fvg):
-                    extract_dict["comparisons"].append({
-                        "tf": "M15", "concept": "OB", "zone": f"{m15_ob['lo']}-{m15_ob['hi']}",
-                        "relation": "INSIDE_H1_FVG", "distance": 0
-                    })
-            for h1_ob in h1_obs:
-                if is_inside(m15_ob, h1_ob):
-                     extract_dict["comparisons"].append({
-                        "tf": "M15", "concept": "OB", "zone": f"{m15_ob['lo']}-{m15_ob['hi']}",
-                        "relation": "INSIDE_H1_OB", "distance": 0
-                    })
-
-        # Check if M15 FVGs are inside H1 structures
-        for m15_fvg in m15_fvgs:
-            for h1_fvg in h1_fvgs:
-                if is_inside(m15_fvg, h1_fvg):
-                    extract_dict["comparisons"].append({
-                        "tf": "M15", "concept": "FVG", "zone": f"{m15_fvg['lo']}-{m15_fvg['hi']}",
-                        "relation": "INSIDE_H1_FVG", "distance": 0
-                    })
+        sig_text = "".join(seven_lines[1:5]) # Entry, SL, TP1, TP2
+        sig = hashlib.sha1(sig_text.encode("utf-8")).hexdigest()[:16]
     except Exception:
-        pass # Ignore errors in comparison generation
+        sig = None
 
-    return extract_dict
+    # Check for high probability keywords
+    high_prob = "xác suất cao" in text.lower() or "đủ điều kiện" in text.lower()
 
+    return seven_lines, sig, high_prob
 
-def _generate_concept_value_table(data: SafeMT5Data, tf_data: dict) -> str:
-    """Helper to build the CONCEPT_VALUE_TABLE part of the report."""
-    cp = data.get_tick_value("bid") or data.get_tick_value("last") or 0.0
-    point = data.get_info_value("point", 0.0)
-    pip_value_per_point = data.get_pip_value("value_per_point", 0.0)
-    points_per_pip = data.get_pip_value("points_per_pip", 1) or 1
-    pip_size = (pip_value_per_point / points_per_pip) if point else 0.0
-
-    def format_row(tf: str, concept: str, value: float | None, confidence: str = "High") -> str | None:
-        if value is None or not cp or not point:
-            return None
-        relation = "ABOVE" if value > cp else "BELOW"
-        distance = abs(value - cp) / point
-        # Format value and distance for readability
-        value_str = f"~{value:.3f}"
-        dist_str = f"~{distance:.3f}"
-        return f"{tf} | {concept} | {value_str} | {relation} | {dist_str} | {confidence}"
-
-    rows = ["E) CONCEPT_VALUE_TABLE:", "", "Timeframe | Concept | Value/Zone | RelationToPrice | Distance | Confidence", "--- | --- | --- | --- | --- | ---"]
-    
-    # H1 Concepts
-    h1_swing_h = (tf_data.get("H1", {}).get("swing") or {}).get("H")
-    h1_swing_l = (tf_data.get("H1", {}).get("swing") or {}).get("L")
-    rows.append(format_row("H1", "Current Price", cp))
-    rows.append(format_row("H1", "Swing High", h1_swing_h))
-    rows.append(format_row("H1", "Swing Low", h1_swing_l))
-    rows.append(format_row("H1", "EQ50_D", data.get_daily_level("eq50")))
-    rows.append(format_row("H1", "Daily VWAP", data.get_vwap("day")))
-    rows.append(format_row("H1", "PDL", data.get_prev_day_level("low")))
-    rows.append(format_row("H1", "PDH", data.get_prev_day_level("high")))
-    rows.append(format_row("H1", "EMA50", data.get_ema("H1", "ema50")))
-
-    # M15 Concepts
-    m15_swing_h = (tf_data.get("M15", {}).get("swing") or {}).get("H")
-    m15_swing_l = (tf_data.get("M15", {}).get("swing") or {}).get("L")
-    rows.append(format_row("M15", "Current Price", cp))
-    rows.append(format_row("M15", "Swing High", m15_swing_h))
-    rows.append(format_row("M15", "Swing Low", m15_swing_l))
-
-    # M5 Concepts
-    m5_swing_h = (tf_data.get("M5", {}).get("swing") or {}).get("H")
-    m5_swing_l = (tf_data.get("M5", {}).get("swing") or {}).get("L")
-    rows.append(format_row("M5", "Current Price", cp))
-    rows.append(format_row("M5", "Swing High", m5_swing_h))
-    rows.append(format_row("M5", "Swing Low", m5_swing_l))
-
-    # M1 Concepts
-    m1_swing_h = (tf_data.get("M1", {}).get("swing") or {}).get("H")
-    m1_swing_l = (tf_data.get("M1", {}).get("swing") or {}).get("L")
-    rows.append(format_row("M1", "Current Price", cp))
-    rows.append(format_row("M1", "Swing High", m1_swing_h))
-    rows.append(format_row("M1", "Swing Low", m1_swing_l))
-
-    # Filter out None rows before joining
-    return "\n".join(filter(None, rows))
-
-
-def _generate_checklist_json(data: SafeMT5Data, tf_data: dict) -> dict[str, Any]:
-    """
-    Generates a JSON template for the AI to fill out. It no longer calculates the status itself.
-    It still provides the open trade monitoring data if in management mode.
-    """
-    from datetime import datetime
-
-    positions = data.get("positions")
-    if positions:
-        # --- MANAGEMENT MODE ---
-        pos = positions[0]
-        current_price = data.get_tick_value("bid", 0.0) or data.get_tick_value("last", 0.0)
-        entry_price = pos.get("price_open", 0.0)
-        sl = pos.get("sl", 0.0)
-        trade_type = "BUY" if pos.get("type") == 0 else "SELL"
-        initial_risk = abs(entry_price - sl) if sl != 0 and entry_price != 0 else 0
-        current_reward = (current_price - entry_price) if trade_type == "BUY" else (entry_price - current_price)
-        current_rr = (current_reward / initial_risk) if initial_risk > 1e-9 else 0
-
-        open_trade_monitoring = {
-            "ticket": pos.get("ticket"),
-            "type": trade_type,
-            "volume": pos.get("volume"),
-            "entry_price": entry_price,
-            "stop_loss": sl,
-            "take_profit": pos.get("tp", 0.0),
-            "current_price": current_price,
-            "current_profit": pos.get("profit"),
-            "current_rr": round(current_rr, 2),
-        }
-
-        # Return the data needed for the management prompt
-        return {
-            "cycle": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "symbol": data.get("symbol", "unknown"),
-            "mode": "management",
-            "open_trade_monitoring": open_trade_monitoring,
-        }
-
-    # --- SETUP MODE (TEMPLATE ONLY) ---
-    # Returns a blank checklist structure for the AI to fill.
-    checklist_template = {
-        "cycle": "[ĐIỀN THỜI GIAN HIỆN TẠI, ví dụ: 2025-09-18 18:00]",
-        "symbol": data.get("symbol", "unknown"),
-        "mode": "setup",
-        "bias_H1": "[KẾT LUẬN TỪ B1, ví dụ: Bullish/Bearish/Sideways]",
-        "poi_M15": {
-            "type": "[LOẠI POI TỪ C1, ví dụ: FVG/OB]",
-            "price_zone": "[VÙNG GIÁ POI TỪ C1]"
-        },
-        "setup_status": {
-            "A1": "[ĐỦ/CHỜ/SAI]", "A2": "[ĐỦ/CHỜ/SAI]",
-            "B1": "[ĐỦ/CHỜ/SAI]", "B2": "[ĐỦ/CHỜ/SAI]", "B3": "[ĐỦ/CHỜ/SAI]", "B4": "[ĐỦ/CHỜ/SAI]",
-            "C1": "[ĐỦ/CHỜ/SAI]", "C2": "[ĐỦ/CHỜ/SAI]", "C3": "[ĐỦ/CHỜ/SAI]", "C4": "[ĐỦ/CHỜ/SAI]",
-            "D1": "[ĐỦ/CHỜ/SAI]", "D2": "[ĐỦ/CHỜ/SAI]", "D3": "[ĐỦ/CHỜ/SAI]", "D4": "[ĐỦ/CHỜ/SAI]",
-            "E1": "[ĐỦ/CHỜ/SAI]", "E2": "[ĐỦ/CHỜ/SAI]", "E3": "[ĐỦ/CHỜ/SAI]", "E4": "[ĐỦ/CHỜ/SAI]",
-            "F1": "[ĐỦ/CHỜ/SAI]", "F2": "[ĐỦ/CHỜ/SAI]", "F3": "[ĐỦ/CHỜ/SAI]"
-        },
-        "conclusions": "[KẾT LUẬN TỔNG THỂ, ví dụ: ĐỦ/CHƯA ĐỦ/SAI]",
-        "missing_conditions": [ "[LIỆT KÊ CÁC ĐIỀU KIỆN CÒN 'CHỜ']" ],
-        "reasoning": {
-            "B1": "Lý do cho quyết định B1...",
-            "B2": "Lý do cho quyết định B2...",
-            "...": "..."
-        }
-    }
-    return checklist_template
-
-def _is_poi_fresh(poi_zone: dict, series_after: list) -> bool:
-    """Checks if a POI has been touched by subsequent price action."""
-    if not series_after:
-        return True
-    poi_lo, poi_hi = poi_zone["lo"], poi_zone["hi"]
-    for candle in series_after:
-        if candle["low"] <= poi_hi and candle["high"] >= poi_lo:
-            return False  # Price has touched or gone through the POI
-    return True
-
-def _find_best_m15_poi(data: SafeMT5Data, tf_data: dict, h1_bias: str) -> dict:
-    """Finds and scores the best M15 POI based on confluence."""
-    cp = data.get_tick_value("bid", 0.0)
-    m15_series = (data.get("series") or {}).get("M15", [])
-    sessions = data.get("sessions_today", {})
-    killzones = {k: v for k, v in sessions.items() if "newyork" in k or "london" in k}
-
-    potential_pois = []
-    m15_fvgs = (tf_data.get("M15") or {}).get("FVG", [])
-    m15_obs = (tf_data.get("M15") or {}).get("OB", [])
-    h1_fvgs = (tf_data.get("H1") or {}).get("FVG", [])
-    h1_obs = (tf_data.get("H1") or {}).get("OB", [])
-
-    for fvg in m15_fvgs: potential_pois.append({"type": "FVG", "zone": fvg, "score": 0})
-    for ob in m15_obs: potential_pois.append({"type": "OB", "zone": ob, "score": 0})
-
-    h1_pd_info = data.get_ict_pattern("premium_discount_h1", {})
-    h1_pd_status = h1_pd_info.get("status") if h1_pd_info else None
-    
-    def is_inside(inner, outer):
-        return outer["lo"] <= inner["lo"] and inner["hi"] <= outer["hi"]
-
-    for p in potential_pois:
-        score = 0
-        # Alignment with H1 Bias and P/D
-        if h1_bias == "bullish" and h1_pd_status == "discount":
-            if (p["type"] == "FVG" and p["zone"].get("dir") == "up") or \
-               (p["type"] == "OB" and p["zone"].get("type") == "bull"):
-                score += 20
-        elif h1_bias == "bearish" and h1_pd_status == "premium":
-            if (p["type"] == "FVG" and p["zone"].get("dir") == "down") or \
-               (p["type"] == "OB" and p["zone"].get("type") == "bear"):
-                score += 20
-        
-        # Confluence with H1 structures
-        p["confluence"] = False
-        for h1_fvg in h1_fvgs:
-            if is_inside(p["zone"], h1_fvg): score += 10; p["confluence"] = True
-        for h1_ob in h1_obs:
-            if is_inside(p["zone"], h1_ob): score += 10; p["confluence"] = True
-
-        # Freshness Bonus/Penalty
-        poi_start_time = p["zone"].get("start_time")
-        if poi_start_time:
-            candles_after_poi = [c for c in m15_series if c["time"] > poi_start_time]
-            if not _is_poi_fresh(p["zone"], candles_after_poi):
-                score -= 15 # Penalty for mitigated POI
-        
-        # Killzone Formation Bonus
-        if poi_start_time:
-            poi_hhmm = poi_start_time[11:16]
-            for kz_name, kz_times in killzones.items():
-                if kz_times.get("start") <= poi_hhmm < kz_times.get("end"):
-                    score += 10
-                    break
-
-        # Proximity bonus
-        distance = abs(cp - (p["zone"]["hi"] + p["zone"]["lo"]) / 2)
-        if distance > 0: score += (1 / distance) * 100
-        p["score"] = score
-
-    if not potential_pois:
-        return {"details": {"type": "None", "price_zone": "N/A"}, "has_confluence": False}
-
-    best_poi = max(potential_pois, key=lambda x: x["score"])
-    return {
-        "details": {
-            "type": best_poi["type"],
-            "price_zone": f"{best_poi['zone']['lo']}-{best_poi['zone']['hi']}"
-        },
-        "has_confluence": best_poi.get("confluence", False)
-    }
-
-def _analyze_ltf_entry_model(data: dict, h1_bias: str) -> dict:
-    """
-    Analyzes M1/M5 data to find an ICT entry model when price is at a valid POI.
-    This is a placeholder for the complex logic required.
-    """
-    # Placeholder implementation. In a real scenario, this function would
-    # involve detailed analysis of M1/M5 series from data.get("series").
-    # - Find minor highs/lows for inducement.
-    # - Detect a sweep of that liquidity.
-    # - Detect a CHoCH/BOS in the direction of h1_bias.
-    # - Confirm with displacement (new FVG/OB).
-    # - Identify the refined entry zone.
-    
-    ltf_status = {
-        "D1": "CHỜ",  # LTF Inducement/Sweep
-        "D2": "CHỜ",  # LTF CHoCH/BOS
-        "D3": "CHỜ",  # LTF Displacement
-        "D4": "CHỜ",  # Refined Entry Zone
-        "E1": "CHỜ",
-        "E2": "CHỜ",
-        "E3": "CHỜ",
-        "E4": "CHỜ"
-    }
-    
-    # This function will be fully implemented later. For now, it returns placeholders.
-    return ltf_status
 
 def parse_ai_response(text: str) -> dict:
     """
-    Parses the AI's full response text to find and extract the completed
-    CHECKLIST_JSON or MANAGEMENT_JSON object.
+    Parses the full AI response to find the primary JSON object.
+    It can be either CHECKLIST_JSON or MANAGEMENT_JSON.
     """
-    # Find the first occurrence of a JSON object in the text
-    match = re.search(r"\{[\s\S]*?\}", text)
-    if not match:
-        return {"error": "No JSON object found in the AI response."}
-    
-    json_str = match.group(0)
+    if not text:
+        return {"error": "Empty response text"}
     try:
-        return json.loads(json_str)
-    except json.JSONDecodeError:
-        return {"error": "Failed to decode the JSON object from the AI response."}
+        # The JSON object is expected at the very beginning of the response
+        json_obj, _ = find_balanced_json_after(text, text.find("{"))
+        if json_obj:
+            return json.loads(json_obj)
+        else:
+            return {"error": "No valid JSON object found at the beginning of the response"}
+    except (json.JSONDecodeError, TypeError, IndexError) as e:
+        return {"error": f"Failed to parse JSON from response: {e}"}
+    except Exception as e:
+        return {"error": f"An unexpected error occurred during JSON parsing: {e}"}
 
 
-def parse_mt5_data_to_report(mt5_data: SafeMT5Data) -> str:
+def parse_mt5_data_to_report(safe_mt5_data: Any) -> str:
     """
-    Parses the raw MT5_DATA dictionary and generates a structured,
-    machine-readable report string. The structure of the report depends
-    on whether there is an open position ("management" mode) or not ("setup" mode).
+    Generates a structured report from the SafeMT5Data object.
     """
-    positions = mt5_data.get("positions")
+    if not safe_mt5_data or not safe_mt5_data.raw:
+        return "Không có dữ liệu MT5."
 
-    if positions:
-        # --- MANAGEMENT MODE REPORT ---
-        # Generate the checklist for management mode. tf_data is not needed.
-        checklist_dict = _generate_checklist_json(mt5_data, {})
-        checklist_json = json.dumps(checklist_dict, indent=2, ensure_ascii=False)
+    data = safe_mt5_data.raw
+    report_lines = []
 
-        # Generate a concept table for context, it's still useful
-        extract_dict_for_table = _generate_extract_json(mt5_data)
-        concept_value_table = _generate_concept_value_table(mt5_data, extract_dict_for_table["tf"])
-
-        # Assemble the report for management mode, omitting the setup-specific EXTRACT_JSON
-        report_parts = [
-            concept_value_table,
-            "2) CHECKLIST_JSON:",
-            checklist_json,
-        ]
-        return "\n".join(report_parts)
+    # --- CONCEPT_VALUE_TABLE ---
+    report_lines.append("`CONCEPT_VALUE_TABLE`:")
+    tbl = "| Concept                 | Value                               |\n|-------------------------|-------------------------------------|"
+    report_lines.append(tbl)
     
-    else:
-        # --- SETUP MODE REPORT (Original Logic) ---
-        # 1. Generate the EXTRACT_JSON object first, as it pre-processes some data
-        extract_dict = _generate_extract_json(mt5_data)
-        
-        # Pass the processed data to the concept table generator
-        concept_value_table = _generate_concept_value_table(mt5_data, extract_dict["tf"])
-        
-        # 3. Generate the CHECKLIST_JSON, which contains the master bias
-        checklist_dict = _generate_checklist_json(mt5_data, extract_dict["tf"])
-        
-        # Update the bias in the extract_dict to be consistent with the checklist's conclusion
-        final_h1_bias = checklist_dict.get("bias_H1", "unknown")
-        if "H1" in extract_dict["tf"]:
-            extract_dict["tf"]["H1"]["bias"] = final_h1_bias
+    info = data.get("info", {})
+    tick = data.get("tick", {})
+    sessions = data.get("sessions_today", {})
+    vol = data.get("volatility", {}).get("ATR", {})
+    
+    report_lines.append(f"| symbol                  | {data.get('symbol', 'N/A')}                         |")
+    report_lines.append(f"| spread_current          | {info.get('spread_current', 'N/A')} points                      |")
+    report_lines.append(f"| session_active          | {safe_mt5_data.get_active_session() or 'N/A'} |")
+    report_lines.append(f"| volatility_regime       | {data.get('volatility_regime', 'N/A')}                     |")
+    report_lines.append(f"| atr_m5_pips             | {safe_mt5_data.get_atr_pips('M5'):.2f} pips                     |")
+    report_lines.append(f"| mins_to_next_killzone   | {data.get('mins_to_next_killzone', 'N/A')} mins                      |")
+    report_lines.append("")
 
-        checklist_json = json.dumps(checklist_dict, indent=2, ensure_ascii=False)
-        
-        # Re-generate extract_json string with the updated bias
-        extract_json = json.dumps(extract_dict, indent=2, ensure_ascii=False)
+    # --- EXTRACT_JSON ---
+    report_lines.append("`EXTRACT_JSON`:")
+    # A simplified JSON structure is better than a complex one for the prompt
+    extract = {
+        "tf": {
+            "H1": data.get("trend_refs", {}).get("H1", {}),
+            "M15": data.get("trend_refs", {}).get("M15", {}),
+            "M5": data.get("trend_refs", {}).get("M5", {}),
+        },
+        "key_levels_nearby": data.get("key_levels_nearby", []),
+        "open_trade_monitoring": data.get("positions", []) 
+    }
+    report_lines.append("```json")
+    report_lines.append(json.dumps(extract, indent=2, ensure_ascii=False))
+    report_lines.append("```")
 
-        # Assemble the final report string
-        report_parts = [
-            concept_value_table,
-            "2) CHECKLIST_JSON:",
-            checklist_json,
-            "\n3) EXTRACT_JSON:",
-            extract_json,
-        ]
+    return "\n".join(report_lines)
 
-        return "\n".join(report_parts)
+def parse_setup_from_report(text: str):
+    out = {
+        "direction": None, "entry": None, "sl": None, "tp1": None, "tp2": None,
+        "bias_h1": None, "enough": False
+    }
+    if not text:
+        return out
 
-def extract_seven_lines(combined_text: str):
-    """
-    Extracts the 7-line summary from the combined report text.
-    """
-    try:
-        lines = [ln.strip() for ln in combined_text.strip().splitlines() if ln.strip()]
-        start_idx = None
-        for i, ln in enumerate(lines[:20]):
-            if re.match(r"^1[\.\)\-–:]?\s*", ln) or ("Lệnh:" in ln and ln.lstrip().startswith("1")):
-                start_idx = i
-                break
-            if "Lệnh:" in ln:
-                start_idx = i
-                break
-        if start_idx is None:
-            return None, None, False
-        block = []
-        j = start_idx
-        while j < len(lines) and len(block) < 10:
-            block.append(lines[j])
-            j += 1
-        picked = []
-        wanted = ["Lệnh:", "Entry", "SL", "TP1", "TP2", "Lý do", "Lưu ý"]
-        used = set()
-        for key in wanted:
-            found = None
-            for ln in block:
-                if ln in used:
-                    continue
-                if key.lower().split(":")[0] in ln.lower():
-                    found = ln
-                    break
-            if found is None:
-                idx = len(picked) + 1
-                for ln in block:
-                    if re.match(rf"^{idx}\s*[\.\)\-–:]", ln):
-                        found = ln
-                        break
-            picked.append(found or f"{len(picked)+1}. (thiếu)")
-            used.add(found)
-        l1 = picked[0].lower()
-        high = ("lệnh:" in l1) and (("mua" in l1) or ("bán" in l1)) and ("không có setup" not in l1) and ("theo dõi lệnh hiện tại" not in l1)
-        sig = hashlib.sha1(("|".join(picked)).encode("utf-8")).hexdigest()
-        return picked, sig, high
-    except Exception:
-        return None, None, False
+    obj = extract_json_block_prefer(text)
+
+    def _num(x):
+        if x is None: return None
+        if isinstance(x, (int, float)) and math.isfinite(x): return float(x)
+        if isinstance(x, str):
+            xs = x.strip().replace(",", "")
+            try: return float(xs)
+            except Exception: return None
+        return None
+
+    def _dir(x):
+        if not x: return None
+        s = str(x).strip().lower()
+        if s in ("long","buy","mua","bull","bullish"): return "long"
+        if s in ("short","sell","bán","ban","bear","bearish"): return "short"
+        return None
+
+    def _pick_from_json(root):
+        if not isinstance(root, dict): return None
+
+        chk = root.get("CHECKLIST_JSON") or root.get("checklist") or root
+        if isinstance(chk, dict) and ("setup_status" in chk or "conclusions" in chk):
+            out["bias_h1"] = (chk.get("bias_H1") or chk.get("bias_h1") or "").lower() or out["bias_h1"]
+            concl = (chk.get("conclusions") or "").upper()
+            out["enough"] = out["enough"] or ("ĐỦ" in concl or "DU" in concl)
+
+        cands = []
+        for k in ("proposed_plan","plan","trade","signal","setup"):
+            if isinstance(root.get(k), dict):
+                cands.append(root[k])
+
+        for v in root.values():
+            if isinstance(v, dict):
+                for k in ("proposed_plan","plan","trade","signal","setup"):
+                    if isinstance(v.get(k), dict):
+                        cands.append(v[k])
+        for c in cands:
+            d = {
+                "direction": _dir(c.get("direction") or c.get("dir") or c.get("side")),
+                "entry": _num(c.get("entry") or c.get("price") or c.get("ep")),
+                "sl":    _num(c.get("sl")    or c.get("stop")  or c.get("stop_loss")),
+                "tp1":   _num(c.get("tp1")   or c.get("tp_1")  or c.get("take_profit_1") or c.get("tp")),
+                "tp2":   _num(c.get("tp2")   or c.get("tp_2")  or c.get("take_profit_2")),
+            }
+            if d["tp1"] is None and d["tp2"] is not None:
+                d["tp1"] = d["tp2"]
+            if d["direction"] in ("long","short") and all(d[k] is not None for k in ("entry","sl","tp1")):
+                return d
+        return None
+
+    plan = _pick_from_json(obj) if obj else None
+    if plan:
+        out.update(plan)
+        return out
+
+    lines, _, _ = extract_seven_lines(text)
+    if lines:
+        out["direction"] = parse_direction_from_line1(lines[0])
+        out["entry"] = parse_float(lines[1] if len(lines)>1 else None)
+        out["sl"]    = parse_float(lines[2] if len(lines)>2 else None)
+        out["tp1"]   = parse_float(lines[3] if len(lines)>3 else None)
+        out["tp2"]   = parse_float(lines[4] if len(lines)>4 else None)
+    return out
