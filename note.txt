@@ -267,3 +267,5 @@ __Giai đoạn 7: Dọn dẹp và Lên lịch lại__
 - Quan trọng nhất, nó sẽ gọi lại hàm `_schedule_next_autorun` để __lên lịch cho lần chạy tự động tiếp theo__, đảm bảo vòng lặp được duy trì liên tục.
 
 Hy vọng phần phân tích chi tiết này sẽ giúp bạn hiểu rõ hơn về cách phần mềm hoạt động.
+
+ Hãy kiểm tra lại code (file `ctx_*.json`, Tóm Tắt Lịch Sử Gần Nhất (Recent History),Phân Tích Xu Hướng Checklist (Checklist Trend), Tìm Kiếm Kịch Bản Tương Tự (Vector Similarity Search)) và đảm bảo phần mềm đang hoạt động đúng với những logic mà bạn phân tích ở trên

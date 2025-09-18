@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 # These imports are necessary for the worker function
 import google.generativeai as genai
-from . import uploader, no_run, no_trade, auto_trade, report_parser, news
+from google.api_core import exceptions
+from . import uploader, no_run, no_trade, auto_trade, report_parser, news, json_saver, md_saver
 from .constants import APP_DIR
 
 if TYPE_CHECKING:
@@ -25,11 +26,18 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt_no_entry: str, prompt
     def _tnow():
         return time.perf_counter()
 
-    def _gen_with_retry(_model, _parts, tries=2, base_delay=2.0):
+    def _gen_with_retry(_model, _parts, tries=5, base_delay=2.0):
         last = None
         for i in range(tries):
             try:
                 return _model.generate_content(_parts, request_options={"timeout": 1200})
+            except exceptions.ResourceExhausted as e:
+                last = e
+                wait_time = base_delay * (2 ** i)
+                print(f"Warning: ResourceExhausted error. Retrying in {wait_time:.2f} seconds...")
+                time.sleep(wait_time)
+                if i == tries - 1:
+                    raise
             except Exception as e:
                 last = e
                 if i == tries - 1:
@@ -127,7 +135,7 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt_no_entry: str, prompt
 
             app.combined_report_text = text
             app.ui_detail_replace(text)
-            _ = app._auto_save_report(text, cfg)
+            _ = md_saver.save_md_report(app, text, cfg)
             app.ui_refresh_history_list()
 
             try:
@@ -358,7 +366,7 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt_no_entry: str, prompt
 
             t_llm0 = _tnow()
             parts = all_media + [prompt_final]
-            resp = _gen_with_retry(model, parts, tries=2, base_delay=2.0)
+            resp = _gen_with_retry(model, parts)
 
             combined_text = (getattr(resp, "text", "") or "").strip() or "[Không có nội dung trả về]"
             app.ui_status(f"Model trả lời trong {(_tnow()-t_llm0):.2f}s")
@@ -381,15 +389,16 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt_no_entry: str, prompt
         app.combined_report_text = combined_text
         app.ui_detail_replace(combined_text)
 
-        saved_path = app._auto_save_report(combined_text, cfg)
-        if cfg.create_ctx_json:
-            try:
-                # Pass the composed context to the saving function so it can be logged
-                # alongside the proposed trade.
-                context_obj = json.loads(composed) if composed else {}
-                app._auto_save_json_from_report(combined_text, cfg, names, context_obj)
-            except Exception:
-                pass
+        saved_path = md_saver.save_md_report(app, combined_text, cfg)
+        try:
+            # Pass the composed context to the saving function so it can be logged
+            # alongside the proposed trade.
+            context_obj = json.loads(composed) if composed else {}
+            json_saver.save_json_report(app, combined_text, cfg, names, context_obj)
+        except Exception as e:
+            app.ui_status(f"Lỗi khi lưu ctx_*.json: {e}")
+            # We pass here so the main flow is not interrupted, but the error is now visible.
+            pass
         app.ui_refresh_history_list()
         app.ui_refresh_json_list()
 

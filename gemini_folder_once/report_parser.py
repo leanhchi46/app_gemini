@@ -1,5 +1,7 @@
 from __future__ import annotations
+import re
 import json
+import hashlib
 from typing import Any
 from .safe_data import SafeMT5Data
 
@@ -529,3 +531,50 @@ def parse_mt5_data_to_report(mt5_data: SafeMT5Data) -> str:
         ]
 
         return "\n".join(report_parts)
+
+def extract_seven_lines(combined_text: str):
+    """
+    Extracts the 7-line summary from the combined report text.
+    """
+    try:
+        lines = [ln.strip() for ln in combined_text.strip().splitlines() if ln.strip()]
+        start_idx = None
+        for i, ln in enumerate(lines[:20]):
+            if re.match(r"^1[\.\)\-–:]?\s*", ln) or ("Lệnh:" in ln and ln.lstrip().startswith("1")):
+                start_idx = i
+                break
+            if "Lệnh:" in ln:
+                start_idx = i
+                break
+        if start_idx is None:
+            return None, None, False
+        block = []
+        j = start_idx
+        while j < len(lines) and len(block) < 10:
+            block.append(lines[j])
+            j += 1
+        picked = []
+        wanted = ["Lệnh:", "Entry", "SL", "TP1", "TP2", "Lý do", "Lưu ý"]
+        used = set()
+        for key in wanted:
+            found = None
+            for ln in block:
+                if ln in used:
+                    continue
+                if key.lower().split(":")[0] in ln.lower():
+                    found = ln
+                    break
+            if found is None:
+                idx = len(picked) + 1
+                for ln in block:
+                    if re.match(rf"^{idx}\s*[\.\)\-–:]", ln):
+                        found = ln
+                        break
+            picked.append(found or f"{len(picked)+1}. (thiếu)")
+            used.add(found)
+        l1 = picked[0].lower()
+        high = ("lệnh:" in l1) and (("mua" in l1) or ("bán" in l1)) and ("không có setup" not in l1) and ("theo dõi lệnh hiện tại" not in l1)
+        sig = hashlib.sha1(("|".join(picked)).encode("utf-8")).hexdigest()
+        return picked, sig, high
+    except Exception:
+        return None, None, False

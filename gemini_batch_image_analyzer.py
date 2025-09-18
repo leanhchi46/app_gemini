@@ -81,7 +81,7 @@ from gemini_folder_once import uploader
 from gemini_folder_once import mt5_utils
 from gemini_folder_once.safe_data import SafeMT5Data
 from gemini_folder_once import no_run
-from gemini_folder_once import worker
+from gemini_folder_once import worker, utils
 from gemini_folder_once.utils import _tg_html_escape
 
 class GeminiFolderOnceApp:
@@ -985,88 +985,6 @@ class GeminiFolderOnceApp:
             self.stop_flag = True
             self.ui_status("Đang dừng sau khi hoàn tất tác vụ hiện tại...")
 
-    '''
-    def _load_upload_cache(self) -> dict:  # removed; use uploader.UploadCache.load()
-        """
-        Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
-        Tham số: (không)
-        Trả về: dict
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        raise RuntimeError('removed: use uploader.UploadCache.load()')
-
-    def _save_upload_cache(self, cache: dict):  # removed; use uploader.UploadCache.save()
-        """
-        Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
-        Tham số:
-          - cache: dict — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        raise RuntimeError('removed: use uploader.UploadCache.save(cache)')
-
-    def _file_sig(self, path: str) -> str:  # removed; use uploader.UploadCache.file_sig()
-        """
-        Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
-        Tham số:
-          - path: str — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: str
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        raise RuntimeError('removed: use uploader.UploadCache.file_sig(path)')
-
-    def _cache_lookup(self, cache: dict, path: str) -> str:  # removed; use uploader.UploadCache.lookup()
-        """
-        Mục đích: Đọc/ghi cấu hình workspace, cache upload và các trạng thái phiên làm việc.
-        Tham số:
-          - cache: dict — (tự suy luận theo ngữ cảnh sử dụng).
-          - path: str — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: str
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        raise RuntimeError('removed: use uploader.UploadCache.lookup(cache, path)')
-
-    def _cache_put(self, cache: dict, path: str, remote_name: str):  # removed; use uploader.UploadCache.put()
-        """
-        Mục đích: Đọc/ghi cấu hình workspace, cache upload và các trạng thái phiên làm việc.
-        Tham số:
-          - cache: dict — (tự suy luận theo ngữ cảnh sử dụng).
-          - path: str — (tự suy luận theo ngữ cảnh sử dụng).
-          - remote_name: str — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        raise RuntimeError('removed: use uploader.UploadCache.put(cache, path, remote_name)')
-
-    def _prepare_image_for_upload(self, path: str) -> str:  # removed; use uploader.prepare_image()
-        """
-        Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
-        Tham số:
-          - path: str — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: str
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        raise RuntimeError('removed: use uploader.prepare_image(path, optimize=..., app_dir=APP_DIR)')
-
-    def _prepare_image_for_upload_cfg(self, path: str, optimize: bool) -> str:  # removed; use uploader.prepare_image()
-        """
-        Mục đích: Xử lý upload, gọi Gemini để phân tích bộ ảnh, gom kết quả.
-        Tham số:
-          - path: str — (tự suy luận theo ngữ cảnh sử dụng).
-          - optimize: bool — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: str
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        raise RuntimeError('removed: use uploader.prepare_image(path, optimize=..., app_dir=APP_DIR)')
-
-    '''
     def _parse_ctx_json_files(self, max_n=5, folder: str | None = None):
         """
         Mục đích: Làm việc với file/thư mục (chọn, nạp, xem trước, xoá, cập nhật danh sách).
@@ -1131,7 +1049,7 @@ class GeminiFolderOnceApp:
         trend = "improving" if delta > 0 else ("deteriorating" if delta < 0 else "flat")
         return {"trend": trend, "enough_ratio": (enough_cnt / total if total else None)}
 
-    def _images_tf_map(self):
+    def _images_tf_map(self, names: list[str]):
         """
         Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
         Tham số: (không)
@@ -1139,7 +1057,6 @@ class GeminiFolderOnceApp:
         Ghi chú:
           - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
         """
-        names = [Path(r.get("path")).name for r in self.results if r.get("path")]
         return context_builder.images_tf_map(names, self._detect_timeframe_from_name)
 
     def _folder_signature(self):
@@ -1182,71 +1099,6 @@ class GeminiFolderOnceApp:
                 auto_trade.mt5_manage_be_trailing(self, safe_data.raw, cfg)
         except Exception:
             pass
-
-    def _auto_save_json_from_report(self, text: str, cfg: RunConfig, names: list[str], context_obj: dict):
-        """
-        Mục đích: Ghi/Xuất dữ liệu (báo cáo .md, JSON tóm tắt, cache...).
-        Tham số:
-          - text: str — (tự suy luận theo ngữ cảnh sử dụng).
-          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        d = self._get_reports_dir(cfg.folder)
-        if not d:
-            return
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        found = []
-        for m in re.finditer(r"\{[\s\S]*?\}", text):
-            j = m.group(0).strip()
-            try:
-                json.loads(j)
-                found.append(j)
-            except Exception:
-                continue
-        payload = {}
-        if found:
-            payload["blocks"] = found
-        lines, sig, high = self._extract_seven_lines(text)
-        if lines:
-            payload["seven_lines"] = lines
-            payload["signature"] = sig
-            payload["high_prob"] = bool(high)
-        
-        payload["cycle"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        payload["images_tf_map"] = self._images_tf_map(names)
-
-        out = d / f"ctx_{ts}.json"
-        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        # --- Log proposed trade for backtesting ---
-        try:
-            setup = self._parse_setup_from_report(text)
-            if setup and setup.get("direction") and setup.get("entry"):
-                # Extract context snapshot for logging
-                ctx_snapshot = {}
-                if context_obj:
-                    inner_ctx = context_obj.get("CONTEXT_COMPOSED", {})
-                    ctx_snapshot = {
-                        "session": inner_ctx.get("session"),
-                        "trend_checklist": inner_ctx.get("trend_checklist", {}).get("trend"),
-                        "volatility_regime": (inner_ctx.get("environment_flags") or {}).get("volatility_regime"),
-                        "trend_regime": (inner_ctx.get("environment_flags") or {}).get("trend_regime"),
-                    }
-
-                trade_log_payload = {
-                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                    "symbol": cfg.mt5_symbol,
-                    "report_file": out.name,
-                    "setup": setup,
-                    "context_snapshot": ctx_snapshot
-                }
-                self._log_proposed_trade(trade_log_payload, folder_override=cfg.folder)
-        except Exception:
-            pass # Silently fail if parsing/logging fails
-
-        return out
 
     def _log_proposed_trade(self, data: dict, folder_override: str | None = None):
         try:
@@ -1558,55 +1410,6 @@ class GeminiFolderOnceApp:
         if ok:
             self.ui_message("info", "Telegram", "Đã gửi thử thành công.")
 
-    def _extract_seven_lines(self, combined_text: str):
-        """
-        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
-        Tham số:
-          - combined_text: str — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        return report_parser.extract_seven_lines(combined_text)
-        lines = [ln.strip() for ln in combined_text.strip().splitlines() if ln.strip()]
-        start_idx = None
-        for i, ln in enumerate(lines[:20]):
-            if re.match(r"^1[\.\)\-–:]?\s*", ln) or ("Lệnh:" in ln and ln.lstrip().startswith("1")):
-                start_idx = i
-                break
-            if "Lệnh:" in ln:
-                start_idx = i
-                break
-        if start_idx is None:
-            return None, None, False
-        block = []
-        j = start_idx
-        while j < len(lines) and len(block) < 10:
-            block.append(lines[j])
-            j += 1
-        picked = []
-        wanted = ["Lệnh:", "Entry", "SL", "TP1", "TP2", "Lý do", "Lưu ý"]
-        used = set()
-        for key in wanted:
-            found = None
-            for ln in block:
-                if ln in used:
-                    continue
-                if key.lower().split(":")[0] in ln.lower():
-                    found = ln
-                    break
-            if found is None:
-                idx = len(picked) + 1
-                for ln in block:
-                    if re.match(rf"^{idx}\s*[\.\)\-–:]", ln):
-                        found = ln
-                        break
-            picked.append(found or f"{len(picked)+1}. (thiếu)")
-            used.add(found)
-        l1 = picked[0].lower()
-        high = ("lệnh:" in l1) and (("mua" in l1) or ("bán" in l1)) and ("không có setup" not in l1) and ("theo dõi lệnh hiện tại" not in l1)
-        sig = hashlib.sha1(("|".join(picked)).encode("utf-8")).hexdigest()
-        return picked, sig, high
 
     def _maybe_notify_telegram(self, combined_text: str, saved_report_path: Path, cfg: RunConfig):
         """
@@ -1621,7 +1424,7 @@ class GeminiFolderOnceApp:
         """
         if not cfg.telegram_enabled:
             return
-        lines, sig, high = self._extract_seven_lines(combined_text)
+        lines, sig, high = report_parser.extract_seven_lines(combined_text)
         if not high or not lines or not sig:
             return
         if sig == self._last_telegram_signature:
@@ -2321,23 +2124,6 @@ class GeminiFolderOnceApp:
         except Exception as e:
             self.ui_message("error", "Lỗi ghi file", str(e))
 
-    def _auto_save_report(self, combined_text: str, cfg: RunConfig) -> Path:
-        """
-        Mục đích: Ghi/Xuất dữ liệu (báo cáo .md, JSON tóm tắt, cache...).
-        Tham số:
-          - combined_text: str — (tự suy luận theo ngữ cảnh sử dụng).
-          - cfg: RunConfig — (tự suy luận theo ngữ cảnh sử dụng).
-        Trả về: Path
-        Ghi chú:
-          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
-        """
-        d = self._get_reports_dir(cfg.folder)
-        if not d:
-            return None
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = d / f"report_{ts}.md"
-        out.write_text(combined_text or "", encoding="utf-8")
-        return out
 
     def clear_results(self):
         """
