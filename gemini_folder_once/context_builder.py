@@ -170,7 +170,15 @@ def compose_context(app, cfg, budget_chars: int = 1800) -> str:
                 summary = header + "\n".join(seven_lines)
                 recent_history_summary.append(summary)
 
-    latest_7_lines_DEPRECATED = None # This is now replaced by recent_history_summary
+    # --- MODIFICATION: Explicitly extract the latest 7 lines for delta comparison ---
+    latest_summary_lines = None
+    if detailed_ctx_items:
+        # The first item (T-0) is the most recent one
+        latest_item = detailed_ctx_items[0]
+        seven_lines = latest_item.get("seven_lines")
+        if seven_lines and isinstance(seven_lines, list):
+            latest_summary_lines = seven_lines
+    # --- END MODIFICATION ---
 
     mt5_ctx_full_text = ""
     if cfg.mt5_enabled:
@@ -290,6 +298,7 @@ def compose_context(app, cfg, budget_chars: int = 1800) -> str:
             "session": mt5_ctx_lite.get("session_active") if isinstance(mt5_ctx_lite, dict) else None,
             "trend_checklist": trend,
             "latest_plan": plan,
+            "latest_7_lines": latest_summary_lines, # MODIFIED: Re-introduced for clear delta comparison
             "recent_history_summary": "\n\n".join(recent_history_summary) if recent_history_summary else None,
             "run_meta": run_meta,
             "running_stats": running_stats,

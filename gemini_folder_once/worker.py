@@ -26,11 +26,15 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt_no_entry: str, prompt
     def _tnow():
         return time.perf_counter()
 
-    def _gen_with_retry(_model, _parts, tries=5, base_delay=2.0):
+    def _gen_stream_with_retry(_model, _parts, tries=5, base_delay=2.0):
+        """A generator that yields chunks from a streaming Gemini API call with retry logic."""
         last = None
         for i in range(tries):
             try:
-                return _model.generate_content(_parts, request_options={"timeout": 1200})
+                response_stream = _model.generate_content(_parts, stream=True, request_options={"timeout": 1200})
+                for chunk in response_stream:
+                    yield chunk
+                return 
             except exceptions.ResourceExhausted as e:
                 last = e
                 wait_time = base_delay * (2 ** i)
@@ -389,12 +393,46 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt_no_entry: str, prompt
 
             t_llm0 = _tnow()
             parts = all_media + [prompt_final]
-            resp = _gen_with_retry(model, parts)
+            
+            # --- MODIFIED FOR STREAMING ---
+            combined_text = ""
+            trade_action_taken = False
+            
+            # Clear the detail view before starting the stream
+            app.ui_detail_replace("Đang nhận dữ liệu từ AI...")
 
-            combined_text = (getattr(resp, "text", "") or "").strip() or "[Không có nội dung trả về]"
+            stream_generator = _gen_stream_with_retry(model, parts)
+            
+            for chunk in stream_generator:
+                if app.stop_flag:
+                    # Ensure the generator is closed if the user stops the process
+                    if hasattr(stream_generator, 'close'):
+                        stream_generator.close()
+                    raise SystemExit
+
+                chunk_text = getattr(chunk, "text", "")
+                if chunk_text:
+                    combined_text += chunk_text
+                    # Enqueue UI update to run on the main thread
+                    app._enqueue(lambda: app.ui_detail_replace(combined_text))
+
+                    # Attempt to auto-trade with the latest chunk if no action has been taken yet
+                    if not trade_action_taken and cfg.auto_trade_enabled:
+                        try:
+                            # The auto_trade function will now return True if it takes an action
+                            action_was_taken = auto_trade.auto_trade_if_high_prob(app, combined_text, mt5_dict, cfg)
+                            if action_was_taken:
+                                trade_action_taken = True
+                                app.ui_status("Auto-Trade: Đã thực hiện hành động từ stream.")
+                        except Exception as e:
+                            app.ui_status(f"Lỗi Auto-Trade stream: {e}")
+            
+            if not combined_text:
+                combined_text = "[Không có nội dung trả về]"
+
             app.ui_status(f"Model trả lời trong {(_tnow()-t_llm0):.2f}s")
-
             app._update_progress(steps_upload + steps_process, steps_upload + steps_process + 1)
+            # --- END MODIFICATION ---
 
         except Exception as e:
             import traceback
@@ -430,11 +468,11 @@ def run_analysis_worker(app: "GeminiFolderOnceApp", prompt_no_entry: str, prompt
                 app._maybe_notify_telegram(combined_text, saved_path, cfg)
             except Exception:
                 pass
-            try:
-                auto_trade.auto_trade_if_high_prob(app,combined_text, mt5_dict, cfg)
-            except Exception as e:
-                app.ui_status(f"Auto-Trade lỗi: {e}")
-
+            # The main auto-trade call is now inside the streaming loop.
+            # We can add a final check here if needed, but it might be redundant.
+            # For safety, we ensure the final state is consistent.
+            app.combined_report_text = combined_text
+            
             try:
                 if mt5_dict:
                     auto_trade.mt5_manage_be_trailing(app,mt5_dict, cfg)

@@ -15,16 +15,16 @@ from . import no_trade
 from . import report_parser
 
 
-def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConfig):
-    """Place market/pending orders when setup qualifies (behavior unchanged).
-
-    Delegates UI/logging/helpers to `app` where needed.
+def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConfig) -> bool:
+    """
+    Place market/pending orders when setup qualifies.
+    Returns True if a trade action was successfully taken, False otherwise.
     """
     if not cfg.auto_trade_enabled:
-        return
+        return False
     if not cfg.mt5_enabled or mt5 is None:
         app.ui_status("Auto-Trade: MT5 not enabled or missing.")
-        return
+        return False
 
     # NO-TRADE evaluate: hard filters + session + news window
     try:
@@ -56,7 +56,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
                     app._log_no_trade(reasons_nt, (meta or {}).get('codes', []), {'news_hit': (meta or {}).get('news_hit')})
             except Exception:
                 pass
-            return
+            return False
     except Exception:
         # Fail-open: if evaluate crashes, proceed without blocking
         pass
@@ -77,10 +77,15 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
 
     # Fallback to parsing the 7-line text summary if JSON parsing fails or is inconclusive
     if not setup:
+        # If the text is still short, it's likely streaming is not complete.
+        # Avoid parsing incomplete text fragments. A threshold of 200 chars is arbitrary
+        # but should be enough to contain a full setup block.
+        if len(combined_text) < 200:
+            return False
         app.ui_status("Auto-Trade: Vision JSON không kết luận, dùng text parsing.")
         setup = app._parse_setup_from_report(combined_text)
         # Bias is not available in the simple text parse, this is a limitation of the old method
-        bias = "" 
+        bias = ""
 
     direction = setup.get("direction")
     entry = setup.get("entry")
@@ -142,12 +147,9 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
             pass
 
     if direction not in ("long", "short"):
-        app.ui_status("Auto-Trade: missing direction.")
-        try:
-            app._log_trade_decision({"stage": "precheck-fail", "reason": "no_setup"}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
-        except Exception:
-            pass
-        return
+        # This is a common case when the stream is still in progress, so we don't log it as a failure.
+        # app.ui_status("Auto-Trade: missing direction.")
+        return False
 
     if cfg.trade_strict_bias:
         if (bias == "bullish" and direction == "short") or (bias == "bearish" and direction == "long"):
@@ -156,7 +158,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
                 app._log_trade_decision({"stage": "precheck-fail", "reason": "opposite_bias_h1", "bias_h1": bias, "dir": direction}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception:
                 pass
-            return
+            return False
 
     rr2 = app._calc_rr(entry, sl, tp2)
     if rr2 is not None and rr2 < float(cfg.trade_min_rr_tp2):
@@ -165,7 +167,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
             app._log_trade_decision({"stage": "precheck-fail", "reason": "rr_below_min", "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp2": tp2, "rr_tp2": rr2, "min_rr": float(cfg.trade_min_rr_tp2)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception:
             pass
-        return
+        return False
 
     cp0 = cp or ((ask + bid) / 2.0)
     try:
@@ -178,7 +180,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
             app._log_trade_decision({"stage": "precheck-fail", "reason": "near_key_level", "sym": sym, "dir": direction, "cp": cp0, "min_dist_pips": float(cfg.trade_min_dist_keylvl_pips)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception:
             pass
-        return
+        return False
 
     setup_sig = hashlib.sha1(f"{sym}|{direction}|{round(entry or 0,5)}|{round(sl or 0,5)}|{round(tp1 or 0,5)}|{round(tp2 or 0,5)}".encode("utf-8")).hexdigest()
     state = app._load_last_trade_state()
@@ -192,7 +194,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
             app._log_trade_decision({"stage": "precheck-fail", "reason": "duplicate_setup", "sym": sym, "dir": direction, "setup_sig": setup_sig, "last_sig": last_sig, "elapsed_s": (now_ts - last_ts), "cooldown_s": cool_s}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception:
             pass
-        return
+        return False
 
     pending_thr = int(cfg.trade_pending_threshold_points)
     try:
@@ -216,7 +218,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
                 app._log_trade_decision({"stage": "precheck-fail", "reason": "sl_zero", "sym": sym, "dir": direction, "entry": entry, "sl": sl, "point": point}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception:
                 pass
-            return
+            return False
         value_per_point = (mt5_utils.value_per_point(sym, info) or 0.0)
         if value_per_point <= 0:
             app.ui_status("Auto-Trade: cannot determine value per point.")
@@ -224,7 +226,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
                 app._log_trade_decision({"stage": "precheck-fail", "reason": "no_value_per_point", "sym": sym, "dir": direction}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception:
                 pass
-            return
+            return False
         if mode == "percent":
             equity = float(getattr(acc, "equity", 0.0))
             risk_money = equity * float(cfg.trade_equity_risk_pct) / 100.0
@@ -236,7 +238,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
                 app._log_trade_decision({"stage": "precheck-fail", "reason": "invalid_risk", "sym": sym, "dir": direction, "mode": mode, "equity": float(getattr(acc, "equity", 0.0))}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception:
                 pass
-            return
+            return False
         lots_total = risk_money / (dist_points * value_per_point)
 
     vol_min = getattr(info, "volume_min", 0.01) or 0.01
@@ -257,7 +259,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
             app._log_trade_decision({"stage": "precheck-fail", "reason": "volume_too_small_after_split", "sym": sym, "dir": direction, "lots_total": lots_total, "vol1": vol1, "vol2": vol2, "vol_min": vol_min}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception:
             pass
-        return
+        return False
 
     deviation = int(cfg.trade_deviation_points)
     magic = int(cfg.trade_magic)
@@ -285,7 +287,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
     if cfg.auto_trade_dry_run:
         app.ui_status("Auto-Trade: DRY-RUN - logging only.")
         app._save_last_trade_state({"sig": setup_sig, "time": time.time()})
-        return
+        return True
 
     if use_pending:
         if direction == "long":
@@ -323,6 +325,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
             app._log_trade_decision({**log_base, "stage": "send", "errors": errs}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception:
             pass
+        return False
     else:
         app._save_last_trade_state({"sig": setup_sig, "time": time.time()})
         try:
@@ -330,6 +333,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
         except Exception:
             pass
         app.ui_status("Auto-Trade: placed TP1/TP2 orders.")
+        return True
 
 
 def mt5_manage_be_trailing(app, mt5_ctx: dict, cfg: RunConfig):
