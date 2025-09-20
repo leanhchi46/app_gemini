@@ -19,6 +19,7 @@ from src.services import news
 from src.utils import json_saver
 from src.utils import md_saver
 from src.config.constants import APP_DIR
+from src.utils import ui_utils
 
 if TYPE_CHECKING:
     from scripts.tool import TradingToolApp
@@ -65,15 +66,15 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
         paths, names = paths[:max_files], names[:max_files]
     total_imgs = len(paths)
     if total_imgs == 0:
-        app.ui_status("Không có ảnh để phân tích.")
-        app._enqueue(app._finalize_stopped)
+        ui_utils.ui_status(app, "Không có ảnh để phân tích.")
+        ui_utils._enqueue(app, app._finalize_stopped)
         return
 
     try:
         model = genai.GenerativeModel(model_name=model_name)
     except Exception as e:
-        app.ui_message("error", "Model", str(e))
-        app._enqueue(app._finalize_stopped)
+        ui_utils.ui_message(app, "error", "Model", str(e))
+        ui_utils._enqueue(app, app._finalize_stopped)
         return
 
     uploaded_files = []
@@ -88,7 +89,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
         try:
             should_run, reason = no_run.check_no_run_conditions(app)
             if not should_run:
-                app.ui_status(reason)
+                ui_utils.ui_status(app, reason)
                 app._log_trade_decision({
                     "stage": "no-run-skip",
                     "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -98,7 +99,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                 app._quick_be_trailing_sweep(cfg)
                 raise SystemExit
         except Exception as e:
-            app.ui_status(f"Lỗi kiểm tra No-Run: {e}")
+            ui_utils.ui_status(app, f"Lỗi kiểm tra No-Run: {e}")
 
         t_up0 = _tnow()
         cache = uploader.UploadCache.load() if cfg.cache_enabled else {}
@@ -146,9 +147,9 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                 text += "\n\n[PHỤ LỤC_MT5_JSON]\n" + mt5_ctx_text
 
             app.combined_report_text = text
-            app.ui_detail_replace(text)
+            ui_utils.ui_detail_replace(app, text)
             _ = md_saver.save_md_report(app, text, cfg)
-            app.ui_refresh_history_list()
+            ui_utils.ui_refresh_history_list(app)
 
             try:
                 mt5_dict_cache = {}
@@ -202,7 +203,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                     app.results[i]["status"] = "Đã upload"
                     app._update_tree_row(i, "Đã upload")
 
-            app.ui_status(f"Upload xong trong {(_tnow()-t_up0):.2f}s")
+            ui_utils.ui_status(app, f"Upload xong trong {(_tnow()-t_up0):.2f}s")
         else:
             steps_upload   = 0
             steps_process  = 1
@@ -263,13 +264,13 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
             if cfg.mt5_enabled and safe_mt5_data and safe_mt5_data.raw and safe_mt5_data.raw.get("positions"):
                 prompt_path = APP_DIR / "prompt_entry_run_vision.txt"
                 prompt = prompt_path.read_text(encoding="utf-8")
-                app.ui_status("Worker: Lệnh đang mở, dùng prompt Vision Quản Lý Lệnh.")
+                ui_utils.ui_status(app, "Worker: Lệnh đang mở, dùng prompt Vision Quản Lý Lệnh.")
             else:
                 prompt_path = APP_DIR / "prompt_no_entry_vision.txt"
                 prompt = prompt_path.read_text(encoding="utf-8")
-                app.ui_status("Worker: Không có lệnh mở, dùng prompt Vision Tìm Lệnh Mới.")
+                ui_utils.ui_status(app, "Worker: Không có lệnh mở, dùng prompt Vision Tìm Lệnh Mới.")
         except Exception as e:
-             app.ui_status(f"Lỗi đọc prompt: {e}")
+             ui_utils.ui_status(app, f"Lỗi đọc prompt: {e}")
              # Fallback to old prompts if new ones fail
              if cfg.mt5_enabled and safe_mt5_data and safe_mt5_data.raw.get("positions"):
                 prompt = prompt_entry_run
@@ -308,7 +309,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                     "is_in_news_window": False, "reason": "News check failed", "upcoming_events": []
                 }
 
-        app.ui_status(f"Context+MT5 xong trong {(_tnow()-t_ctx0):.2f}s")
+        ui_utils.ui_status(app, f"Context+MT5 xong trong {(_tnow()-t_ctx0):.2f}s")
 
         if cfg.nt_enabled and mt5_dict:
             try:
@@ -342,9 +343,9 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                 if mt5_json_full:
                     note += "\n\n[PHỤ LỤC_MT5_JSON]\n" + mt5_json_full
                 app.combined_report_text = note
-                app.ui_detail_replace(note)
+                ui_utils.ui_detail_replace(app, note)
                 _ = app._auto_save_report(note, cfg)
-                app.ui_refresh_history_list()
+                ui_utils.ui_refresh_history_list(app)
 
                 try:
                     if mt5_dict:
@@ -354,7 +355,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                 early_exit = True
                 raise SystemExit
 
-        app.ui_status("Đang phân tích toàn bộ thư mục...")
+        ui_utils.ui_status(app, "Đang phân tích toàn bộ thư mục...")
         try:
             tf_section = app._build_timeframe_section([Path(p).name for p in paths]).strip()
 
@@ -407,7 +408,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
             trade_action_taken = False
             
             # Clear the detail view before starting the stream
-            app.ui_detail_replace("Đang nhận dữ liệu từ AI...")
+            ui_utils.ui_detail_replace(app, "Đang nhận dữ liệu từ AI...")
 
             stream_generator = _gen_stream_with_retry(model, parts)
             
@@ -422,7 +423,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                 if chunk_text:
                     combined_text += chunk_text
                     # Enqueue UI update to run on the main thread
-                    app._enqueue(lambda: app.ui_detail_replace(combined_text))
+                    ui_utils._enqueue(app, lambda: ui_utils.ui_detail_replace(app, combined_text))
 
                     # Attempt to auto-trade with the latest chunk if no action has been taken yet
                     if not trade_action_taken and cfg.auto_trade_enabled:
@@ -431,21 +432,21 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                             action_was_taken = auto_trade.auto_trade_if_high_prob(app, combined_text, mt5_dict, cfg)
                             if action_was_taken:
                                 trade_action_taken = True
-                                app.ui_status("Auto-Trade: Đã thực hiện hành động từ stream.")
+                                ui_utils.ui_status(app, "Auto-Trade: Đã thực hiện hành động từ stream.")
                         except Exception as e:
-                            app.ui_status(f"Lỗi Auto-Trade stream: {e}")
+                            ui_utils.ui_status(app, f"Lỗi Auto-Trade stream: {e}")
             
             if not combined_text:
                 combined_text = "[Không có nội dung trả về]"
 
-            app.ui_status(f"Model trả lời trong {(_tnow()-t_llm0):.2f}s")
+            ui_utils.ui_status(app, f"Model trả lời trong {(_tnow()-t_llm0):.2f}s")
             app._update_progress(steps_upload + steps_process, steps_upload + steps_process + 1)
             # --- END MODIFICATION ---
 
         except Exception as e:
             import traceback
             tb_str = traceback.format_exc()
-            app.ui_status(f"Lỗi nghiêm trọng trong worker: {e}")
+            ui_utils.ui_status(app, f"Lỗi nghiêm trọng trong worker: {e}")
             combined_text = f"[LỖI PHÂN TÍCH] Đã xảy ra lỗi ở giai đoạn gọi model AI.\n\nChi tiết: {e}\n\nTraceback:\n{tb_str}"
 
         for p in paths:
@@ -456,7 +457,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                 app._update_tree_row(idx_real, "Hoàn tất")
 
         app.combined_report_text = combined_text
-        app.ui_detail_replace(combined_text)
+        ui_utils.ui_detail_replace(app, combined_text)
 
         saved_path = md_saver.save_md_report(app, combined_text, cfg)
         try:
@@ -466,11 +467,11 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
             import traceback
             tb_str = traceback.format_exc()
             err_msg = f"Lỗi nghiêm trọng khi lưu ctx_*.json: {e}\n\n{tb_str}"
-            app.ui_status(err_msg)
-            app.ui_message("error", "Lỗi Lưu JSON", err_msg)
+            ui_utils.ui_status(app, err_msg)
+            ui_utils.ui_message(app, "error", "Lỗi Lưu JSON", err_msg)
             logging.exception("CRITICAL: Failed to save JSON report from worker.")
-        app.ui_refresh_history_list()
-        app.ui_refresh_json_list()
+        ui_utils.ui_refresh_history_list(app)
+        ui_utils.ui_refresh_json_list(app)
 
         if not app.stop_flag and not early_exit:
             try:
@@ -493,7 +494,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
     except SystemExit:
         pass
     except Exception as e:
-        app.ui_message("error", "Lỗi", str(e))
+        ui_utils.ui_message(app, "error", "Lỗi", str(e))
 
     finally:
         if not cfg.cache_enabled and cfg.delete_after:
@@ -502,4 +503,4 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                     app._maybe_delete(uf)
                 except Exception:
                     pass
-        app._enqueue(app._finalize_done if not app.stop_flag else app._finalize_stopped)
+        ui_utils._enqueue(app, app._finalize_done if not app.stop_flag else app._finalize_stopped)

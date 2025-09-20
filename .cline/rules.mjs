@@ -17,6 +17,8 @@ export default {
   // Thêm hướng dẫn tùy chỉnh vào prompt hệ thống của Cline
   prompt: {
     prepend: [
+      'Trả lời tôi bằng Tiếng Việt.',
+      '---',
       'Đây là một dự án giao dịch tự động bằng Python, tương tác với MetaTrader 5.',
       '---',
       'CẤU TRÚC DỰ ÁN:',
