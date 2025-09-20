@@ -21,7 +21,7 @@ export default {
       '---',
       'CẤU TRÚC DỰ ÁN:',
       '- `src/`: Chứa toàn bộ mã nguồn của ứng dụng.',
-      '  - `core/`: Logic nghiệp vụ cốt lõi (giao dịch, backtest).',
+      '  - `core/`: Logic nghiệp vụ cốt lõi (giao dịch, backtest, các quy tắc no-trade/no-run).',
       '  - `utils/`: Các tiện ích hỗ trợ.',
       '  - `services/`: Các module kết nối dịch vụ bên ngoài.',
       '  - `config/`: Các tệp cấu hình.',
@@ -33,7 +33,7 @@ export default {
       '- Bắt buộc dùng type hints đầy đủ và docstring ngắn gọn cho tất cả các hàm và phương thức.',
       '- Format code bằng `black` trước khi hoàn thành.',
       '- Lint code bằng `ruff` với các rule: E, F, I, B, C90.',
-      '- Viết comment nội bộ bằng tiếng Việt để giải thích các logic phức tạp hoặc các tác dụng phụ (side-effect) có thể xảy ra.',
+      '- Loại bỏ các comment tiếng Anh. Viết comment nội bộ bằng tiếng Việt để giải thích các logic phức tạp hoặc các tác dụng phụ (side-effect) có thể xảy ra.',
       '---'
     ].join('\n'),
   },

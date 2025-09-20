@@ -7,8 +7,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, List, Dict, Any
 import urllib.request
 
-from .config import RunConfig
-from .telegram_client import build_ssl_context
+from src.config.config import RunConfig
+from src.services.telegram_client import build_ssl_context
 
 
 FF_THISWEEK = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"

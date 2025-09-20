@@ -17,7 +17,7 @@ try:
 except Exception:  # pragma: no cover - optional optimization
     Image = None  # type: ignore
 
-from .constants import APP_DIR, UPLOAD_CACHE_JSON
+from src.config.constants import APP_DIR, UPLOAD_CACHE_JSON
 
 
 class UploadCache:

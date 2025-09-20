@@ -9,7 +9,7 @@ except ImportError:
     mt5 = None
 
 if TYPE_CHECKING:
-    from ..gemini_batch_image_analyzer import GeminiFolderOnceApp
+    from scripts.tool import TradingToolApp
 
 def _calculate_stats(win_loss_dict):
     """Helper to calculate win rate from a dict of {'wins': x, 'losses': y}."""

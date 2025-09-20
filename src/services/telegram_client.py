@@ -15,7 +15,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     certifi = None  # type: ignore
 
-from .utils import _tg_html_escape
+from src.utils.utils import _tg_html_escape
 
 
 def build_ssl_context(cafile: Optional[str], skip_verify: bool) -> ssl.SSLContext:
@@ -168,4 +168,3 @@ class TelegramClient:
             + (f"\n\n(Đã lưu: {saved_safe})" if saved_safe else "")
         )
         return msg
-

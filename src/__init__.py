@@ -1,10 +1,10 @@
 """
-Package: gemini_folder_once
+Package: src
 Purpose: Modularized components for Gemini Folder Analyze Once app.
 """
 
 # Re-export commonly used parts for convenience (optional)
-from .constants import (
+from .config.constants import (
     SUPPORTED_EXTS,
     DEFAULT_MODEL,
     APP_DIR,
@@ -12,5 +12,4 @@ from .constants import (
     API_KEY_ENC,
     UPLOAD_CACHE_JSON,
 )
-from .config import RunConfig
-
+from .config.config import RunConfig

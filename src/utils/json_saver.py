@@ -4,14 +4,15 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
-from . import utils, report_parser
-from .report_parser import find_balanced_json_after
-from .constants import APP_DIR
+from src.utils import utils, report_parser
+from src.utils.report_parser import find_balanced_json_after
+from src.config.constants import APP_DIR
 
 if TYPE_CHECKING:
-    from ..gemini_batch_image_analyzer import GeminiFolderOnceApp, RunConfig
+    from scripts.tool import TradingToolApp
+    from src.config.config import RunConfig
 
-def save_json_report(app: "GeminiFolderOnceApp", text: str, cfg: "RunConfig", names: list[str], composed_str: str):
+def save_json_report(app: "TradingToolApp", text: str, cfg: "RunConfig", names: list[str], composed_str: str):
     """
     Saves the JSON report file.
     This function is refactored from the main app class for better organization.

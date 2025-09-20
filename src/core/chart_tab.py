@@ -584,7 +584,7 @@ class ChartTabTV:
     # -------------------------
     def _compute_sessions_today(self, symbol: str) -> dict:
         try:
-            from . import mt5_utils as _mt5u
+            from src.utils import mt5_utils as _mt5u
             # The session ranges are now based on system time, not rates.
             # We can call the helper directly without fetching MT5 data here.
             return _mt5u.session_ranges_today(None) or {}
@@ -636,7 +636,7 @@ class ChartTabTV:
 
         # Upcoming high-impact events (limit 3) relevant to symbol
         try:
-            from . import news as _news
+            from src.services import news as _news
             feed = getattr(self.app, "ff_cache_events_local", []) or []
             evs = _news.next_events_for_symbol(feed, sym, limit=3)
             events_fmt = []

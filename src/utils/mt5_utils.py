@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from statistics import median
 from typing import Any, Iterable, Sequence
 
-from . import ict_analysis
+from src.core import ict_analysis
 from .safe_data import SafeMT5Data
 
 

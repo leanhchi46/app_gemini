@@ -10,15 +10,22 @@ from typing import TYPE_CHECKING
 # These imports are necessary for the worker function
 import google.generativeai as genai
 from google.api_core import exceptions
-from . import uploader, no_run, no_trade, auto_trade, report_parser, news, json_saver, md_saver
-from .constants import APP_DIR
+from src.services import uploader
+from src.core import no_run
+from src.core import no_trade
+from src.core import auto_trade
+from src.utils import report_parser
+from src.services import news
+from src.utils import json_saver
+from src.utils import md_saver
+from src.config.constants import APP_DIR
 
 if TYPE_CHECKING:
-    from ..gemini_batch_image_analyzer import GeminiFolderOnceApp
-    from .config import RunConfig
+    from scripts.tool import TradingToolApp
+    from src.config.config import RunConfig
 
 
-def run_analysis_worker(app: "GeminiFolderOnceApp", prompt_no_entry: str, prompt_entry_run: str, model_name: str, cfg: "RunConfig"):
+def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entry_run: str, model_name: str, cfg: "RunConfig"):
     """
     This is the main analysis worker thread. It handles image uploading,
     context building, Gemini API calls, and post-processing actions.

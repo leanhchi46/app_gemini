@@ -1,5 +1,0 @@
-def _ensure_mt5(self, *, want_account: bool = True) -> bool:
-        try:
-            import MetaTrader5 as mt5
-        except Exception:
-            self.acc_status.set("Chưa cài MetaTrader5 (pip install MetaTrader5)")

@@ -1,11 +1,12 @@
 from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
-from . import utils
+from src.utils import utils
 import re
 
 if TYPE_CHECKING:
-    from ..gemini_batch_image_analyzer import GeminiFolderOnceApp, RunConfig
+    from scripts.tool import TradingToolApp
+    from src.config.config import RunConfig
     from pathlib import Path
 
 def extract_human_readable_report(text: str) -> str:
@@ -24,7 +25,7 @@ def extract_human_readable_report(text: str) -> str:
         # to avoid saving an empty file.
         return text
 
-def save_md_report(app: "GeminiFolderOnceApp", text: str, cfg: "RunConfig") -> "Path":
+def save_md_report(app: "TradingToolApp", text: str, cfg: "RunConfig") -> "Path":
     """
     Saves the markdown report file and cleans up old reports.
     Now extracts only the human-readable part of the report.

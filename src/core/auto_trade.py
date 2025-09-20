@@ -3,16 +3,20 @@ from __future__ import annotations
 import hashlib
 import time
 from datetime import datetime, timedelta
+import json
+from pathlib import Path
+import os
 
 try:
     import MetaTrader5 as mt5  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
     mt5 = None  # type: ignore
 
-from .config import RunConfig
-from . import mt5_utils
-from . import no_trade
-from . import report_parser
+from src.config.config import RunConfig
+from src.utils import mt5_utils
+from src.core import no_trade
+from src.utils import report_parser
+from src.config.constants import APP_DIR
 
 
 def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConfig) -> bool:
@@ -156,35 +160,35 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
         if (bias == "bullish" and direction == "short") or (bias == "bearish" and direction == "long"):
             app.ui_status("Auto-Trade: opposite to H1 bias.")
             try:
-                app._log_trade_decision({"stage": "precheck-fail", "reason": "opposite_bias_h1", "bias_h1": bias, "dir": direction}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+                _log_trade_decision(app, {"stage": "precheck-fail", "reason": "opposite_bias_h1", "bias_h1": bias, "dir": direction}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception:
                 pass
             return False
 
-    rr2 = app._calc_rr(entry, sl, tp2)
+    rr2 = _calc_rr(entry, sl, tp2)
     if rr2 is not None and rr2 < float(cfg.trade_min_rr_tp2):
         app.ui_status(f"Auto-Trade: RR TP2 {rr2:.2f} < min.")
         try:
-            app._log_trade_decision({"stage": "precheck-fail", "reason": "rr_below_min", "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp2": tp2, "rr_tp2": rr2, "min_rr": float(cfg.trade_min_rr_tp2)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            _log_trade_decision(app, {"stage": "precheck-fail", "reason": "rr_below_min", "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp2": tp2, "rr_tp2": rr2, "min_rr": float(cfg.trade_min_rr_tp2)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception:
             pass
         return False
 
     cp0 = cp or ((ask + bid) / 2.0)
     try:
-        too_close = app._near_key_levels_too_close(mt5_ctx, float(cfg.trade_min_dist_keylvl_pips), cp0)
+        too_close = _near_key_levels_too_close(mt5_ctx, float(cfg.trade_min_dist_keylvl_pips), cp0)
     except Exception:
         too_close = False
     if mt5_ctx and too_close:
         app.ui_status("Auto-Trade: too close to key level.")
         try:
-            app._log_trade_decision({"stage": "precheck-fail", "reason": "near_key_level", "sym": sym, "dir": direction, "cp": cp0, "min_dist_pips": float(cfg.trade_min_dist_keylvl_pips)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            _log_trade_decision(app, {"stage": "precheck-fail", "reason": "near_key_level", "sym": sym, "dir": direction, "cp": cp0, "min_dist_pips": float(cfg.trade_min_dist_keylvl_pips)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception:
             pass
         return False
 
     setup_sig = hashlib.sha1(f"{sym}|{direction}|{round(entry or 0,5)}|{round(sl or 0,5)}|{round(tp1 or 0,5)}|{round(tp2 or 0,5)}".encode("utf-8")).hexdigest()
-    state = app._load_last_trade_state()
+    state = _load_last_trade_state()
     last_sig = (state.get("sig") or "") if isinstance(state, dict) else ""
     last_ts = float((state.get("time") if isinstance(state, dict) else 0.0) or 0.0)
     cool_s = int(cfg.trade_cooldown_min) * 60
@@ -192,7 +196,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
     if last_sig == setup_sig and (now_ts - last_ts) < cool_s:
         app.ui_status("Auto-Trade: duplicate setup, cooldown active.")
         try:
-            app._log_trade_decision({"stage": "precheck-fail", "reason": "duplicate_setup", "sym": sym, "dir": direction, "setup_sig": setup_sig, "last_sig": last_sig, "elapsed_s": (now_ts - last_ts), "cooldown_s": cool_s}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            _log_trade_decision(app, {"stage": "precheck-fail", "reason": "duplicate_setup", "sym": sym, "dir": direction, "setup_sig": setup_sig, "last_sig": last_sig, "elapsed_s": (now_ts - last_ts), "cooldown_s": cool_s}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception:
             pass
         return False
@@ -216,7 +220,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
         if dist_points <= 0:
             app.ui_status("Auto-Trade: zero SL distance.")
             try:
-                app._log_trade_decision({"stage": "precheck-fail", "reason": "sl_zero", "sym": sym, "dir": direction, "entry": entry, "sl": sl, "point": point}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+                _log_trade_decision(app, {"stage": "precheck-fail", "reason": "sl_zero", "sym": sym, "dir": direction, "entry": entry, "sl": sl, "point": point}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception:
                 pass
             return False
@@ -224,7 +228,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
         if value_per_point <= 0:
             app.ui_status("Auto-Trade: cannot determine value per point.")
             try:
-                app._log_trade_decision({"stage": "precheck-fail", "reason": "no_value_per_point", "sym": sym, "dir": direction}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+                _log_trade_decision(app, {"stage": "precheck-fail", "reason": "no_value_per_point", "sym": sym, "dir": direction}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception:
                 pass
             return False
@@ -236,7 +240,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
         if not risk_money or risk_money <= 0:
             app.ui_status("Auto-Trade: invalid risk.")
             try:
-                app._log_trade_decision({"stage": "precheck-fail", "reason": "invalid_risk", "sym": sym, "dir": direction, "mode": mode, "equity": float(getattr(acc, "equity", 0.0))}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+                _log_trade_decision(app, {"stage": "precheck-fail", "reason": "invalid_risk", "sym": sym, "dir": direction, "mode": mode, "equity": float(getattr(acc, "equity", 0.0))}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception:
                 pass
             return False
@@ -257,7 +261,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
     if vol1 < vol_min or vol2 < vol_min:
         app.ui_status("Auto-Trade: volume too small after split.")
         try:
-            app._log_trade_decision({"stage": "precheck-fail", "reason": "volume_too_small_after_split", "sym": sym, "dir": direction, "lots_total": lots_total, "vol1": vol1, "vol2": vol2, "vol_min": vol_min}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            _log_trade_decision(app, {"stage": "precheck-fail", "reason": "volume_too_small_after_split", "sym": sym, "dir": direction, "lots_total": lots_total, "vol1": vol1, "vol2": vol2, "vol_min": vol_min}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception:
             pass
         return False
@@ -281,13 +285,13 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
         "dry_run": bool(cfg.auto_trade_dry_run),
     }
     try:
-        app._log_trade_decision({**log_base, "stage": "pre-check"}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+        _log_trade_decision(app, {**log_base, "stage": "pre-check"}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
     except Exception:
         pass
 
     if cfg.auto_trade_dry_run:
         app.ui_status("Auto-Trade: DRY-RUN - logging only.")
-        app._save_last_trade_state({"sig": setup_sig, "time": time.time()})
+        _save_last_trade_state({"sig": setup_sig, "time": time.time()})
         return True
 
     if use_pending:
@@ -316,21 +320,21 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
     errs = []
     for req in reqs:
         prefer = "pending" if req.get("action") == mt5.TRADE_ACTION_PENDING else "market"
-        res = app._order_send_smart(req, prefer=prefer, retry_per_mode=2)
+        res = _order_send_smart(app, req, prefer=prefer, retry_per_mode=2)
         if not res or res.retcode != mt5.TRADE_RETCODE_DONE:
             errs.append(str(getattr(res, "comment", "unknown")))
 
     if errs:
         app.ui_status("Auto-Trade: order errors: " + "; ".join(errs))
         try:
-            app._log_trade_decision({**log_base, "stage": "send", "errors": errs}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            _log_trade_decision(app, {**log_base, "stage": "send", "errors": errs}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception:
             pass
         return False
     else:
-        app._save_last_trade_state({"sig": setup_sig, "time": time.time()})
+        _save_last_trade_state({"sig": setup_sig, "time": time.time()})
         try:
-            app._log_trade_decision({**log_base, "stage": "send", "ok": True}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            _log_trade_decision(app, {**log_base, "stage": "send", "ok": True}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception:
             pass
         app.ui_status("Auto-Trade: placed TP1/TP2 orders.")
@@ -415,8 +419,123 @@ def mt5_manage_be_trailing(app, mt5_ctx: dict, cfg: RunConfig):
 
                 if new_sl and (sl is None or abs(new_sl - sl) > (point * 1.5)):
                     req = dict(action=mt5.TRADE_ACTION_SLTP, position=pos_id, symbol=sym, sl=round(new_sl, mt5.symbol_info(sym).digits), tp=getattr(p, 'tp', None))
-                    _ = app._order_send_safe(req, retry=2)
+                    _ = _order_send_safe(app, req, retry=2)
             except Exception:
                 continue
+    except Exception:
+        pass
+
+def _order_send_safe(app, req, retry=2):
+    last = None
+    for i in range(max(1, retry)):
+        result = mt5.order_send(req)
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            return result
+        last = result
+        time.sleep(0.6)
+    return last
+
+def _fill_priority(prefer: str):
+    try:
+        IOC = mt5.ORDER_FILLING_IOC
+        FOK = mt5.ORDER_FILLING_FOK
+        RET = mt5.ORDER_FILLING_RETURN
+    except Exception:
+        IOC = 1; FOK = 0; RET = 2
+    return ([IOC, FOK, RET] if prefer == "market" else [FOK, IOC, RET])
+
+def _fill_name(val: int) -> str:
+    names = {
+        getattr(mt5, "ORDER_FILLING_IOC", 1): "IOC",
+        getattr(mt5, "ORDER_FILLING_FOK", 0): "FOK",
+        getattr(mt5, "ORDER_FILLING_RETURN", 2): "RETURN",
+    }
+    return names.get(val, str(val))
+
+def _order_send_smart(app, req: dict, prefer: str = "market", retry_per_mode: int = 2):
+    last_res = None
+    tried = []
+    for fill in _fill_priority(prefer):
+        r = dict(req)
+        r["type_filling"] = fill
+        res = _order_send_safe(app, r, retry=retry_per_mode)
+        tried.append(_fill_name(fill))
+
+        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+            if len(tried) > 1:
+                app.ui_status(f"Order OK sau khi đổi filling → {tried[-1]}.")
+            return res
+
+        last_res = res
+
+    cmt = getattr(last_res, "comment", "unknown") if last_res else "no result"
+    app.ui_status(f"Order FAIL với các filling: {', '.join(tried)} — {cmt}")
+    return last_res
+
+def _calc_rr(entry, sl, tp):
+    try:
+        risk = abs(entry - sl)
+        reward = abs(tp - entry)
+        return (reward / risk) if risk > 0 else None
+    except Exception:
+        return None
+
+def _near_key_levels_too_close(mt5_ctx: dict, min_pips: float, cp: float) -> bool:
+    try:
+        lst = (mt5_ctx.get("key_levels_nearby") or [])
+        for lv in lst:
+            dist = float(lv.get("distance_pips") or 0.0)
+            if dist and dist < float(min_pips):
+                return True
+    except Exception:
+        pass
+    return False
+
+def _log_trade_decision(app, data: dict, folder_override: str | None = None):
+    try:
+        d = app._get_reports_dir(folder_override=folder_override)
+        if not d:
+            return
+
+        p = d / f"trade_log_{datetime.now().strftime('%Y%m%d')}.jsonl"
+        line = (json.dumps(data, ensure_ascii=False, separators=(',', ':')) + "\n").encode("utf-8")
+
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        with app._trade_log_lock:
+            need_leading_newline = False
+            if p.exists():
+                try:
+                    sz = p.stat().st_size
+                    if sz > 0:
+                        with open(p, "rb") as fr:
+                            fr.seek(-1, os.SEEK_END)
+                            need_leading_newline = (fr.read(1) != b"\n")
+                except Exception:
+                    need_leading_newline = False
+
+            with open(p, "ab") as f:
+                if need_leading_newline:
+                    f.write(b"\n")
+                f.write(line)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+def _load_last_trade_state():
+    f = APP_DIR / "last_trade_state.json"
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _save_last_trade_state(state: dict):
+    f = APP_DIR / "last_trade_state.json"
+    try:
+        f.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
