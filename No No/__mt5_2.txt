@@ -1,0 +1,250 @@
+    Compute session ranges for Asia/London/NY (split NY into pre/post) in local VN time.
+    Input: M1 rates with keys {time:"YYYY-MM-DD HH:MM:SS", high, low, close, vol}.
+    """
+    if not m1_rates:
+        return {}
+
+    # Session schedule in VN time with DST-aware conversion for London/NY.
+    kills = _killzone_ranges_vn()
+    sessions = {"asia": {"start": "06:00", "end": "09:00"}, **kills}
+    return sessions
+
+
+def _series_from_mt5(symbol: str, tf_code: int, bars: int) -> list[dict]:
+    arr = mt5.copy_rates_from_pos(symbol, tf_code, 0, max(50, int(bars))) if mt5 else None
+    rows: list[dict] = []
+    if arr is not None:
+        for r in arr:
+            rows.append(
+                {
+                    "time": datetime.fromtimestamp(int(r["time"])).strftime("%Y-%m-%d %H:%M:%S"),
+                    "open": float(r["open"]),
+                    "high": float(r["high"]),
+                    "low": float(r["low"]),
+                    "close": float(r["close"]),
+                    "vol": int(r["tick_volume"]),
+                }
+            )
+    return rows
+
+
+def _hl_from(symbol: str, tf_code: int, bars: int) -> dict | None:
+    data = mt5.copy_rates_from_pos(symbol, tf_code, 0, bars) if mt5 else None
+    if data is None or len(data) == 0:
+        return None
+    hi = max([float(x["high"]) for x in data])
+    lo = min([float(x["low"]) for x in data])
+    op = float(data[0]["open"])  # first bar open
+    return {"open": op, "high": hi, "low": lo}
+
+
+def _nearby_key_levels(cp: float, info: Any, daily: dict | None, prev_day: dict | None) -> list[dict]:
+    lv: list[dict] = []
+    if prev_day:
+        if "high" in prev_day:
+            lv.append({"name": "PDH", "price": float(prev_day["high"])})
+        if "low" in prev_day:
+            lv.append({"name": "PDL", "price": float(prev_day["low"])})
+    if daily:
+        if daily.get("eq50") is not None:
+            lv.append({"name": "EQ50_D", "price": float(daily["eq50"])})
+        if daily.get("open") is not None:
+            lv.append({"name": "DO", "price": float(daily["open"])})
+
+    out = []
+    point = float(getattr(info, "point", 0.0) or 0.0)
+    for x in lv:
+        rel = "ABOVE" if x["price"] > cp else ("BELOW" if x["price"] < cp else "INSIDE")
+        dist = abs(x["price"] - cp) / (point or 0.01) if cp and point else None
+        out.append({"name": x["name"], "price": x["price"], "relation": rel, "distance_pips": dist})
+    return out
+
+
+def build_context(
+    symbol: str,
+    *,
+    n_m1: int = 120,
+    n_m5: int = 180,
+    n_m15: int = 96,
+    n_h1: int = 120,
+    return_json: bool = True,
+    plan: dict | None = None,
+) -> str | dict:
+    """
+    Fetches MT5 data + computes helpers used by the app.
+    Returns a JSON string (default) containing a single object with key MT5_DATA.
+    """
+    if mt5 is None:
+        return "" if return_json else {}
+
+    info = mt5.symbol_info(symbol)
+    if not info:
+        return "" if return_json else {}
+    if not getattr(info, "visible", True):
+        try:
+            mt5.symbol_select(symbol, True)
+        except Exception:
+            pass
+    acc = mt5.account_info()
+    tick = mt5.symbol_info_tick(symbol)
+
+    info_obj = {
+        "digits": getattr(info, "digits", None),
+        "point": getattr(info, "point", None),
+        "contract_size": getattr(info, "trade_contract_size", None),
+        "spread_current": getattr(info, "spread", None),
+        "swap_long": getattr(info, "swap_long", None),
+        "swap_short": getattr(info, "swap_short", None),
+    }
+    account_obj = None
+    if acc:
+        account_obj = {
+            "balance": float(getattr(acc, "balance", 0.0)),
+            "equity": float(getattr(acc, "equity", 0.0)),
+            "free_margin": float(getattr(acc, "margin_free", 0.0)),
+            "currency": getattr(acc, "currency", None),
+            "leverage": int(getattr(acc, "leverage", 0)) or None,
+        }
+    rules_obj = {
+        "volume_min": getattr(info, "volume_min", None),
+        "volume_max": getattr(info, "volume_max", None),
+        "volume_step": getattr(info, "volume_step", None),
+        "trade_tick_value": getattr(info, "trade_tick_value", None),
+        "trade_tick_size": getattr(info, "trade_tick_size", None),
+        "stop_level_points": getattr(info, "trade_stops_level", None),
+        "freeze_level_points": getattr(info, "trade_freeze_level", None),
+        "margin_initial": getattr(info, "margin_initial", None),
+        "margin_maintenance": getattr(info, "margin_maintenance", None),
+    }
+
+    tick_obj: dict[str, Any] = {}
+    if tick:
+        tick_obj = {
+            "bid": float(getattr(tick, "bid", 0.0)),
+            "ask": float(getattr(tick, "ask", 0.0)),
+            "last": float(getattr(tick, "last", 0.0)),
+            "time": int(getattr(tick, "time", 0)),
+        }
+    cp = float(tick_obj.get("bid") or tick_obj.get("last") or 0.0)
+
+    # Short and long horizon tick stats
+    tick_stats_5m: dict[str, Any] = {}
+    tick_stats_30m: dict[str, Any] = {}
+    try:
+        now_ts = int(time.time())
+        for minutes in (5, 30):
+            frm = now_ts - minutes * 60
+            ticks = mt5.copy_ticks_range(symbol, frm, now_ts, mt5.COPY_TICKS_INFO)
+            if ticks is None or len(ticks) < 5 or not info:
+                if minutes == 5:
+                    tick_stats_5m = {}
+                else:
+                    tick_stats_30m = {}
+                continue
+            spreads: list[int] = []
+            for t in ticks:
+                b, a = float(t["bid"]), float(t["ask"])  # type: ignore[index]
+                if a > 0 and b > 0:
+                    spreads.append(int(round((a - b) / (getattr(info, "point", 0.01) or 0.01))))
+            med = median(spreads) if spreads else None
+            p90 = sorted(spreads)[int(len(spreads) * 0.9)] if spreads else None
+            if minutes == 5:
+                tick_stats_5m = {"ticks_per_min": int(len(ticks) / 5), "median_spread": med, "p90_spread": p90}
+            else:
+                tick_stats_30m = {"ticks_per_min": int(len(ticks) / 30), "median_spread": med, "p90_spread": p90}
+    except Exception:
+        pass
+
+    # OHLCV series
+    series = {
+        "M1": _series_from_mt5(symbol, mt5.TIMEFRAME_M1, n_m1),
+        "M5": _series_from_mt5(symbol, mt5.TIMEFRAME_M5, n_m5),
+        "M15": _series_from_mt5(symbol, mt5.TIMEFRAME_M15, n_m15),
+        "H1": _series_from_mt5(symbol, mt5.TIMEFRAME_H1, n_h1),
+    }
+
+    # Higher timeframe levels
+    daily = _hl_from(symbol, mt5.TIMEFRAME_D1, 2) or {}
+    prev_day: dict[str, float] | None = None
+    try:
+        d2 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, 1)
+        if d2 is not None and len(d2) == 1:
+            prev_day = {"high": float(d2[0]["high"]), "low": float(d2[0]["low"])}
+    except Exception:
+        prev_day = None
+    weekly = _hl_from(symbol, mt5.TIMEFRAME_W1, 1) or {}
+    prev_week: dict[str, float] | None = None
+    try:
+        w2 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_W1, 1, 1)
+        if w2 is not None and len(w2) == 1:
+            prev_week = {"high": float(w2[0]["high"]), "low": float(w2[0]["low"])}
+    except Exception:
+        prev_week = None
+    monthly = _hl_from(symbol, mt5.TIMEFRAME_MN1, 1) or {}
+
+    # Enrich daily
+    midnight_open = None
+    if series["M1"]:
+        for r in series["M1"]:
+            if str(r["time"]).endswith("00:00:00"):
+                midnight_open = r["open"]
+                break
+    if daily:
+        hi = daily.get("high")
+        lo = daily.get("low")
+        eq50 = (hi + lo) / 2.0 if (hi and lo) else None
+        daily["eq50"] = eq50
+        daily["midnight_open"] = midnight_open
+
+    # Sessions and VWAPs
+    sessions_today = session_ranges_today(series["M1"]) if series["M1"] else {}
+    vwap_day = vwap_from_rates([r for r in series["M1"] if str(r["time"])[:10] == datetime.now().strftime("%Y-%m-%d")])
+    vwaps: dict[str, float | None] = {"day": vwap_day}
+    for sess in ["asia", "london", "newyork_pre", "newyork_post"]:
+        rng = sessions_today.get(sess, {})
+        sub: list[dict] = []
+        if rng and rng.get("start") and rng.get("end"):
+            for r in series["M1"]:
+                hh = str(r["time"])[11:16]
+                if str(r["time"])[:10] == datetime.now().strftime("%Y-%m-%d") and rng["start"] <= hh < rng["end"]:
+                    sub.append(r)
+        vwaps[sess] = vwap_from_rates(sub) if sub else None
+
+    # Trend refs (EMA) and ATR
+    ema_block: dict[str, dict[str, float | None]] = {}
+    for k in ["M1", "M5", "M15", "H1"]:
+        closes = [float(r["close"]) for r in series.get(k, [])]
+        ema_block[k] = {"ema50": ema(closes, 50) if closes else None, "ema200": ema(closes, 200) if closes else None}
+
+    atr_block: dict[str, float | None] = {}
+    atr_m5_now, tr_m5 = atr_series(series.get("M5", []), period=14)
+    atr_block["M5"] = atr_m5_now
+    atr_block["M1"] = atr_series(series.get("M1", []), period=14)[0]
+    atr_block["M15"] = atr_series(series.get("M15", []), period=14)[0]
+    atr_block["H1"] = atr_series(series.get("H1", []), period=14)[0]
+
+    # Volatility regime: based on EMA M5 separation vs ATR
+    vol_regime = None
+    try:
+        e50 = ema_block["M5"]["ema50"]
+        e200 = ema_block["M5"]["ema200"]
+        if e50 is not None and e200 is not None and atr_m5_now:
+            vol_regime = "trending" if abs(e50 - e200) > (atr_m5_now * 0.2) else "choppy"
+    except Exception:
+        pass
+
+    # Key levels around cp
+    key_near = _nearby_key_levels(cp, info, daily, prev_day)
+
+    # ADR and day position
+    adr = adr_stats(symbol, n=20)
+    day_open = daily.get("open") if daily else None
+    prev_close = None
+    try:
+        d1_prev_close_arr = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, 1)
+        if d1_prev_close_arr is not None and len(d1_prev_close_arr) == 1:
+            prev_close = float(d1_prev_close_arr[0]["close"])  # type: ignore[index]
+    except Exception:
+        pass
+    day_range = None
+    day_range_pct = None

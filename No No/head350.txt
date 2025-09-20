@@ -1,0 +1,350 @@
+# -*- coding: utf-8 -*-
+"""\nỨNG DỤNG: Gemini Folder Analyze Once — Phân tích Ảnh Theo Lô (1 lần) + Báo cáo ICT/SMC\n========================================================================================\nMục tiêu:\n- Tự động nạp toàn bộ ảnh trong 1 thư mục (các khung D1/H4/M15/M1 hoặc theo đặt tên).\n- (Tuỳ chọn) Lấy dữ liệu từ MT5 để bổ sung số liệu khách quan (ATR, spread, VWAP, PDH/PDL...).\n- Gọi model Gemini để tạo BÁO CÁO TIÊU CHUẨN (7 dòng + phần A→E + JSON máy-đọc-được).\n- Hỗ trợ cache/upload song song, xuất báo cáo .md, gửi Telegram, NO-TRADE, và auto-trade thử nghiệm.\n\nKiến trúc tổng quan:\n- Tkinter GUI (Notebook: Report/Prompt/Options) + hàng đợi UI để đảm bảo thread-safe.\n- Lớp GeminiFolderOnceApp: chứa toàn bộ trạng thái và quy trình điều phối.\n- RunConfig (dataclass): snapshot cấu hình từ UI để dùng trong worker thread.\n- Các khối chức năng: upload/cache, gọi Gemini, hợp nhất báo cáo, MT5/Telegram/News, auto-trade.\n\nLưu ý:\n- Không thay đổi logic/chức năng gốc; chỉ xoá các comment cũ và thay bằng docstring tiếng Việt.\n- Tất cả docstring đều nhằm giải thích ý tưởng/luồng xử lý; không ảnh hưởng hành vi runtime.\n"""
+
+from __future__ import annotations
+
+                              
+import os
+import sys
+import re
+import json
+import time
+import ssl
+import hashlib
+import queue
+import threading
+ 
+ 
+ 
+import ast
+from pathlib import Path
+import math
+import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
+import platform
+ 
+
+                     
+import tkinter as tk
+from tkinter import ttk, filedialog
+from tkinter.scrolledtext import ScrolledText
+
+                                                
+HAS_MPL = False
+try:
+    import matplotlib  # type: ignore
+    import mplfinance  # type: ignore
+    HAS_MPL = True
+except Exception:
+    HAS_MPL = False
+
+                                       
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
+
+try:
+    import google.generativeai as genai
+except Exception:
+    print("Bạn cần cài SDK Gemini: pip install google-generativeai")
+    sys.exit(1)
+
+ 
+
+try:
+    import MetaTrader5 as mt5
+except Exception:
+    mt5 = None
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None
+
+
+                                                             
+from gemini_folder_once.constants import (
+    SUPPORTED_EXTS,
+    DEFAULT_MODEL,
+    APP_DIR,
+    WORKSPACE_JSON,
+    API_KEY_ENC,
+    UPLOAD_CACHE_JSON,
+)
+
+from gemini_folder_once.utils import (
+    _xor_bytes,
+    _machine_key,
+    obfuscate_text,
+    deobfuscate_text,
+)
+
+from gemini_folder_once.telegram_client import TelegramClient, build_ssl_context
+
+                                                                         
+from gemini_folder_once.config import RunConfig
+from gemini_folder_once import context_builder, report_parser
+from gemini_folder_once import no_trade, news
+from gemini_folder_once.chart_tab import ChartTabTV
+from gemini_folder_once import uploader
+from gemini_folder_once import mt5_utils
+                                                                                
+def _session_ranges(
+    m1_rates,
+    tz_shift_hours: int | None = None,
+    source_tz: str = "UTC",
+    target_tz: str = "Asia/Ho_Chi_Minh",
+    day=None,
+    ):
+    """
+    Tính high/low theo *các phiên trong ngày* (theo giờ Việt Nam, IANA tz chuẩn), dựa trên M1.
+    London/New York tự xử lý DST. New York được tách 2 khóa: `newyork_pre`, `newyork_post`.
+    - tz_shift_hours != None: dùng dịch thô (tương thích cũ, KHÔNG DST).
+    - tz_shift_hours == None: dùng zoneinfo source_tz -> target_tz (có DST).
+    """
+    from datetime import datetime, timedelta, timezone
+    try:
+        from zoneinfo import ZoneInfo  # py>=3.9
+    except Exception:
+        ZoneInfo = None
+
+    def _to_local(dt_naive_str: str):
+        dt_utc = datetime.strptime(dt_naive_str, "%Y-%m-%d %H:%M:%S")
+        if tz_shift_hours is not None:
+            return dt_utc + timedelta(hours=int(tz_shift_hours))
+        if ZoneInfo:
+            src = ZoneInfo(source_tz or "UTC")
+            dst = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
+            return dt_utc.replace(tzinfo=src).astimezone(dst).replace(tzinfo=None)
+        # Fallback không zoneinfo: giả định UTC +7
+        return dt_utc + timedelta(hours=7)
+
+    if not m1_rates:
+        return {
+            "asia": {"start": "07:00", "end": "16:00", "high": None, "low": None},
+            "london": {"start": "14:00", "end": "23:00", "high": None, "low": None},
+            "newyork_pre": {"start": "19:00", "end": "24:00", "high": None, "low": None},
+            "newyork_post": {"start": "00:00", "end": "05:00", "high": None, "low": None},
+        }
+
+    first_local = _to_local(m1_rates[0]["time"])
+    today_local = day or first_local.date()
+    year = today_local.year
+
+    def _dst_on(zone: str, d) -> bool:
+        if not ZoneInfo:
+            return False
+        z = ZoneInfo(zone)
+        jan = datetime(year, 1, 1, tzinfo=z).utcoffset()
+        jul = datetime(year, 7, 1, tzinfo=z).utcoffset()
+        cur = datetime(d.year, d.month, d.day, tzinfo=z).utcoffset()
+        base = min(jan, jul)
+        return cur > base
+
+    uk_dst = _dst_on("Europe/London", today_local)
+    us_dst = _dst_on("America/New_York", today_local)
+
+    # Khung theo giờ VN (UTC+7), đã xét DST UK/US
+    if uk_dst and us_dst:
+        # UK+1, US+1
+        buckets = {
+            "asia":        (7, 16),
+            "london":      (14, 22),  # 8–16 UK local -> VN 14–22
+            "newyork_pre": (20, 24),  # 8–12 US local -> VN 19/20–24 (chọn 20–24)
+            "newyork_post":(0, 5),    # 12–16 US local -> VN 00–04/05 (chọn 00–05)
+        }
+    elif (not uk_dst) and (not us_dst):
+        # Cả hai không DST
+        buckets = {
+            "asia":        (7, 16),
+            "london":      (15, 23),  # 8–16 UK local -> VN 15–23
+            "newyork_pre": (19, 24),  # 8–12 US local -> VN 19–24
+            "newyork_post":(0, 4),    # 12–16 US local -> VN 00–04
+        }
+    elif uk_dst and (not us_dst):
+        # UK DST ON, US DST OFF (giai đoạn chuyển mùa hiếm)
+        buckets = {
+            "asia":        (7, 16),
+            "london":      (14, 22),
+            "newyork_pre": (19, 24),
+            "newyork_post":(0, 4),
+        }
+    else:
+        # UK DST OFF, US DST ON
+        buckets = {
+            "asia":        (7, 16),
+            "london":      (15, 23),
+            "newyork_pre": (20, 24),
+            "newyork_post":(0, 5),
+        }
+
+    out = {k: {"start": f"{v[0]:02d}:00", "end": f"{v[1]:02d}:00", "high": None, "low": None} for k, v in buckets.items()}
+    for r in m1_rates:
+        try:
+            t = _to_local(r["time"])
+        except Exception:
+            continue
+        if t.date() != today_local:
+            continue
+        h = t.hour
+        for name, (h0, h1) in buckets.items():
+            if h0 <= h < h1:
+                hi = out[name]["high"]
+                lo = out[name]["low"]
+                rh = float(r.get("high")) if r.get("high") is not None else None
+                rl = float(r.get("low")) if r.get("low") is not None else None
+                out[name]["high"] = rh if hi is None else (max(hi, rh) if rh is not None else hi)
+                out[name]["low"]  = rl if lo is None else (min(lo, rl) if rl is not None else lo)
+    return out
+
+# -----------------------------------------------------------------------------
+# Killzones theo GIỜ VIỆT NAM (UTC+7), suy từ giờ địa phương chuẩn quốc tế:
+#   - London: 08:00–11:00 Europe/London (local)
+#   - New York (pre): 08:30–11:00 America/New_York (local)
+#   - New York (post): 13:30–16:00 America/New_York (local)
+# Tự động xử lý DST/tuần lệch pha nhờ zoneinfo, trả về HH:MM theo Asia/Ho_Chi_Minh.
+# -----------------------------------------------------------------------------
+def _killzones_vn_for_date(day=None, target_tz: str = "Asia/Ho_Chi_Minh"):
+    """
+    Trả về dict killzones theo giờ Việt Nam cho ngày 'day' (datetime.date).
+    Nếu day=None, dùng ngày hiện tại. Không đụng tới Tkinter (an toàn gọi từ worker).
+    """
+    from datetime import datetime, date as _date
+    try:
+        from zoneinfo import ZoneInfo  # Python 3.9+
+    except Exception:
+        ZoneInfo = None
+
+    d = day or datetime.now().date()
+    # Fallback khi không có zoneinfo: dùng mapping mùa hè thường thấy (EDT/BST)
+    if ZoneInfo is None:
+        return {
+            "london":       {"start": "14:00", "end": "17:00"},
+            "newyork_pre":  {"start": "19:30", "end": "22:00"},
+            "newyork_post": {"start": "00:30", "end": "03:00"},
+        }
+
+    tz_vn = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
+    tz_uk = ZoneInfo("Europe/London")
+    tz_us = ZoneInfo("America/New_York")
+
+    def _fmt(dt_local_tzaware):
+        # Quy sang VN và định dạng HH:MM
+        return dt_local_tzaware.astimezone(tz_vn).strftime("%H:%M")
+
+    def _local_range(tz, h0, m0, h1, m1):
+        s = datetime(d.year, d.month, d.day, h0, m0, tzinfo=tz)
+        e = datetime(d.year, d.month, d.day, h1, m1, tzinfo=tz)
+        return _fmt(s), _fmt(e)
+
+    # London 08:00–11:00 local
+    l_st, l_ed = _local_range(tz_uk, 8, 0, 11, 0)
+    # New York pre 08:30–11:00 local
+    ny_pre_st, ny_pre_ed = _local_range(tz_us, 8, 30, 11, 0)
+    # New York post 13:30–16:00 local
+    ny_post_st, ny_post_ed = _local_range(tz_us, 13, 30, 16, 0)
+
+    return {
+        "london":       {"start": l_st,        "end": l_ed},
+        "newyork_pre":  {"start": ny_pre_st,   "end": ny_pre_ed},
+        "newyork_post": {"start": ny_post_st,  "end": ny_post_ed},
+    }
+\ndef _pip_size_from_info(info: dict) -> float:
+    """
+    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+    Tham số:
+      - info: dict — (tự suy luận theo ngữ cảnh sử dụng).
+    Trả về: float
+    Ghi chú:
+      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+    """
+    point = float((info or {}).get("point") or 0.0)
+    ppp = _points_per_pip_from_info(info)
+    return point * ppp if point else 0.0
+
+                                                                                    
+def _value_per_point_safe(symbol: str, info_obj=None) -> float | None:
+    """
+    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+    Tham số:
+      - symbol: str — (tự suy luận theo ngữ cảnh sử dụng).
+      - info_obj — (tự suy luận theo ngữ cảnh sử dụng).
+    Trả về: float | None
+    Ghi chú:
+      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+    """
+    try:
+        if mt5 is None:
+            return None
+        info_obj = info_obj or mt5.symbol_info(symbol)
+        if not info_obj:
+            return None
+
+        point = float(getattr(info_obj, "point", 0.0) or 0.0)
+        if point <= 0:
+            return None
+
+        tick_value = float(getattr(info_obj, "trade_tick_value", 0.0) or 0.0)
+        tick_size  = float(getattr(info_obj, "trade_tick_size", 0.0) or 0.0)
+
+                                                                            
+        if tick_value > 0 and tick_size > 0:
+            return tick_value * (point / tick_size)
+
+                                                                                       
+        try:
+            tick = mt5.symbol_info_tick(symbol)
+            mid = None
+            if tick:
+                bid = float(getattr(tick, "bid", 0.0) or 0.0)
+                ask = float(getattr(tick, "ask", 0.0) or 0.0)
+                mid = (bid + ask) / 2.0 if (bid and ask) else (ask or bid)
+            if mid and point > 0:
+                pr = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, symbol, 1.0, mid, mid + point)
+                if isinstance(pr, (int, float)):
+                    return abs(float(pr))
+        except Exception:
+            pass
+
+                                                          
+        csize = float(getattr(info_obj, "trade_contract_size", 0.0) or 0.0)
+        if csize > 0:
+            return csize * point
+
+        return None
+    except Exception:
+        return None
+
+from gemini_folder_once.utils import _tg_html_escape
+
+                                                    
+class GeminiFolderOnceApp:
+    """
+    Lớp giao diện và điều phối chính của ứng dụng: quản lý cấu hình, hàng đợi UI, tải ảnh, gọi Gemini, tổng hợp báo cáo, tích hợp MT5/Telegram và (tuỳ chọn) auto-trade.
+    Trách nhiệm chính:
+      - Khởi tạo UI (Notebook: Report/Prompt/Options, v.v.).
+      - Đọc/ghi workspace, cache, prompt.
+      - Quy trình phân tích 1 lần: nạp ảnh → (tối ưu/cache) upload → gọi Gemini → gom báo cáo.
+      - (Tuỳ chọn) Lấy dữ liệu MT5, tạo JSON ngữ cảnh, lọc NO-TRADE, gửi Telegram.
+      - Quản trị thread an toàn với Tkinter thông qua hàng đợi UI.
+    """
+    def __init__(self, root: tk.Tk):
+        """
+        Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+        Tham số:
+          - root: tk.Tk — (tự suy luận theo ngữ cảnh sử dụng).
+        Trả về: None hoặc giá trị nội bộ tuỳ ngữ cảnh.
+        Ghi chú:
+          - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+        """
+        self.root = root
+        self.root.title("PHẦN MỀM GIAO DỊCH TỰ ĐỘNG BY CHÍ")
+        self.root.geometry("1180x780")
+        self.root.minsize(1024, 660)
+        self._trade_log_lock = threading.Lock()
+                                                              
+        self._ui_log_lock = threading.Lock()
+
+                          

@@ -1,6 +1,0 @@
-no cover - optional UI deps
-    Figure = None  # type: ignore
-    FigureCanvasTkAgg = None  # type: ignore
-
-
-class Chart

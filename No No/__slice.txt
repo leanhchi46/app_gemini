@@ -1,0 +1,8 @@
+Notebook: Report/Prompt/Options) + hàng đợi UI để đảm bảo thread-safe.\n- Lớp GeminiFolderOnceApp: chứa toàn bộ trạng thái và quy trình điều phối.\n- RunConfig (dataclass): snapshot cấu hình từ UI để dùng trong worker thread.\n- Các khối chức năng: upload/cache, gọi Gemini, hợp nhất báo cáo, MT5/Telegram/News, auto-trade.\n\nLưu ý:\n- Không thay đổi logic/chức năng gốc; chỉ xoá các comment cũ và thay bằng docstring tiếng Việt.\n- Tất cả docstring đều nhằm giải thích ý tưởng/luồng xử lý; không ảnh hưởng hành vi runtime.\n"""
+
+from __future__ import annotations
+
+import os
+import sys
+import
+

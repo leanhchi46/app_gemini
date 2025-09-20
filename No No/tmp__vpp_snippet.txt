@@ -1,0 +1,49 @@
+def _value_per_point_safe(symbol: str, info_obj=None) -> float | None:
+    """
+    Mục đích: Hàm/thủ tục tiện ích nội bộ phục vụ workflow tổng thể của ứng dụng.
+    Tham số:
+      - symbol: str — (tự suy luận theo ngữ cảnh sử dụng).
+      - info_obj — (tự suy luận theo ngữ cảnh sử dụng).
+    Trả về: float | None
+    Ghi chú:
+      - Nên gọi trên main thread nếu tương tác trực tiếp với Tkinter; nếu từ worker thread thì sử dụng hàng đợi UI để tránh đụng độ.
+    """
+    try:
+        if mt5 is None:
+            return None
+        info_obj = info_obj or mt5.symbol_info(symbol)
+        if not info_obj:
+            return None
+
+        point = float(getattr(info_obj, "point", 0.0) or 0.0)
+        if point <= 0:
+            return None
+
+        tick_value = float(getattr(info_obj, "trade_tick_value", 0.0) or 0.0)
+        tick_size  = float(getattr(info_obj, "trade_tick_size", 0.0) or 0.0)
+
+        if tick_value > 0 and tick_size > 0:
+            return tick_value * (point / tick_size)
+
+        try:
+            tick = mt5.symbol_info_tick(symbol)
+            mid = None
+            if tick:
+                bid = float(getattr(tick, "bid", 0.0) or 0.0)
+                ask = float(getattr(tick, "ask", 0.0) or 0.0)
+                mid = (bid + ask) / 2.0 if (bid and ask) else (ask or bid)
+            if mid and point > 0:
+                pr = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, symbol, 1.0, mid, mid + point)
+                if isinstance(pr, (int, float)):
+                    return abs(float(pr))
+        except Exception:
+            pass
+
+        csize = float(getattr(info_obj, "trade_contract_size", 0.0) or 0.0)
+        if csize > 0:
+            return csize * point
+
+        return None
+    except Exception:
+        return None
+

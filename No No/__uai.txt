@@ -1,0 +1,8 @@
+def _update_account_info(self, symbol: str):
+        try:
+            import MetaTrader5 as mt5
+            ai = mt5.account_info()
+            if ai:
+                self.acc_balance.set(f"{ai.balance:.2f}")
+                self.acc_equity.set(f"{ai.equity:.2f}")
+                self.acc_margin.set
