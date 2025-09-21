@@ -1,0 +1,82 @@
+{"stage": "status_update", "t": "2025-09-21 17:14:43", "message": "Đã nạp 2 prompt từ file."}
+{"stage": "status_update", "t": "2025-09-21 17:14:43", "message": "Đã nạp 4 ảnh. Sẵn sàng phân tích 1 lần."}
+{"stage": "status_update", "t": "2025-09-21 17:14:46", "message": "Lưu ý: Cache ảnh đang bật, KHÔNG nên xoá file trên Gemini sau phân tích."}
+{"stage": "status_update", "t": "2025-09-21 17:14:46", "message": "Đã xoá kết quả khỏi giao diện."}
+{"stage": "status_update", "t": "2025-09-21 17:14:46", "message": "Đã nạp 4 ảnh. Sẵn sàng phân tích 1 lần."}
+{"stage": "status_update", "t": "2025-09-21 17:14:46", "message": "Đang nạp lại ảnh từ thư mục đã chọn..."}
+{"stage": "no-run-skip", "t": "2025-09-21 17:14:46", "reason": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:14:46", "message": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:14:46", "message": "Lỗi nghiêm trọng trong worker: 'TradingToolApp' object has no attribute '_quick_be_trailing_sweep'"}
+{"stage": "status_update", "t": "2025-09-21 17:14:46", "message": "Lỗi nghiêm trọng khi lưu ctx_*.json: 'TradingToolApp' object has no attribute 'ui_status'\n\nTraceback (most recent call last):\n  File \"D:\\app_gemini\\src\\core\\worker.py\", line 477, in run_analysis_worker\n    json_saver.save_json_report(app, combined_text, cfg, names, composed)\n  File \"D:\\app_gemini\\src\\utils\\json_saver.py\", line 75, in save_json_report\n    app.ui_status(\"Cảnh báo: Không tìm thấy khối JSON nào để lưu.\")\n    ^^^^^^^^^^^^^\nAttributeError: 'TradingToolApp' object has no attribute 'ui_status'\n"}
+{"stage": "run-end", "t": "2025-09-21 17:14:53"}
+{"stage": "status_update", "t": "2025-09-21 17:14:53", "message": "Tự động chạy sau 30s."}
+{"stage": "status_update", "t": "2025-09-21 17:14:53", "message": "Đã hoàn tất phân tích toàn bộ thư mục."}
+{"stage": "status_update", "t": "2025-09-21 17:15:25", "message": "Lưu ý: Cache ảnh đang bật, KHÔNG nên xoá file trên Gemini sau phân tích."}
+{"stage": "status_update", "t": "2025-09-21 17:15:25", "message": "Đã xoá kết quả khỏi giao diện."}
+{"stage": "status_update", "t": "2025-09-21 17:15:25", "message": "Đã nạp 4 ảnh. Sẵn sàng phân tích 1 lần."}
+{"stage": "status_update", "t": "2025-09-21 17:15:25", "message": "Đang nạp lại ảnh từ thư mục đã chọn..."}
+{"stage": "no-run-skip", "t": "2025-09-21 17:15:25", "reason": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:15:26", "message": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:15:27", "message": "Lỗi nghiêm trọng khi lưu ctx_*.json: 'TradingToolApp' object has no attribute 'ui_status'\n\nTraceback (most recent call last):\n  File \"D:\\app_gemini\\src\\core\\worker.py\", line 477, in run_analysis_worker\n    json_saver.save_json_report(app, combined_text, cfg, names, composed)\n  File \"D:\\app_gemini\\src\\utils\\json_saver.py\", line 75, in save_json_report\n    app.ui_status(\"Cảnh báo: Không tìm thấy khối JSON nào để lưu.\")\n    ^^^^^^^^^^^^^\nAttributeError: 'TradingToolApp' object has no attribute 'ui_status'\n"}
+{"stage": "status_update", "t": "2025-09-21 17:15:27", "message": "Lỗi nghiêm trọng trong worker: 'TradingToolApp' object has no attribute '_quick_be_trailing_sweep'"}
+{"stage": "run-end", "t": "2025-09-21 17:15:34"}
+{"stage": "status_update", "t": "2025-09-21 17:15:34", "message": "Đã hoàn tất phân tích toàn bộ thư mục."}
+{"stage": "status_update", "t": "2025-09-21 17:15:34", "message": "Tự động chạy sau 30s."}
+{"stage": "status_update", "t": "2025-09-21 17:16:15", "message": "Đã nạp 2 prompt từ file."}
+{"stage": "status_update", "t": "2025-09-21 17:16:15", "message": "Đã nạp 4 ảnh. Sẵn sàng phân tích 1 lần."}
+{"stage": "status_update", "t": "2025-09-21 17:16:23", "message": "Đã xoá kết quả khỏi giao diện."}
+{"stage": "status_update", "t": "2025-09-21 17:16:23", "message": "Lưu ý: Cache ảnh đang bật, KHÔNG nên xoá file trên Gemini sau phân tích."}
+{"stage": "status_update", "t": "2025-09-21 17:16:23", "message": "Đã nạp 4 ảnh. Sẵn sàng phân tích 1 lần."}
+{"stage": "status_update", "t": "2025-09-21 17:16:23", "message": "Đang nạp lại ảnh từ thư mục đã chọn..."}
+{"stage": "no-run-skip", "t": "2025-09-21 17:16:23", "reason": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:16:23", "message": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:19:14", "message": "Đã nạp 4 ảnh. Sẵn sàng phân tích 1 lần."}
+{"stage": "status_update", "t": "2025-09-21 17:19:14", "message": "Đã nạp 2 prompt từ file."}
+{"stage": "status_update", "t": "2025-09-21 17:19:27", "message": "Lưu ý: Cache ảnh đang bật, KHÔNG nên xoá file trên Gemini sau phân tích."}
+{"stage": "status_update", "t": "2025-09-21 17:19:27", "message": "Đã xoá kết quả khỏi giao diện."}
+{"stage": "status_update", "t": "2025-09-21 17:19:27", "message": "Đã nạp 4 ảnh. Sẵn sàng phân tích 1 lần."}
+{"stage": "status_update", "t": "2025-09-21 17:19:27", "message": "Đang nạp lại ảnh từ thư mục đã chọn..."}
+{"stage": "no-run-skip", "t": "2025-09-21 17:19:28", "reason": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:19:28", "message": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:19:28", "message": "Lỗi nghiêm trọng khi lưu ctx_*.json: 'TradingToolApp' object has no attribute 'ui_status'\n\nTraceback (most recent call last):\n  File \"D:\\app_gemini\\src\\core\\worker.py\", line 478, in run_analysis_worker\n    json_saver.save_json_report(app, combined_text, cfg, names, composed)\n  File \"D:\\app_gemini\\src\\utils\\json_saver.py\", line 75, in save_json_report\n    app.ui_status(\"Cảnh báo: Không tìm thấy khối JSON nào để lưu.\")\n    ^^^^^^^^^^^^^\nAttributeError: 'TradingToolApp' object has no attribute 'ui_status'\n"}
+{"stage": "run-end", "t": "2025-09-21 17:19:33"}
+{"stage": "status_update", "t": "2025-09-21 17:19:33", "message": "Đã hoàn tất phân tích toàn bộ thư mục."}
+{"stage": "status_update", "t": "2025-09-21 17:19:33", "message": "Tự động chạy sau 30s."}
+{"stage": "status_update", "t": "2025-09-21 17:19:35", "message": "Đã xoá kết quả khỏi giao diện."}
+{"stage": "status_update", "t": "2025-09-21 17:19:35", "message": "Lưu ý: Cache ảnh đang bật, KHÔNG nên xoá file trên Gemini sau phân tích."}
+{"stage": "status_update", "t": "2025-09-21 17:19:35", "message": "Đã nạp 4 ảnh. Sẵn sàng phân tích 1 lần."}
+{"stage": "status_update", "t": "2025-09-21 17:19:35", "message": "Đang nạp lại ảnh từ thư mục đã chọn..."}
+{"stage": "status_update", "t": "2025-09-21 17:19:36", "message": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "no-run-skip", "t": "2025-09-21 17:19:36", "reason": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:19:36", "message": "Lỗi nghiêm trọng khi lưu ctx_*.json: 'TradingToolApp' object has no attribute 'ui_status'\n\nTraceback (most recent call last):\n  File \"D:\\app_gemini\\src\\core\\worker.py\", line 478, in run_analysis_worker\n    json_saver.save_json_report(app, combined_text, cfg, names, composed)\n  File \"D:\\app_gemini\\src\\utils\\json_saver.py\", line 75, in save_json_report\n    app.ui_status(\"Cảnh báo: Không tìm thấy khối JSON nào để lưu.\")\n    ^^^^^^^^^^^^^\nAttributeError: 'TradingToolApp' object has no attribute 'ui_status'\n"}
+{"stage": "run-end", "t": "2025-09-21 17:19:48"}
+{"stage": "status_update", "t": "2025-09-21 17:19:48", "message": "Tự động chạy sau 30s."}
+{"stage": "status_update", "t": "2025-09-21 17:19:48", "message": "Đã hoàn tất phân tích toàn bộ thư mục."}
+{"stage": "status_update", "t": "2025-09-21 17:20:18", "message": "Lưu ý: Cache ảnh đang bật, KHÔNG nên xoá file trên Gemini sau phân tích."}
+{"stage": "status_update", "t": "2025-09-21 17:20:18", "message": "Đã xoá kết quả khỏi giao diện."}
+{"stage": "status_update", "t": "2025-09-21 17:20:18", "message": "Đang nạp lại ảnh từ thư mục đã chọn..."}
+{"stage": "status_update", "t": "2025-09-21 17:20:18", "message": "Đã nạp 4 ảnh. Sẵn sàng phân tích 1 lần."}
+{"stage": "no-run-skip", "t": "2025-09-21 17:20:18", "reason": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:20:18", "message": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:25:16", "message": "Lỗi nghiêm trọng khi lưu ctx_*.json: 'TradingToolApp' object has no attribute 'ui_status'\n\nTraceback (most recent call last):\n  File \"D:\\app_gemini\\src\\core\\worker.py\", line 478, in run_analysis_worker\n    json_saver.save_json_report(app, combined_text, cfg, names, composed)\n  File \"D:\\app_gemini\\src\\utils\\json_saver.py\", line 75, in save_json_report\n    app.ui_status(\"Cảnh báo: Không tìm thấy khối JSON nào để lưu.\")\n    ^^^^^^^^^^^^^\nAttributeError: 'TradingToolApp' object has no attribute 'ui_status'\n"}
+{"stage": "run-end", "t": "2025-09-21 17:25:19"}
+{"stage": "status_update", "t": "2025-09-21 17:25:22", "message": "Đã hoàn tất phân tích toàn bộ thư mục."}
+{"stage": "status_update", "t": "2025-09-21 17:25:22", "message": "Tự động chạy sau 30s."}
+{"stage": "status_update", "t": "2025-09-21 17:25:50", "message": "Lưu ý: Cache ảnh đang bật, KHÔNG nên xoá file trên Gemini sau phân tích."}
+{"stage": "status_update", "t": "2025-09-21 17:25:50", "message": "Đã xoá kết quả khỏi giao diện."}
+{"stage": "status_update", "t": "2025-09-21 17:25:50", "message": "Đang nạp lại ảnh từ thư mục đã chọn..."}
+{"stage": "status_update", "t": "2025-09-21 17:25:50", "message": "Đã nạp 4 ảnh. Sẵn sàng phân tích 1 lần."}
+{"stage": "no-run-skip", "t": "2025-09-21 17:25:50", "reason": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:25:50", "message": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:27:01", "message": "Lỗi nghiêm trọng khi lưu ctx_*.json: 'TradingToolApp' object has no attribute 'ui_status'\n\nTraceback (most recent call last):\n  File \"D:\\app_gemini\\src\\core\\worker.py\", line 478, in run_analysis_worker\n    json_saver.save_json_report(app, combined_text, cfg, names, composed)\n  File \"D:\\app_gemini\\src\\utils\\json_saver.py\", line 75, in save_json_report\n    app.ui_status(\"Cảnh báo: Không tìm thấy khối JSON nào để lưu.\")\n    ^^^^^^^^^^^^^\nAttributeError: 'TradingToolApp' object has no attribute 'ui_status'\n"}
+{"stage": "run-end", "t": "2025-09-21 17:27:13"}
+{"stage": "status_update", "t": "2025-09-21 17:27:18", "message": "Đã hoàn tất phân tích toàn bộ thư mục."}
+{"stage": "status_update", "t": "2025-09-21 17:27:18", "message": "Tự động chạy sau 30s."}
+{"stage": "status_update", "t": "2025-09-21 17:27:43", "message": "Lưu ý: Cache ảnh đang bật, KHÔNG nên xoá file trên Gemini sau phân tích."}
+{"stage": "status_update", "t": "2025-09-21 17:27:43", "message": "Đang nạp lại ảnh từ thư mục đã chọn..."}
+{"stage": "status_update", "t": "2025-09-21 17:27:43", "message": "Đã xoá kết quả khỏi giao diện."}
+{"stage": "status_update", "t": "2025-09-21 17:27:43", "message": "Đã nạp 4 ảnh. Sẵn sàng phân tích 1 lần."}
+{"stage": "no-run-skip", "t": "2025-09-21 17:27:43", "reason": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:27:43", "message": "Bỏ qua vì đang là cuối tuần"}
+{"stage": "status_update", "t": "2025-09-21 17:28:01", "message": "Đang gửi yêu cầu dừng..."}
+{"stage": "status_update", "t": "2025-09-21 17:28:01", "message": "Đang dừng... (Không có tác vụ upload nào đang hoạt động)"}

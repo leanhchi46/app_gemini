@@ -79,8 +79,7 @@ from src.core import worker
 from src.core.chart_tab import ChartTabTV
 from src.utils import ui_utils
 from src.utils import ui_builder
-from src.services import news
-
+from src.services import news, telegram_client
 class TradingToolApp:
     """
     Lớp chính điều khiển giao diện và luồng hoạt động của ứng dụng.
@@ -116,6 +115,10 @@ class TradingToolApp:
         self.results = []
         self.combined_report_text = ""
         self.ui_queue = queue.Queue()
+
+        # Thêm các thuộc tính để theo dõi luồng worker và executor
+        self.active_worker_thread = None
+        self.active_executor = None
 
         # Thêm lại các phương thức giữ chỗ bị thiếu để tránh lỗi AttributeError
         self._telegram_test = lambda: ui_utils.ui_message(self, "info", "Telegram", "Chức năng này chưa được cài đặt.")
@@ -221,59 +224,109 @@ class TradingToolApp:
         try:
             now_ts = time.time()
             last_ts = float(self.ff_cache_fetch_time or 0.0)
-            # Nếu cache vẫn còn hiệu lực, không làm gì cả
             if (now_ts - last_ts) <= max(0, int(ttl or 0)):
                 return
 
-            # Chạy bất đồng bộ trong một luồng riêng để không làm treo giao diện
+            # Tạo snapshot config ở luồng chính để đảm bảo an toàn thread
+            final_cfg = cfg or self._snapshot_config()
+
             if async_fetch:
                 with self._news_refresh_lock:
                     if self._news_refresh_inflight:
                         return
                     self._news_refresh_inflight = True
 
-                def _do():
+                def _do_async(config: RunConfig):
                     try:
-                        _cfg = cfg or self._snapshot_config()
-                        ev = news.fetch_high_impact_events_for_cfg(_cfg, timeout=20)
+                        ev = news.fetch_high_impact_events_for_cfg(config, timeout=20)
                         self.ff_cache_events_local = ev or []
                         self.ff_cache_fetch_time = time.time()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.warning(f"Lỗi khi làm mới tin tức (async): {e}")
                     finally:
                         with self._news_refresh_lock:
                             self._news_refresh_inflight = False
 
-                threading.Thread(target=_do, daemon=True).start()
+                threading.Thread(target=_do_async, args=(final_cfg,), daemon=True).start()
                 return
 
-            acquired = False
-            try:
-                self._news_refresh_lock.acquire()
-                acquired = True
-                if self._news_refresh_inflight:
-                    return
-                self._news_refresh_inflight = True
-            finally:
-                if acquired:
-                    self._news_refresh_lock.release()
+            # Logic chạy đồng bộ (synchronous)
+            if not self._news_refresh_lock.acquire(blocking=False):
+                return
 
             try:
-                _cfg = cfg or self._snapshot_config()
-                ev = news.fetch_high_impact_events_for_cfg(_cfg, timeout=20)
+                self._news_refresh_inflight = True
+                ev = news.fetch_high_impact_events_for_cfg(final_cfg, timeout=20)
                 self.ff_cache_events_local = ev or []
                 self.ff_cache_fetch_time = time.time()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning(f"Lỗi khi làm mới tin tức (sync): {e}")
             finally:
-                with self._news_refresh_lock:
-                    self._news_refresh_inflight = False
-        except Exception:
-            pass
+                self._news_refresh_inflight = False
+                self._news_refresh_lock.release()
+        except Exception as e:
+            logging.error(f"Lỗi không mong muốn trong _refresh_news_cache: {e}")
 
     def _toggle_api_visibility(self):
         # Chuyển đổi trạng thái hiển thị (ẩn/hiện) của ô nhập API key
-        ui_builder.toggle_api_visibility(self)
+        # Logic được chuyển trực tiếp vào đây sau khi tái cấu trúc ui_builder
+        self.api_entry.configure(show="" if self.api_entry.cget("show") == "*" else "*")
+
+    def _log_trade_decision(self, data: dict, folder_override: str | None = None):
+        """Ghi lại các quyết định hoặc sự kiện quan trọng vào file log JSONL."""
+        try:
+            d = self._get_reports_dir(folder_override=folder_override)
+            if not d:
+                return
+            
+            log_file = d / f"trade_log_{datetime.now().strftime('%Y%m%d')}.jsonl"
+            line = json.dumps(data, ensure_ascii=False)
+            
+            # Sử dụng lock để đảm bảo ghi file an toàn từ nhiều luồng
+            with self._trade_log_lock:
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        except Exception as e:
+            logging.error(f"Lỗi khi ghi trade log: {e}")
+
+    def _quick_be_trailing_sweep(self, cfg: RunConfig):
+        """Chạy nhanh việc quản lý BE/Trailing cho các lệnh đang mở."""
+        if not (self.mt5_enabled_var.get() and self.auto_trade_enabled_var.get()):
+            return
+        
+        def _sweep(c):
+            try:
+                # Xây dựng ngữ cảnh MT5 để lấy dữ liệu mới nhất
+                safe_data = self._mt5_build_context(plan=None, cfg=c)
+                if safe_data and safe_data.raw:
+                    auto_trade.mt5_manage_be_trailing(self, safe_data.raw, c)
+            except Exception as e:
+                logging.warning(f"Lỗi trong _quick_be_trailing_sweep: {e}")
+
+        # Chạy trong một luồng riêng để không chặn worker
+        threading.Thread(target=_sweep, args=(cfg,), daemon=True).start()
+
+    def _maybe_notify_telegram(self, report_text: str, report_path: Path | None, cfg: RunConfig):
+        """Gửi thông báo qua Telegram nếu được bật và có kết quả xác suất cao."""
+        if not cfg.telegram_enabled or not report_text:
+            return
+        
+        # Chỉ gửi nếu có tín hiệu "HIGH PROBABILITY" trong báo cáo
+        if "HIGH PROBABILITY" not in report_text.upper():
+            return
+
+        # Tạo một "chữ ký" cho báo cáo để tránh gửi trùng lặp
+        signature = report_parser.create_report_signature(report_text)
+        if signature == self._last_telegram_signature:
+            return
+        self._last_telegram_signature = signature
+
+        # Gửi thông báo trong một luồng riêng biệt
+        threading.Thread(
+            target=telegram_client.send_telegram_message,
+            args=(report_text, report_path, cfg),
+            daemon=True
+        ).start()
 
     def _snapshot_config(self) -> RunConfig:
         # Chụp lại toàn bộ trạng thái cấu hình hiện tại từ giao diện người dùng.
@@ -418,8 +471,6 @@ class TradingToolApp:
             else "Không tìm thấy ảnh phù hợp trong thư mục đã chọn."
         )
         ui_utils.ui_progress(self, 0)
-        if hasattr(self, "export_btn"):
-            self.export_btn.configure(state="disabled")
         if hasattr(self, "detail_text"):
             ui_utils.ui_detail_replace(self, "Báo cáo tổng hợp sẽ hiển thị tại đây sau khi phân tích.")
 
@@ -473,11 +524,10 @@ class TradingToolApp:
         self.stop_flag = False
         self.is_running = True
         self.stop_btn.configure(state="normal")
-        self.export_btn.configure(state="disabled")
 
         # Chạy logic phân tích chính trong một luồng riêng biệt
-        # để giao diện không bị đóng băng (treo)
-        t = threading.Thread(
+        # và lưu lại tham chiếu đến luồng này
+        self.active_worker_thread = threading.Thread(
             target=worker.run_analysis_worker,
             args=(
                 self,
@@ -488,13 +538,29 @@ class TradingToolApp:
             ),
             daemon=True
         )
-        t.start()
+        self.active_worker_thread.start()
 
     def stop_analysis(self):
-        # Gửi tín hiệu dừng cho luồng worker
-        if self.is_running:
-            self.stop_flag = True
-            ui_utils.ui_status(self, "Đang dừng sau khi hoàn tất tác vụ hiện tại...")
+        """
+        Gửi tín hiệu dừng cho luồng worker và hủy các tác vụ upload đang chờ.
+        """
+        if not self.is_running:
+            return
+
+        self.stop_flag = True
+        ui_utils.ui_status(self, "Đang gửi yêu cầu dừng...")
+
+        # Hủy các tác vụ upload đang chờ trong executor
+        if self.active_executor:
+            try:
+                # Hủy tất cả các future chưa bắt đầu chạy.
+                # wait=False để không chặn luồng UI.
+                self.active_executor.shutdown(wait=False, cancel_futures=True)
+                ui_utils.ui_status(self, "Đã yêu cầu hủy các tác vụ upload đang chờ.")
+            except Exception as e:
+                logging.warning(f"Lỗi khi shutdown executor: {e}")
+        else:
+            ui_utils.ui_status(self, "Đang dừng... (Không có tác vụ upload nào đang hoạt động)")
 
     def _find_balanced_json_after(self, text: str, start_idx: int):
         return report_parser.find_balanced_json_after(text, start_idx)
@@ -541,16 +607,18 @@ class TradingToolApp:
 
         self.is_running = False
         self.stop_flag = False
+        self.active_worker_thread = None
+        self.active_executor = None
         self.stop_btn.configure(state="disabled")
-        self.export_btn.configure(state="normal")
         ui_utils.ui_status(self, "Đã hoàn tất phân tích toàn bộ thư mục.")
         self._schedule_next_autorun()
 
     def _finalize_stopped(self):
         self.is_running = False
         self.stop_flag = False
+        self.active_worker_thread = None
+        self.active_executor = None
         self.stop_btn.configure(state="disabled")
-        self.export_btn.configure(state="normal")
         ui_utils.ui_status(self, "Đã dừng.")
         self._schedule_next_autorun()
 
@@ -918,6 +986,8 @@ class TradingToolApp:
 
     def _normalize_prompt_text(self, raw: str) -> str:
         s = raw.strip()
+        if not s:
+            return ""
 
         # Cố gắng phân tích văn bản đầu vào theo các định dạng khác nhau.
         # Ưu tiên 1: Phân tích dưới dạng một chuỗi JSON hoàn chỉnh.

@@ -1,1 +1,6 @@
-Dựa vào phân tích trên hãy comment bằng Tiếng Việt để tôi dễ hiểu code hơn
+phân tích code theo thứ tự logic
+
+ Dựa vào phân tích trên, hãy:
+-  Loại bỏ các comment tiếng Anh. 
+- Viết comment nội bộ bằng tiếng Việt để giải thích các logic phức tạp hoặc các tác dụng phụ (side-effect) có thể xảy ra. 
+- Sắp xếp lại code một cách logic và khoa học nhất
