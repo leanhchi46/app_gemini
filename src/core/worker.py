@@ -91,7 +91,8 @@ def _handle_no_change_scenario(app: "TradingToolApp", cfg: "RunConfig"):
         try:
             mt5_dict_cache = json.loads(mt5_ctx_text).get("MT5_DATA", {})
             if mt5_dict_cache:
-                auto_trade.mt5_manage_be_trailing(app, mt5_dict_cache, cfg)
+                # auto_trade.mt5_manage_be_trailing(app, mt5_dict_cache, cfg) # Tạm thời vô hiệu hóa
+                pass # Giữ khối lệnh hợp lệ sau khi comment
         except Exception as e:
             logging.warning(f"Lỗi khi quản lý BE/Trailing trong kịch bản không thay đổi: {e}")
             
@@ -347,7 +348,6 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                 "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "reason": reason
             }, folder_override=(app.mt5_symbol_var.get().strip() or None))
-            app._quick_be_trailing_sweep(cfg) # Vẫn quản lý lệnh đang chạy
             raise SystemExit(reason)
 
         # --- GIAI ĐOẠN 3: CHUẨN BỊ VÀ UPLOAD ẢNH ---
@@ -427,7 +427,8 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                 app._auto_save_report(note, cfg)
                 ui_utils.ui_refresh_history_list(app)
                 
-                if mt5_dict: auto_trade.mt5_manage_be_trailing(app, mt5_dict, cfg)
+                if mt5_dict: # auto_trade.mt5_manage_be_trailing(app, mt5_dict, cfg) # Tạm thời vô hiệu hóa
+                    pass # Giữ khối lệnh hợp lệ sau khi comment
                 early_exit = True
                 raise SystemExit("Điều kiện No-Trade được kích hoạt.")
 
@@ -490,7 +491,8 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
             if not app.stop_flag:
                 app._maybe_notify_telegram(combined_text, saved_path, cfg)
                 if mt5_dict:
-                    auto_trade.mt5_manage_be_trailing(app, mt5_dict, cfg)
+                    # auto_trade.mt5_manage_be_trailing(app, mt5_dict, cfg) # Tạm thời vô hiệu hóa
+                    pass # Giữ khối lệnh hợp lệ sau khi comment
 
         # Dọn dẹp file đã upload nếu được cấu hình
         if not cfg.cache_enabled and cfg.delete_after:

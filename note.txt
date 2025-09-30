@@ -135,3 +135,62 @@ tạo cửa sổ chính (`tk.Tk()`) và khởi tạo lớp `TradingToolApp`.
  bắt đầu một chu trình mới.
 
 Hy vọng phần giải thích và sơ đồ này giúp bạn hiểu rõ hơn về cách hoạt động của ứng dụng. Nếu có bất kỳ phần nào cần làm rõ thêm, đừng ngần ngại hỏi nhé.
+
+Chào bạn, dựa trên phân tích file `scripts/tool.py`, tôi có một số đề xuất để sắp xếp lại mã nguồn một cách hợp lý hơn, 
+giúp tăng cường khả năng bảo trì, dễ đọc và mở rộng.
+ Hiện tại, file này đang chứa khá nhiều logic khác nhau (UI, quản lý trạng thái, tích hợp dịch vụ bên ngoài) trong một lớp `TradingToolApp` duy nhất.
+
+Dưới đây là kế hoạch đề xuất:
+
+### Kế hoạch sắp xếp lại mã nguồn `scripts/tool.py`
+
+1.  **Tách biệt logic giao diện người dùng (UI) và logic nghiệp vụ (Business Logic)**:
+    *   **Hiện trạng**: Lớp `TradingToolApp` đang xử lý cả việc xây dựng UI và các hoạt động cốt lõi của ứng dụng 
+    (phân tích, giao dịch, kết nối MT5, Telegram).
+    *   **Đề xuất**:
+        *   Giữ lại `TradingToolApp` chủ yếu để quản lý các thành phần UI chính, các biến trạng thái của Tkinter, và điều phối các sự kiện UI.
+        *   Tạo một lớp mới, ví dụ `TradingCore` hoặc `AppService`, để chứa toàn bộ logic nghiệp vụ:
+            *   Quản lý luồng phân tích (`start_analysis`, `stop_analysis`).
+            *   Tích hợp với Gemini API.
+            *   Xử lý logic giao dịch tự động (`_quick_be_trailing_sweep`, gọi `auto_trade`).
+            *   Quản lý kết nối MT5 (`_mt5_connect`, `_mt5_build_context`).
+            *   Gửi thông báo Telegram (`_maybe_notify_telegram`).
+            *   Quản lý cache tin tức (`_refresh_news_cache`).
+            *   Các hàm liên quan đến đọc/ghi file báo cáo, workspace.
+        *   `TradingToolApp` sẽ gọi các phương thức của `TradingCore` khi có sự kiện UI xảy ra.
+
+2.  **Nhóm các chức năng liên quan vào các module/lớp nhỏ hơn**:
+    *   **Quản lý cấu hình**: Hiện tại `_init_tk_variables` và `_snapshot_config` nằm trong `TradingToolApp`.
+        *   **Đề xuất**: Có thể tạo một lớp `AppConfigManager` riêng biệt để xử lý việc khởi tạo, lưu, tải các biến cấu hình từ `workspace.json` và các biến môi trường. Lớp này sẽ cung cấp các phương thức để `TradingToolApp` tương tác.
+    *   **Quản lý file và lịch sử**: Các hàm như `_get_reports_dir`, `_load_files`, `_refresh_history_list`, `_preview_history_selected`, `_open_path`, `_delete_history_selected`, `_refresh_json_list`...
+        *   **Đề xuất**: Gom các hàm này vào một module hoặc lớp `FileManager` hoặc `ReportManager` riêng.
+    *   **Xử lý Prompt**: Các hàm `_extract_text_from_obj`, `_normalize_prompt_text`, `_reformat_prompt_area`, `_load_prompts_from_disk`, `_save_current_prompt_to_disk`.
+        *   **Đề xuất**: Gom các hàm này vào một module hoặc lớp `PromptManager`.
+
+3.  **Cải thiện luồng Auto-Run**:
+    *   **Hiện trạng**: Logic `_autorun_tick` chứa cả việc bắt đầu phân tích và quản lý BE/Trailing.
+    *   **Đề xuất**: Khi tách `TradingCore`, `_autorun_tick` trong `TradingToolApp` sẽ chỉ cần gọi một phương thức tương ứng trong `TradingCore` để kích hoạt chu trình tự động.
+
+### Lợi ích của việc sắp xếp lại:
+
+*   **Dễ đọc và hiểu**: Mỗi lớp/module sẽ có một trách nhiệm rõ ràng, giúp dễ dàng tìm kiếm và hiểu logic hơn.
+*   **Dễ bảo trì**: Thay đổi một phần của hệ thống (ví dụ: cách lưu cấu hình) sẽ ít ảnh hưởng đến các phần khác (ví dụ: logic UI).
+*   **Dễ kiểm thử**: Các đơn vị logic nhỏ hơn sẽ dễ dàng viết unit test hơn.
+*   **Dễ mở rộng**: Khi muốn thêm tính năng mới (ví dụ: tích hợp thêm sàn giao dịch, thêm loại phân tích), việc thêm vào các module/lớp chuyên biệt sẽ dễ dàng hơn.
+
+Bạn có muốn tôi phác thảo cấu trúc file/module mới hoặc đi sâu vào chi tiết hơn về cách tách một phần cụ thể không?
+thực hiện các đề xuất sau:
+1. Giữ lại `TradingToolApp` chủ yếu để quản lý các thành phần UI chính, các biến trạng thái của Tkinter, và điều phối các sự kiện UI.
+2. Tạo một lớp mới `AppService`, để chứa toàn bộ logic nghiệp vụ:
+            *   Quản lý luồng phân tích (`start_analysis`, `stop_analysis`).
+            *   Tích hợp với Gemini API.
+            *   Xử lý logic giao dịch tự động (`_quick_be_trailing_sweep`, gọi `auto_trade`).
+            *   Quản lý kết nối MT5 (`_mt5_connect`, `_mt5_build_context`).
+            *   Gửi thông báo Telegram (`_maybe_notify_telegram`).
+            *   Quản lý cache tin tức (`_refresh_news_cache`).
+            *   Các hàm liên quan đến đọc/ghi file báo cáo, workspace.
+        *   `TradingToolApp` sẽ gọi các phương thức của `AppService` khi có sự kiện UI xảy ra.
+3. tạo một lớp `AppConfigManager` riêng biệt để xử lý việc khởi tạo, lưu, tải các biến cấu hình từ `workspace.json` và các biến môi trường. Lớp này sẽ cung cấp các phương thức để `TradingToolApp` tương tác.
+4. Gom các hàm Quản lý file và lịch sử vào một module hoặc lớp  `ReportManager` riêng.
+5. Gom các hàm Xử lý Prompt vào một module hoặc lớp `PromptManager`.
+6. Cải thiện luồng Auto-Run: Khi tách `TradingCore`, `_autorun_tick` trong `TradingToolApp` sẽ chỉ cần gọi một phương thức tương ứng trong `TradingCore` để kích hoạt chu trình tự động.
