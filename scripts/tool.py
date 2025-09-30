@@ -80,10 +80,32 @@ from src.core.chart_tab import ChartTabTV
 from src.utils import ui_utils
 from src.utils import ui_builder
 from src.services import news, telegram_client
+from src.core import context_builder
+
+
 class TradingToolApp:
     """
     Lớp chính điều khiển giao diện và luồng hoạt động của ứng dụng.
     """
+    def compose_context(self, cfg: "RunConfig", budget_chars: int) -> str:
+        """
+        Hợp nhất các thành phần ngữ cảnh (dữ liệu MT5, báo cáo cũ, tin tức) để tạo chuỗi ngữ cảnh hoàn chỉnh
+        cung cấp cho mô hình AI.
+        """
+        return context_builder.compose_context(self, cfg, budget_chars)
+
+    def _images_tf_map(self, names: list[str]) -> dict[str, str]:
+        """
+        Tạo một bản đồ (dictionary) từ tên file ảnh sang khung thời gian (timeframe) tương ứng
+        bằng cách sử dụng hàm _detect_timeframe_from_name.
+        """
+        return context_builder.images_tf_map(names, self._detect_timeframe_from_name)
+
+    def ui_status(self, message: str):
+        """
+        Cập nhật thông báo trạng thái trên giao diện người dùng.
+        """
+        ui_utils.ui_status(self, message)
     def __init__(self, root: tk.Tk):
         """
         Khởi tạo giao diện chính và các biến trạng thái của ứng dụng.
@@ -132,7 +154,10 @@ class TradingToolApp:
         ui_utils._poll_ui_queue(self)
 
     def _init_tk_variables(self):
-        """Khởi tạo tất cả các biến trạng thái của Tkinter."""
+        """
+        Khởi tạo tất cả các biến trạng thái của Tkinter.
+        Các biến này được liên kết với các widget trong giao diện người dùng để quản lý dữ liệu và trạng thái.
+        """
         # Các biến trạng thái, được liên kết với các widget trong giao diện người dùng
         self.folder_path = tk.StringVar(value="")
         # Ưu tiên nạp API key đã được mã hóa, nếu không có thì tìm trong biến môi trường
@@ -220,7 +245,10 @@ class TradingToolApp:
         self.auto_load_prompt_txt_var = tk.BooleanVar(value=True)
 
     def _refresh_news_cache(self, ttl: int = 300, *, async_fetch: bool = True, cfg: RunConfig | None = None) -> None:
-        # Làm mới bộ đệm tin tức từ Forex Factory nếu dữ liệu đã cũ (quá thời gian `ttl`)
+        """
+        Làm mới bộ đệm tin tức từ Forex Factory nếu dữ liệu đã cũ (quá thời gian `ttl`).
+        Có thể chạy đồng bộ hoặc không đồng bộ.
+        """
         try:
             now_ts = time.time()
             last_ts = float(self.ff_cache_fetch_time or 0.0)
@@ -268,12 +296,17 @@ class TradingToolApp:
             logging.error(f"Lỗi không mong muốn trong _refresh_news_cache: {e}")
 
     def _toggle_api_visibility(self):
-        # Chuyển đổi trạng thái hiển thị (ẩn/hiện) của ô nhập API key
+        """
+        Chuyển đổi trạng thái hiển thị (ẩn/hiện) của ô nhập API key trên giao diện.
+        """
         # Logic được chuyển trực tiếp vào đây sau khi tái cấu trúc ui_builder
         self.api_entry.configure(show="" if self.api_entry.cget("show") == "*" else "*")
 
     def _log_trade_decision(self, data: dict, folder_override: str | None = None):
-        """Ghi lại các quyết định hoặc sự kiện quan trọng vào file log JSONL."""
+        """
+        Ghi lại các quyết định hoặc sự kiện quan trọng vào file log JSONL.
+        Sử dụng khóa (lock) để đảm bảo an toàn khi ghi file từ nhiều luồng.
+        """
         try:
             d = self._get_reports_dir(folder_override=folder_override)
             if not d:
@@ -290,7 +323,10 @@ class TradingToolApp:
             logging.error(f"Lỗi khi ghi trade log: {e}")
 
     def _quick_be_trailing_sweep(self, cfg: RunConfig):
-        """Chạy nhanh việc quản lý BE/Trailing cho các lệnh đang mở."""
+        """
+        Chạy nhanh việc quản lý điểm hòa vốn (Break-Even) và trailing stop cho các lệnh đang mở
+        trên MetaTrader 5. Chạy trong một luồng riêng để không chặn luồng chính.
+        """
         if not (self.mt5_enabled_var.get() and self.auto_trade_enabled_var.get()):
             return
         
@@ -307,7 +343,11 @@ class TradingToolApp:
         threading.Thread(target=_sweep, args=(cfg,), daemon=True).start()
 
     def _maybe_notify_telegram(self, report_text: str, report_path: Path | None, cfg: RunConfig):
-        """Gửi thông báo qua Telegram nếu được bật và có kết quả xác suất cao."""
+        """
+        Gửi thông báo qua Telegram nếu tính năng Telegram được bật và báo cáo phân tích
+        chứa tín hiệu giao dịch có xác suất cao ("HIGH PROBABILITY").
+        Tránh gửi trùng lặp bằng cách sử dụng chữ ký báo cáo.
+        """
         if not cfg.telegram_enabled or not report_text:
             return
         
@@ -329,9 +369,11 @@ class TradingToolApp:
         ).start()
 
     def _snapshot_config(self) -> RunConfig:
-        # Chụp lại toàn bộ trạng thái cấu hình hiện tại từ giao diện người dùng.
-        # Điều này đảm bảo rằng luồng worker chạy với một cấu hình nhất quán,
-        # ngay cả khi người dùng thay đổi cài đặt trên giao diện trong lúc đang chạy.
+        """
+        Chụp lại toàn bộ trạng thái cấu hình hiện tại từ giao diện người dùng và trả về một đối tượng RunConfig.
+        Điều này đảm bảo rằng luồng worker chạy với một cấu hình nhất quán,
+        ngay cả khi người dùng thay đổi cài đặt trên giao diện trong lúc đang chạy.
+        """
         return RunConfig(
             folder=self.folder_path.get().strip(),
             delete_after=bool(self.delete_after_var.get()),
@@ -388,7 +430,10 @@ class TradingToolApp:
         )
 
     def _load_env(self):
-        # Mở hộp thoại để người dùng chọn tệp .env và tải biến môi trường từ đó
+        """
+        Mở hộp thoại cho người dùng chọn tệp .env và tải biến môi trường từ đó.
+        Ưu tiên nạp GOOGLE_API_KEY.
+        """
         path = filedialog.askopenfilename(title="Chọn file .env", filetypes=[("ENV", ".env"), ("Tất cả", "*.*")])
         if not path:
             return
@@ -413,7 +458,9 @@ class TradingToolApp:
                 ui_utils.ui_message(self, "info", "ENV", "Đã nạp GOOGLE_API_KEY từ .env")
 
     def _save_api_safe(self):
-        # Mã hóa và lưu API key vào tệp để sử dụng trong các lần chạy sau
+        """
+        Mã hóa và lưu API key vào tệp để sử dụng trong các lần chạy sau.
+        """
         try:
             API_KEY_ENC.write_text(obfuscate_text(self.api_key_var.get().strip()), encoding="utf-8")
             ui_utils.ui_message(self, "info", "API", f"Đã lưu an toàn vào: {API_KEY_ENC}")
@@ -421,7 +468,9 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "API", str(e))
 
     def _delete_api_safe(self):
-        # Xóa tệp chứa API key đã mã hóa
+        """
+        Xóa tệp chứa API key đã mã hóa khỏi hệ thống.
+        """
         try:
             if API_KEY_ENC.exists():
                 API_KEY_ENC.unlink()
@@ -430,7 +479,10 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "API", str(e))
 
     def _get_reports_dir(self, folder_override: str | None = None) -> Path:
-        # Lấy đường dẫn đến thư mục "Reports" bên trong thư mục ảnh, tạo nó nếu chưa tồn tại
+        """
+        Lấy đường dẫn đến thư mục "Reports" bên trong thư mục ảnh đã chọn.
+        Nếu thư mục chưa tồn tại, nó sẽ được tạo.
+        """
         folder = Path(folder_override) if folder_override else (Path(self.folder_path.get().strip()) if self.folder_path.get().strip() else None)
         if not folder:
             return None
@@ -439,7 +491,10 @@ class TradingToolApp:
         return d
 
     def choose_folder(self):
-        # Mở hộp thoại cho người dùng chọn thư mục và sau đó tải danh sách tệp
+        """
+        Mở hộp thoại cho người dùng chọn thư mục chứa ảnh.
+        Sau khi chọn, tải danh sách tệp và làm mới các danh sách lịch sử/JSON.
+        """
         folder = filedialog.askdirectory(title="Chọn thư mục chứa ảnh")
         if not folder:
             return
@@ -449,7 +504,11 @@ class TradingToolApp:
         self._refresh_json_list()
 
     def _load_files(self, folder):
-        # Xóa kết quả cũ và quét thư mục được chọn để tìm các tệp ảnh hợp lệ
+        """
+        Xóa kết quả cũ và quét thư mục được chọn (bao gồm cả thư mục con)
+        để tìm các tệp ảnh hợp lệ (có phần mở rộng được hỗ trợ).
+        Cập nhật danh sách tệp trên giao diện.
+        """
         self.results.clear()
         self.combined_report_text = ""
         if hasattr(self, "tree"):
@@ -475,7 +534,11 @@ class TradingToolApp:
             ui_utils.ui_detail_replace(self, "Báo cáo tổng hợp sẽ hiển thị tại đây sau khi phân tích.")
 
     def start_analysis(self):
-        # Bắt đầu một phiên phân tích mới
+        """
+        Bắt đầu một phiên phân tích mới.
+        Kiểm tra các điều kiện cần thiết, cấu hình Gemini API, và khởi chạy luồng worker
+        để thực hiện phân tích ảnh.
+        """
         if self.is_running:
             return
         folder = self.folder_path.get().strip()
@@ -542,7 +605,8 @@ class TradingToolApp:
 
     def stop_analysis(self):
         """
-        Gửi tín hiệu dừng cho luồng worker và hủy các tác vụ upload đang chờ.
+        Gửi tín hiệu dừng cho luồng worker đang chạy và hủy các tác vụ upload đang chờ
+        trong executor để dừng quá trình phân tích.
         """
         if not self.is_running:
             return
@@ -563,31 +627,56 @@ class TradingToolApp:
             ui_utils.ui_status(self, "Đang dừng... (Không có tác vụ upload nào đang hoạt động)")
 
     def _find_balanced_json_after(self, text: str, start_idx: int):
+        """
+        Tìm và trích xuất một khối JSON cân bằng (balanced JSON block) từ một chuỗi văn bản,
+        bắt đầu từ một chỉ mục cụ thể.
+        """
         return report_parser.find_balanced_json_after(text, start_idx)
 
     def _extract_json_block_prefer(self, text: str):
+        """
+        Trích xuất khối JSON từ một chuỗi văn bản, ưu tiên các khối JSON hoàn chỉnh và hợp lệ.
+        """
         return report_parser.extract_json_block_prefer(text)
 
     def _coerce_setup_from_json(self, obj):
+        """
+        Chuyển đổi một đối tượng Python (thường là từ JSON) thành đối tượng TradeSetup.
+        """
         return report_parser.coerce_setup_from_json(obj)
 
     def _parse_float(self, s: str):
+        """
+        Phân tích một chuỗi thành số thực (float).
+        """
         return report_parser.parse_float(s)
 
     def _parse_direction_from_line1(self, line1: str):
+        """
+        Phân tích hướng giao dịch (Buy/Sell) từ dòng đầu tiên của báo cáo.
+        """
         return report_parser.parse_direction_from_line1(line1)
 
     def _maybe_delete(self, uploaded_file):
+        """
+        Thực hiện xóa file đã upload lên Gemini nếu cấu hình cho phép.
+        """
         try:
             genai.delete_file(uploaded_file.name)
         except Exception:
             pass
 
     def _update_progress(self, done_steps, total_steps):
+        """
+        Cập nhật thanh tiến trình và trạng thái trên giao diện người dùng.
+        """
         pct = (done_steps / max(total_steps, 1)) * 100.0
         ui_utils._enqueue(self, lambda: (self.progress_var.set(pct), self.status_var.set(f"Tiến độ: {pct:.1f}%")))
 
     def _update_tree_row(self, idx, status):
+        """
+        Cập nhật trạng thái của một hàng (file) trong bảng hiển thị trên giao diện.
+        """
         def action():
             iid = str(idx)
             if self.tree.exists(iid):
@@ -597,6 +686,10 @@ class TradingToolApp:
         ui_utils._enqueue(self, action)
 
     def _finalize_done(self):
+        """
+        Hoàn tất quá trình phân tích khi tất cả các file đã được xử lý.
+        Ghi log kết thúc, cập nhật trạng thái giao diện và lên lịch cho lần chạy tự động tiếp theo (nếu bật).
+        """
         try:
             self._log_trade_decision({
                 "stage": "run-end",
@@ -614,6 +707,10 @@ class TradingToolApp:
         self._schedule_next_autorun()
 
     def _finalize_stopped(self):
+        """
+        Hoàn tất quá trình phân tích khi người dùng yêu cầu dừng.
+        Cập nhật trạng thái giao diện và lên lịch cho lần chạy tự động tiếp theo (nếu bật).
+        """
         self.is_running = False
         self.stop_flag = False
         self.active_worker_thread = None
@@ -623,6 +720,10 @@ class TradingToolApp:
         self._schedule_next_autorun()
 
     def _on_tree_select(self, _evt):
+        """
+        Xử lý sự kiện khi người dùng chọn một hàng trong bảng hiển thị file.
+        Hiển thị báo cáo tổng hợp hoặc thông báo tương ứng.
+        """
         self.detail_text.delete("1.0", "end")
         if self.combined_report_text.strip():
             self.detail_text.insert("1.0", self.combined_report_text)
@@ -630,6 +731,10 @@ class TradingToolApp:
             self.detail_text.insert("1.0", "Chưa có báo cáo. Hãy bấm 'Bắt đầu'.")
 
     def export_markdown(self):
+        """
+        Xuất báo cáo phân tích tổng hợp ra file Markdown.
+        Mở hộp thoại lưu file để người dùng chọn vị trí và tên file.
+        """
         report_text = self.combined_report_text or ""
         folder = self.folder_path.get()
         files = [r["name"] for r in self.results if r.get("path")]
@@ -660,6 +765,9 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "Lỗi ghi file", str(e))
 
     def clear_results(self):
+        """
+        Xóa tất cả các kết quả phân tích hiện có khỏi giao diện và bộ nhớ.
+        """
         self.results.clear()
         self.combined_report_text = ""
         if hasattr(self, "tree"):
@@ -670,6 +778,10 @@ class TradingToolApp:
         ui_utils.ui_status(self, "Đã xoá kết quả khỏi giao diện.")
 
     def _refresh_history_list(self):
+        """
+        Làm mới danh sách các báo cáo lịch sử (file report_*.md) trong thư mục "Reports"
+        và hiển thị chúng trên giao diện.
+        """
         if not hasattr(self, "history_list"):
             return
         self.history_list.delete(0, "end")
@@ -680,6 +792,9 @@ class TradingToolApp:
             self.history_list.insert("end", p.name)
 
     def _preview_history_selected(self):
+        """
+        Hiển thị nội dung của báo cáo lịch sử được chọn trong khu vực chi tiết trên giao diện.
+        """
         sel = getattr(self, "history_list", None).curselection() if hasattr(self, "history_list") else None
         if not sel:
             return
@@ -694,6 +809,9 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "History", str(e))
 
     def _open_history_selected(self):
+        """
+        Mở báo cáo lịch sử được chọn bằng ứng dụng mặc định của hệ điều hành.
+        """
         sel = self.history_list.curselection()
         if not sel:
             return
@@ -704,7 +822,10 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "History", str(e))
 
     def _open_path(self, path: Path):
-        """Mở một tệp hoặc thư mục bằng ứng dụng mặc định của hệ điều hành."""
+        """
+        Mở một tệp hoặc thư mục bằng ứng dụng mặc định của hệ điều hành.
+        Hỗ trợ các hệ điều hành Windows, macOS và Linux.
+        """
         try:
             if sys.platform == "win32":
                 os.startfile(path)
@@ -716,6 +837,9 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "Lỗi Mở Tệp", str(e))
 
     def _delete_history_selected(self):
+        """
+        Xóa báo cáo lịch sử được chọn khỏi hệ thống và làm mới danh sách trên giao diện.
+        """
         sel = self.history_list.curselection()
         if not sel:
             return
@@ -728,11 +852,18 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "History", str(e))
 
     def _open_reports_folder(self):
+        """
+        Mở thư mục "Reports" bằng ứng dụng mặc định của hệ điều hành.
+        """
         d = self._get_reports_dir()
         if d:
             self._open_path(d)
 
     def _refresh_json_list(self):
+        """
+        Làm mới danh sách các file JSON ngữ cảnh (ctx_*.json) trong thư mục "Reports"
+        và hiển thị chúng trên giao diện.
+        """
         if not hasattr(self, "json_list"):
             return
         self.json_list.delete(0, "end")
@@ -743,6 +874,9 @@ class TradingToolApp:
             self.json_list.insert("end", p.name)
 
     def _preview_json_selected(self):
+        """
+        Hiển thị nội dung của file JSON ngữ cảnh được chọn trong khu vực chi tiết trên giao diện.
+        """
         sel = getattr(self, "json_list", None).curselection() if hasattr(self, "json_list") else None
         if not sel:
             return
@@ -757,6 +891,9 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "JSON", str(e))
 
     def _load_json_selected(self):
+        """
+        Mở file JSON ngữ cảnh được chọn bằng ứng dụng mặc định của hệ điều hành.
+        """
         sel = self.json_list.curselection()
         if not sel:
             return
@@ -767,6 +904,9 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "JSON", str(e))
 
     def _delete_json_selected(self):
+        """
+        Xóa file JSON ngữ cảnh được chọn khỏi hệ thống và làm mới danh sách trên giao diện.
+        """
         sel = self.json_list.curselection()
         if not sel:
             return
@@ -779,11 +919,18 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "JSON", str(e))
 
     def _open_json_folder(self):
+        """
+        Mở thư mục chứa các file JSON ngữ cảnh bằng ứng dụng mặc định của hệ điều hành.
+        """
         d = self._get_reports_dir()
         if d:
             self._open_path(d)
 
     def _detect_timeframe_from_name(self, name: str) -> str:
+        """
+        Phát hiện khung thời gian (timeframe) từ tên file ảnh bằng cách sử dụng các mẫu regex.
+        Ví dụ: "EURUSD_M5.png" sẽ trả về "M5".
+        """
         s = Path(name).stem.lower()
 
         # Các mẫu regex để nhận dạng khung thời gian từ tên tệp.
@@ -807,6 +954,9 @@ class TradingToolApp:
         return "?"
 
     def _build_timeframe_section(self, names):
+        """
+        Xây dựng một chuỗi văn bản liệt kê các file ảnh và khung thời gian tương ứng của chúng.
+        """
         lines = []
         for n in names:
             tf = self._detect_timeframe_from_name(n)
@@ -814,6 +964,10 @@ class TradingToolApp:
         return "\n".join(lines)
 
     def _toggle_autorun(self):
+        """
+        Bật hoặc tắt chế độ tự động chạy phân tích.
+        Nếu bật, lên lịch cho lần chạy tiếp theo. Nếu tắt, hủy lịch chạy hiện tại.
+        """
         if self.autorun_var.get():
             self._schedule_next_autorun()
         else:
@@ -823,10 +977,17 @@ class TradingToolApp:
             ui_utils.ui_status(self, "Đã tắt auto-run.")
 
     def _autorun_interval_changed(self):
+        """
+        Xử lý khi khoảng thời gian tự động chạy thay đổi.
+        Nếu chế độ tự động chạy đang bật, lên lịch lại cho lần chạy tiếp theo.
+        """
         if self.autorun_var.get():
             self._schedule_next_autorun()
 
     def _schedule_next_autorun(self):
+        """
+        Lên lịch cho lần chạy tự động tiếp theo sau một khoảng thời gian nhất định.
+        """
         if not self.autorun_var.get():
             return
         if self._autorun_job:
@@ -836,6 +997,11 @@ class TradingToolApp:
         ui_utils.ui_status(self, f"Tự động chạy sau {secs}s.")
 
     def _autorun_tick(self):
+        """
+        Hàm được gọi khi đến thời gian tự động chạy.
+        Nếu không có phân tích nào đang chạy, bắt đầu một phân tích mới.
+        Nếu đang chạy, thực hiện các tác vụ nền như quản lý BE/Trailing.
+        """
         self._autorun_job = None
         # Nếu không có phân tích nào đang chạy, bắt đầu một phân tích mới.
         if not self.is_running:
@@ -860,6 +1026,9 @@ class TradingToolApp:
             self._schedule_next_autorun()
 
     def _pick_mt5_terminal(self):
+        """
+        Mở hộp thoại cho người dùng chọn đường dẫn đến file thực thi của MetaTrader 5 (terminal64.exe hoặc terminal.exe).
+        """
         p = filedialog.askopenfilename(
             title="Chọn terminal64.exe hoặc terminal.exe",
             filetypes=[("MT5 terminal", "terminal*.exe"), ("Tất cả", "*.*")],
@@ -868,6 +1037,10 @@ class TradingToolApp:
             self.mt5_term_path_var.set(p)
 
     def _mt5_guess_symbol(self):
+        """
+        Cố gắng đoán biểu tượng (symbol) giao dịch từ tên các file ảnh đã nạp.
+        Ví dụ: "EURUSD_H1.png" sẽ đoán là "EURUSD".
+        """
         try:
             tfs = {"M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"}
             names = [r["name"] for r in self.results]
@@ -893,6 +1066,10 @@ class TradingToolApp:
             pass
 
     def _mt5_connect(self):
+        """
+        Khởi tạo kết nối đến MetaTrader 5.
+        Kiểm tra xem thư viện MetaTrader5 đã được cài đặt chưa và hiển thị trạng thái kết nối trên giao diện.
+        """
         if mt5 is None:
             ui_utils.ui_message(self, "error", "MT5", "Chưa cài thư viện MetaTrader5.\nHãy chạy: pip install MetaTrader5")
             return
@@ -913,6 +1090,10 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "MT5", f"Lỗi kết nối: {e}")
 
     def _mt5_build_context(self, plan=None, cfg: RunConfig | None = None) -> Optional[SafeMT5Data]:
+        """
+        Xây dựng đối tượng ngữ cảnh MetaTrader 5 (SafeMT5Data) chứa dữ liệu thị trường hiện tại
+        (giá nến, thông tin tài khoản, các lệnh đang mở...).
+        """
         sym = (cfg.mt5_symbol if cfg else (self.mt5_symbol_var.get() or "").strip())
         if not ((cfg.mt5_enabled if cfg else self.mt5_enabled_var.get()) and sym) or mt5 is None:
             return None
@@ -936,6 +1117,9 @@ class TradingToolApp:
             return None
 
     def _mt5_snapshot_popup(self):
+        """
+        Hiển thị một cửa sổ popup chứa dữ liệu MetaTrader 5 hiện tại dưới dạng JSON.
+        """
         safe_data = self._mt5_build_context(plan=None)
         if not safe_data or not safe_data.raw:
             ui_utils.ui_message(self, "warning", "MT5", "Không thể lấy dữ liệu. Kiểm tra kết nối/biểu tượng (Symbol).")
@@ -955,6 +1139,10 @@ class TradingToolApp:
         st.insert("1.0", json_text)
 
     def _extract_text_from_obj(self, obj):
+        """
+        Trích xuất tất cả các chuỗi văn bản từ một đối tượng Python (dict, list, str)
+        một cách đệ quy và nối chúng lại thành một chuỗi duy nhất.
+        """
         parts = []
 
         def walk(x):
@@ -985,6 +1173,11 @@ class TradingToolApp:
         return text or json.dumps(obj, ensure_ascii=False, indent=2)
 
     def _normalize_prompt_text(self, raw: str) -> str:
+        """
+        Chuẩn hóa văn bản prompt đầu vào.
+        Cố gắng phân tích dưới dạng JSON hoặc đối tượng Python, sau đó trích xuất văn bản.
+        Nếu không thành công, trả về văn bản gốc.
+        """
         s = raw.strip()
         if not s:
             return ""
@@ -1008,6 +1201,10 @@ class TradingToolApp:
         return s
 
     def _reformat_prompt_area(self):
+        """
+        Định dạng lại nội dung của khu vực nhập prompt hiện tại (tab "No Entry" hoặc "Entry/Run")
+        bằng cách chuẩn hóa văn bản.
+        """
         try:
             selected_tab_index = self.prompt_nb.index(self.prompt_nb.select())
             if selected_tab_index == 0:
@@ -1023,6 +1220,10 @@ class TradingToolApp:
             pass
 
     def _load_prompts_from_disk(self, silent=False):
+        """
+        Tải nội dung các file prompt từ đĩa (`prompt_no_entry.txt` và `prompt_entry_run.txt`)
+        và hiển thị chúng trên các tab prompt tương ứng.
+        """
         files_to_load = {
             "no_entry": (APP_DIR / "prompt_no_entry.txt", self.prompt_no_entry_text),
             "entry_run": (APP_DIR / "prompt_entry_run.txt", self.prompt_entry_run_text),
@@ -1047,6 +1248,9 @@ class TradingToolApp:
             ui_utils.ui_status(self, f"Đã nạp {loaded_count} prompt từ file.")
 
     def _save_current_prompt_to_disk(self):
+        """
+        Lưu nội dung của prompt hiện tại (trên tab đang chọn) vào file tương ứng trên đĩa.
+        """
         try:
             selected_tab_index = self.prompt_nb.index(self.prompt_nb.select())
             if selected_tab_index == 0:
@@ -1065,6 +1269,10 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "Prompt", f"Lỗi lưu file: {e}")
 
     def _save_workspace(self):
+        """
+        Lưu toàn bộ cấu hình và trạng thái hiện tại của ứng dụng vào file `workspace.json`.
+        Các thông tin nhạy cảm như Telegram token được mã hóa trước khi lưu.
+        """
         data = {
             "prompt_file_path": self.prompt_file_path_var.get().strip(),
             "auto_load_prompt_txt": bool(self.auto_load_prompt_txt_var.get()),
@@ -1143,6 +1351,10 @@ class TradingToolApp:
             ui_utils.ui_message(self, "error", "Workspace", str(e))
 
     def _load_workspace(self):
+        """
+        Tải cấu hình và trạng thái ứng dụng từ file `workspace.json` khi khởi động.
+        Giải mã các thông tin nhạy cảm đã được mã hóa.
+        """
         if not WORKSPACE_JSON.exists():
             return
         try:
@@ -1242,6 +1454,9 @@ class TradingToolApp:
         self.norun_killzone_var.set(bool(data.get("norun_killzone", True)))
 
     def _delete_workspace(self):
+        """
+        Xóa file `workspace.json` khỏi hệ thống.
+        """
         try:
             if WORKSPACE_JSON.exists():
                 WORKSPACE_JSON.unlink()
@@ -1252,6 +1467,7 @@ class TradingToolApp:
 def main():
     """
     Hàm chính để khởi tạo và chạy ứng dụng.
+    Thiết lập cấu hình ghi log và khởi tạo giao diện người dùng.
     """
     log_file_path = APP_DIR / "app_debug.log"
     try:

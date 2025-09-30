@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover - optional dependency
 from src.config.config import RunConfig
 from src.utils import mt5_utils
 from src.core import no_trade
-from src.utils import report_parser
+from src.utils import report_parser, ui_utils
 from src.config.constants import APP_DIR
 
 
@@ -69,13 +69,13 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
     setup = {}
     bias = ""
     try:
-        ai_json = report_parser.parse_ai_response(combined_text)
+        ai_json = report_parser.extract_json_block_prefer(combined_text)
         if ai_json and not ai_json.get("error"):
             # Check for a clear "ĐỦ" conclusion from the AI's checklist
             if ai_json.get("conclusions") == "ĐỦ":
-                setup = ai_json.get("proposed_plan", {})
-                bias = str(ai_json.get("bias_H1") or "").lower()
-                app.ui_status("Auto-Trade: Dùng setup từ Vision JSON.")
+                    setup = ai_json.get("proposed_plan", {})
+                    bias = str(ai_json.get("bias_H1") or "").lower()
+                    app.ui_status("Auto-Trade: Dùng setup từ Vision JSON.")
     except Exception:
         pass # Fallback to text parsing if JSON fails
 
@@ -88,7 +88,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
             return False
         app.ui_status("Auto-Trade: Vision JSON không kết luận, dùng text parsing.")
         # MODIFICATION: Call the method from the report_parser module
-        setup = report_parser.parse_setup_from_report(combined_text)
+        setup = report_parser.parse_setup_from_report(combined_text) or {}
         # Bias is not available in the simple text parse, this is a limitation of the old method
         bias = ""
 
@@ -153,7 +153,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
 
     if direction not in ("long", "short"):
         # This is a common case when the stream is still in progress, so we don't log it as a failure.
-        # app.ui_status("Auto-Trade: missing direction.")
+        # ui_utils.ui_status(app, "Auto-Trade: missing direction.")
         return False
 
     if cfg.trade_strict_bias:
@@ -322,7 +322,7 @@ def auto_trade_if_high_prob(app, combined_text: str, mt5_ctx: dict, cfg: RunConf
         prefer = "pending" if req.get("action") == mt5.TRADE_ACTION_PENDING else "market"
         res = _order_send_smart(app, req, prefer=prefer, retry_per_mode=2)
         if not res or res.retcode != mt5.TRADE_RETCODE_DONE:
-            errs.append(str(getattr(res, "comment", "unknown")))
+            errs.append(f"Result: {res}")
 
     if errs:
         app.ui_status("Auto-Trade: order errors: " + "; ".join(errs))
@@ -427,7 +427,53 @@ def mt5_manage_be_trailing(app, mt5_ctx: dict, cfg: RunConfig):
 
 def _order_send_safe(app, req, retry=2):
     last = None
+    # --- ADDED: Log account info before sending ---
+    try:
+        acc_info = mt5.account_info()
+        if acc_info:
+            acc_dict = {
+                "login": acc_info.login,
+                "server": acc_info.server,
+                "balance": acc_info.balance,
+                "equity": acc_info.equity,
+                "profit": acc_info.profit,
+            }
+            _log_trade_decision(app, {"stage": "send-account-check", "account_info": acc_dict}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+        else:
+            _log_trade_decision(app, {"stage": "send-account-check", "account_info": None, "error": "mt5.account_info() returned None"}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+    except Exception as e:
+        _log_trade_decision(app, {"stage": "send-account-check", "error": f"Exception getting account_info: {e}"}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+    # --- END ADD ---
+    if mt5.account_info() is None:
+        try:
+            if not mt5.initialize():
+                err = mt5.last_error()
+                ui_utils.ui_status(app, f"MT5 Re-init failed: {err}")
+                # --- ADDED: Log re-init failure ---
+                try:
+                    _log_trade_decision(app, {"stage": "send-error", "reason": "mt5_reinit_failed", "error": str(err)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+                except Exception:
+                    pass
+                return None
+        except Exception as e:
+            ui_utils.ui_status(app, f"MT5 Re-init exception: {e}")
+            # --- ADDED: Log re-init exception ---
+            try:
+                _log_trade_decision(app, {"stage": "send-error", "reason": "mt5_reinit_exception", "error": str(e)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            except Exception:
+                pass
+            return None
     for i in range(max(1, retry)):
+        # --- ADDED: Log the raw request ---
+        try:
+            # Sanitize request for logging if it contains sensitive info or objects
+            req_log = dict(req)
+            if 'expiration' in req_log and hasattr(req_log['expiration'], 'timestamp'):
+                req_log['expiration'] = int(req_log['expiration'].timestamp())
+            _log_trade_decision(app, {"stage": "send-request-raw", "request": req_log}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+        except Exception:
+            pass
+        # --- END ADD ---
         result = mt5.order_send(req)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
             return result
@@ -461,15 +507,29 @@ def _order_send_smart(app, req: dict, prefer: str = "market", retry_per_mode: in
         res = _order_send_safe(app, r, retry=retry_per_mode)
         tried.append(_fill_name(fill))
 
+        # --- ADDED: Log each attempt ---
+        try:
+            log_data = {
+                "stage": "send-attempt",
+                "filling": _fill_name(fill),
+                "retcode": getattr(res, "retcode", None),
+                "comment": getattr(res, "comment", None),
+                "request_id": getattr(res, "request_id", None),
+            }
+            _log_trade_decision(app, log_data, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+        except Exception:
+            pass
+        # --- END ADD ---
+
         if res and res.retcode == mt5.TRADE_RETCODE_DONE:
             if len(tried) > 1:
-                app.ui_status(f"Order OK sau khi đổi filling → {tried[-1]}.")
+                ui_utils.ui_status(app, f"Order OK sau khi đổi filling → {tried[-1]}.")
             return res
 
         last_res = res
 
     cmt = getattr(last_res, "comment", "unknown") if last_res else "no result"
-    app.ui_status(f"Order FAIL với các filling: {', '.join(tried)} — {cmt}")
+    ui_utils.ui_status(app, f"Order FAIL với các filling: {', '.join(tried)} — {cmt}")
     return last_res
 
 def _calc_rr(entry, sl, tp):

@@ -1,6 +1,137 @@
-phân tích code theo thứ tự logic
+Chào bạn, tôi đã phân tích kỹ lưỡng mã nguồn của file `scripts/tool.py`. Dưới đây là sơ đồ logic thuật toán và giải thích chi tiết từng phần.
 
- Dựa vào phân tích trên, hãy:
--  Loại bỏ các comment tiếng Anh. 
-- Viết comment nội bộ bằng tiếng Việt để giải thích các logic phức tạp hoặc các tác dụng phụ (side-effect) có thể xảy ra. 
-- Sắp xếp lại code một cách logic và khoa học nhất
+### I. Sơ đồ Logic Thuật toán (Luồng hoạt động chính)
+
+Sơ đồ này mô tả luồng sự kiện chính khi người dùng nhấn nút "Bắt đầu phân tích".
+
+```mermaid
+graph TD
+    subgraph "Giai đoạn 1: Khởi tạo & Cấu hình"
+        A[Người dùng khởi chạy ứng dụng] --> B{Tải Workspace?};
+        B -- Có file workspace.json --> C[Nạp cấu hình đã lưu];
+        B -- Không --> D[Sử dụng cài đặt mặc định];
+        C --> E;
+        D --> E[Hiển thị giao diện chính (UI)];
+        E --> F[Người dùng chọn thư mục ảnh & cấu hình các tham số];
+    end
+
+    subgraph "Giai đoạn 2: Bắt đầu Phân tích (Luồng chính - UI Thread)"
+        F -- Bấm nút "Bắt đầu" --> G[start_analysis];
+        G --> H{Kiểm tra điều kiện};
+        H -- Thiếu thông tin --> I[Hiển thị cảnh báo, dừng lại];
+        H -- Đủ thông tin --> J[Tạo bản sao cấu hình (Snapshot Config)];
+        J --> K[Reset giao diện & chuẩn bị];
+        K --> L[Tạo và khởi chạy Luồng Worker (Worker Thread)];
+    end
+
+    subgraph "Giai đoạn 3: Xử lý trong Luồng Worker (Background Thread)"
+        L --> M[run_analysis_worker];
+        M --> N[Lặp qua từng file ảnh];
+        N --> O[Xây dựng Ngữ cảnh (Context)];
+        O --> P["- Lấy dữ liệu MT5 (nếu bật)<br>- Lấy báo cáo cũ<br>- Lấy tin tức kinh tế"];
+        P --> Q[Gọi API Google Gemini với ảnh và prompt];
+        Q --> R[Nhận kết quả phân tích (text)];
+        R --> S[Phân tích text để tìm tín hiệu giao dịch (report_parser)];
+        S --> T{Có tín hiệu giao dịch?};
+        T -- Có --> U[Kiểm tra điều kiện No-Trade/No-Run];
+        U -- Vượt qua --> V[Thực hiện Auto-Trade (gửi lệnh tới MT5)];
+        U -- Không vượt qua --> W[Bỏ qua, ghi log lý do];
+        T -- Không --> W;
+        V --> X;
+        W --> X;
+        X[Gửi thông báo Telegram (nếu có tín hiệu xác suất cao)];
+        X --> Y[Cập nhật kết quả vào hàng đợi UI (UI Queue)];
+        Y --> N;
+        N -- Hết ảnh --> Z[Kết thúc luồng Worker];
+    end
+
+    subgraph "Giai đoạn 4: Cập nhật Giao diện & Hoàn tất"
+        AA[Luồng UI liên tục kiểm tra UI Queue] --> BB[Lấy cập nhật từ Queue];
+        BB --> CC["- Cập nhật thanh tiến trình<br>- Cập nhật trạng thái file trong bảng<br>- Hiển thị báo cáo chi tiết"];
+        Z --> DD[Gửi tín hiệu hoàn tất vào UI Queue];
+        DD --> EE[Luồng UI nhận tín hiệu, cập nhật trạng thái "Hoàn tất"];
+        EE --> FF{Chế độ Auto-Run đang bật?};
+        FF -- Có --> GG[Lên lịch cho lần chạy tiếp theo];
+        FF -- Không --> HH[Chờ hành động tiếp theo của người dùng];
+    end
+
+    Y -.-> AA;
+    DD -.-> AA;
+```
+
+### II. Giải thích chi tiết các thành phần Code
+
+Ứng dụng được xây dựng quanh lớp `TradingToolApp`, sử dụng thư viện `tkinter` để tạo giao diện người dùng 
+và `threading` để xử lý các tác vụ nặng (như gọi API) mà không làm treo giao diện.
+
+#### 1. Khởi tạo và Cấu trúc (`__init__`, `main`)
+
+*   **`main()`**: Là điểm bắt đầu của chương trình. Nó thiết lập logging để ghi lỗi ra file `app_debug.log`, 
+tạo cửa sổ chính (`tk.Tk()`) và khởi tạo lớp `TradingToolApp`.
+*   **`TradingToolApp.__init__(self, root)`**:
+    *   **Thiết lập cửa sổ**: Đặt tiêu đề, kích thước cho cửa sổ ứng dụng.
+    *   **Khởi tạo Locks**: Tạo các đối tượng `threading.Lock` (`_trade_log_lock`, `_ui_log_lock`...). 
+    Đây là cơ chế cực kỳ quan trọng để đảm bảo rằng khi nhiều luồng cùng cố gắng truy cập một tài nguyên 
+    (ví dụ: ghi vào cùng một file log), chúng sẽ phải đợi nhau, tránh xung đột dữ liệu.
+    *   **`_init_tk_variables()`**: Khởi tạo tất cả các biến của `tkinter` (như `tk.StringVar`, `tk.BooleanVar`). 
+    Các biến này được liên kết với các widget trên giao diện (ô nhập liệu, checkbox...). 
+    Khi giá trị của biến thay đổi, widget tương ứng sẽ tự động cập nhật và ngược lại.
+    *   **`ui_builder.build_ui(self)`**: Gọi một module bên ngoài (`ui_builder`) để xây dựng toàn bộ các thành phần giao diện 
+    (nút bấm, tab, khung nhập liệu...). Việc tách riêng logic giao diện giúp mã nguồn chính (`tool.py`) gọn gàng hơn.
+    *   **`_load_workspace()`**: Tải lại các cài đặt từ lần chạy trước được lưu trong file `workspace.json`.
+    *   **`_poll_ui_queue(self)`**: Bắt đầu một vòng lặp chạy nền để liên tục kiểm tra `self.ui_queue`. 
+    Đây là "cầu nối" để luồng worker có thể gửi yêu cầu cập nhật giao diện một cách an toàn.
+
+#### 2. Luồng Phân tích Chính (`start_analysis`, `worker.run_analysis_worker`)
+
+Đây là trái tim của ứng dụng.
+
+*   **`start_analysis(self)`**:
+    1.  **Kiểm tra điều kiện**: Đảm bảo người dùng đã chọn thư mục, nhập API key và prompt.
+    2.  **`_snapshot_config()`**: Tạo một "ảnh chụp nhanh" của toàn bộ cấu hình hiện tại trên giao diện và lưu vào một đối tượng `RunConfig`. 
+    Điều này rất quan trọng: luồng worker sẽ chạy với bản cấu hình này, dù cho người dùng có thay đổi các tùy chọn trên giao diện trong lúc quá trình phân tích đang diễn ra. Nó đảm bảo tính nhất quán.
+    3.  **Cấu hình Gemini**: `genai.configure(api_key=...)`.
+    4.  **Reset trạng thái**: Xóa các kết quả cũ, đặt lại thanh tiến trình.
+    5.  **Khởi chạy luồng Worker**: Tạo một `threading.Thread` mới, trỏ tới hàm `worker.run_analysis_worker` 
+    và truyền vào các tham số cần thiết (bao gồm cả đối tượng `self` để worker có thể gọi lại các hàm của `TradingToolApp`).
+     Việc chạy trong luồng riêng giúp giao diện không bị "đơ" trong suốt quá trình xử lý.
+
+*   **`worker.run_analysis_worker(...)`** (Logic nằm trong `src/core/worker.py`):
+    1.  **Lặp qua các file ảnh**: Duyệt qua danh sách các file ảnh đã được nạp.
+    2.  **Xây dựng Ngữ cảnh (`compose_context`)**: Đây là bước tổng hợp tất cả thông tin cần thiết để cung cấp cho AI, giúp nó đưa ra phân tích chính xác hơn. Ngữ cảnh có thể bao gồm:
+        *   Dữ liệu từ MetaTrader 5 (`_mt5_build_context`): Giá cả, chỉ báo kỹ thuật, thông tin tài khoản...
+        *   Các báo cáo phân tích cũ để AI "nhớ" các phân tích trước đó.
+        *   Thông tin tin tức kinh tế sắp ra (`_refresh_news_cache`).
+    3.  **Gọi API Gemini**: Gửi ảnh, prompt và chuỗi ngữ cảnh đã xây dựng tới Google Gemini.
+    4.  **Nhận và xử lý kết quả**:
+        *   Nhận về một chuỗi văn bản là báo cáo phân tích.
+        *   Sử dụng `report_parser` để "dịch" chuỗi văn bản này thành một cấu trúc dữ liệu có tổ chức (gọi là `TradeSetup`), chứa các thông tin như: hướng giao dịch (Buy/Sell), điểm vào lệnh (Entry), cắt lỗ (Stop Loss), chốt lời (Take Profit).
+    5.  **Thông báo & Giao dịch**:
+        *   `_maybe_notify_telegram()`: Nếu báo cáo chứa cụm từ "HIGH PROBABILITY", nó sẽ gửi thông báo qua Telegram.
+        *   `auto_trade.execute_trade()`: Nếu chế độ auto-trade được bật, nó sẽ kiểm tra các điều kiện an toàn (`no_trade.check`) trước khi thực sự gửi lệnh giao dịch tới MT5.
+    6.  **Cập nhật giao diện**: Sử dụng `ui_utils._enqueue(self, action)` để đưa một hàm cập nhật giao diện (ví dụ: `_update_tree_row`) vào hàng đợi `ui_queue`. Luồng UI sẽ lấy và thực thi hàm này.
+
+#### 3. Tích hợp Dịch vụ Ngoài
+
+*   **MetaTrader 5 (`_mt5_*` methods)**:
+    *   `_mt5_connect()`: Khởi tạo kết nối đến terminal MT5.
+    *   `_mt5_build_context()`: Gọi `mt5_utils.build_context` để lấy dữ liệu thị trường (giá nến, thông tin tài khoản, các lệnh đang mở...) và đóng gói chúng lại.
+*   **Telegram (`_maybe_notify_telegram`)**:
+    *   Tạo "chữ ký" cho báo cáo (`create_report_signature`) để tránh gửi lặp lại cùng một thông báo.
+    *   Gọi `telegram_client.send_telegram_message` trong một luồng riêng để việc gửi tin nhắn không làm chậm luồng worker chính.
+*   **Google Gemini**: Tương tác chính diễn ra trong luồng worker, thông qua thư viện `google.generativeai`.
+
+#### 4. Quản lý Cấu hình và Workspace (`_save_workspace`, `_load_workspace`)
+
+*   Các phương thức này cho phép lưu và tải toàn bộ trạng thái của các widget trên giao diện vào một file `workspace.json`.
+*   Sử dụng `obfuscate_text` và `deobfuscate_text` để mã hóa nhẹ các thông tin nhạy cảm (như API key, Telegram token) trước khi lưu, tăng một lớp bảo mật cơ bản.
+
+#### 5. Chế độ Tự động chạy (`_toggle_autorun`, `_autorun_tick`)
+
+*   Sử dụng `root.after(milliseconds, callback)` của `tkinter` để lên lịch một hàm được thực thi sau một khoảng thời gian nhất định.
+*   `_toggle_autorun()`: Bật/tắt chế độ tự động. Khi bật, nó sẽ gọi `_schedule_next_autorun`.
+*   `_schedule_next_autorun()`: Hủy lịch chạy cũ (nếu có) và tạo một lịch chạy mới.
+*   `_autorun_tick()`: Hàm được thực thi khi đến giờ. Nó sẽ kiểm tra nếu không có phân tích nào đang chạy thì gọi `start_analysis()`,
+ bắt đầu một chu trình mới.
+
+Hy vọng phần giải thích và sơ đồ này giúp bạn hiểu rõ hơn về cách hoạt động của ứng dụng. Nếu có bất kỳ phần nào cần làm rõ thêm, đừng ngần ngại hỏi nhé.

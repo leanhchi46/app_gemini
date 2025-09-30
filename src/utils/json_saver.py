@@ -4,7 +4,8 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
-from src.utils import utils, report_parser
+from src.utils import utils, report_parser, ui_utils
+from src.core import context_builder
 from src.utils.report_parser import find_balanced_json_after
 from src.config.constants import APP_DIR
 
@@ -19,7 +20,7 @@ def save_json_report(app: "TradingToolApp", text: str, cfg: "RunConfig", names: 
     """
     d = app._get_reports_dir(cfg.folder)
     if not d:
-        app.ui_status("Lỗi: Không thể xác định thư mục Reports để lưu .json.")
+        ui_utils.ui_status(app, "Lỗi: Không thể xác định thư mục Reports để lưu .json.")
         return
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -72,7 +73,7 @@ def save_json_report(app: "TradingToolApp", text: str, cfg: "RunConfig", names: 
             break
     
     if not found:
-        app.ui_status("Cảnh báo: Không tìm thấy khối JSON nào để lưu.")
+        ui_utils.ui_status(app, "Cảnh báo: Không tìm thấy khối JSON nào để lưu.")
 
     data_to_save = context_obj if isinstance(context_obj, dict) else {}
 
@@ -102,20 +103,20 @@ def save_json_report(app: "TradingToolApp", text: str, cfg: "RunConfig", names: 
     out = d / f"ctx_{ts}.json"
     try:
         out.write_text(json.dumps(data_to_save, ensure_ascii=False, indent=2), encoding="utf-8")
-        app.ui_status(f"Đã lưu thành công file: {out.name}")
+        ui_utils.ui_status(app, f"Đã lưu thành công file: {out.name}")
         
         # Cleanup old .json files
         utils.cleanup_old_files(d, "ctx_*.json", 10)
         
     except Exception as e:
         logging.exception(f"CRITICAL ERROR during final JSON save to {out.name}")
-        app.ui_status(f"LỖI GHI FILE JSON: {e}")
-        app.ui_message("error", "Lỗi Lưu JSON", f"Không thể ghi file vào đường dẫn:\n{out}\n\nLỗi: {e}")
+        ui_utils.ui_status(app, f"LỖI GHI FILE JSON: {e}")
+        ui_utils.ui_message(app, "error", "Lỗi Lưu JSON", f"Không thể ghi file vào đường dẫn:\n{out}\n\nLỗi: {e}")
         return None
 
     # --- Log proposed trade for backtesting ---
     try:
-        setup = app._parse_setup_from_report(text)
+        setup = report_parser.parse_setup_from_report(text)
         if setup and setup.get("direction") and setup.get("entry"):
             # Extract context snapshot for logging
             ctx_snapshot = {}

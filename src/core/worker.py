@@ -12,7 +12,7 @@ import google.generativeai as genai
 from google.api_core import exceptions
 
 from src.services import uploader
-from src.core import no_run, no_trade, auto_trade
+from src.core import no_run, no_trade, auto_trade, context_builder
 from src.utils import report_parser, json_saver, md_saver, ui_utils
 from src.services import news
 from src.config.constants import APP_DIR
@@ -62,7 +62,7 @@ def _handle_no_change_scenario(app: "TradingToolApp", cfg: "RunConfig"):
     Xử lý trường hợp không có ảnh nào thay đổi so với lần chạy trước.
     Sẽ tạo một báo cáo ngắn gọn, quản lý các lệnh đang chạy và thoát sớm.
     """
-    ui_utils.ui_status(app, "Ảnh không đổi, tạo báo cáo nhanh...")
+    app.ui_status("Ảnh không đổi, tạo báo cáo nhanh...")
     composed = app.compose_context(cfg, budget_chars=max(800, int(cfg.ctx_limit))) or ""
     plan = None
     if composed:
@@ -212,13 +212,13 @@ def _select_prompt_dynamically(app: "TradingToolApp", cfg: "RunConfig", safe_mt5
         if has_positions:
             prompt_path = APP_DIR / "prompt_entry_run_vision.txt"
             prompt_to_use = prompt_path.read_text(encoding="utf-8")
-            ui_utils.ui_status(app, "Worker: Lệnh đang mở, dùng prompt Vision Quản Lý Lệnh.")
+            app.ui_status("Worker: Lệnh đang mở, dùng prompt Vision Quản Lý Lệnh.")
         else:
             prompt_path = APP_DIR / "prompt_no_entry_vision.txt"
             prompt_to_use = prompt_path.read_text(encoding="utf-8")
-            ui_utils.ui_status(app, "Worker: Không có lệnh mở, dùng prompt Vision Tìm Lệnh Mới.")
+            app.ui_status("Worker: Không có lệnh mở, dùng prompt Vision Tìm Lệnh Mới.")
     except Exception as e:
-        ui_utils.ui_status(app, f"Lỗi đọc prompt từ file: {e}. Sử dụng prompt dự phòng.")
+        app.ui_status(f"Lỗi đọc prompt từ file: {e}. Sử dụng prompt dự phòng.")
         # Cơ chế dự phòng: sử dụng prompt cũ nếu đọc file lỗi
         prompt_to_use = prompt_entry_run if has_positions else prompt_no_entry
         
@@ -296,9 +296,9 @@ def _stream_and_process_ai_response(app: "TradingToolApp", cfg: "RunConfig", mod
                     action_was_taken = auto_trade.auto_trade_if_high_prob(app, combined_text, mt5_dict, cfg)
                     if action_was_taken:
                         trade_action_taken = True
-                        ui_utils.ui_status(app, "Auto-Trade: Đã thực hiện hành động từ stream.")
+                        app.ui_status("Auto-Trade: Đã thực hiện hành động từ stream.")
                 except Exception as e:
-                    ui_utils.ui_status(app, f"Lỗi Auto-Trade stream: {e}")
+                    app.ui_status(f"Lỗi Auto-Trade stream: {e}")
     
     return combined_text or "[Không có nội dung trả về]"
 
@@ -326,7 +326,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
             paths, names = paths[:max_files], names[:max_files]
         
         if not paths:
-            ui_utils.ui_status(app, "Không có ảnh để phân tích.")
+            app.ui_status("Không có ảnh để phân tích.")
             ui_utils._enqueue(app, app._finalize_stopped)
             return
 
@@ -341,7 +341,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
         # Chốt chặn đầu tiên: kiểm tra các điều kiện không nên chạy (cuối tuần, ngoài giờ, v.v.)
         should_run, reason = no_run.check_no_run_conditions(app)
         if not should_run:
-            ui_utils.ui_status(app, reason)
+            app.ui_status(reason)
             app._log_trade_decision({
                 "stage": "no-run-skip",
                 "t": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -389,7 +389,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                 file_slots[i] = f
         
         if to_upload:
-            ui_utils.ui_status(app, f"Upload xong {len(to_upload)} ảnh trong {(_tnow()-t_up0):.2f}s")
+            app.ui_status(f"Upload xong {len(to_upload)} ảnh trong {(_tnow()-t_up0):.2f}s")
 
         if cfg.cache_enabled:
             for (f, p) in uploaded_files:
@@ -401,7 +401,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
         # --- GIAI ĐOẠN 4: XÂY DỰNG NGỮ CẢNH VÀ KIỂM TRA NO-TRADE ---
         t_ctx0 = _tnow()
         safe_mt5_data, mt5_dict, context_block, mt5_json_full = _prepare_and_build_context(app, cfg)
-        ui_utils.ui_status(app, f"Context+MT5 xong trong {(_tnow()-t_ctx0):.2f}s")
+        app.ui_status(f"Context+MT5 xong trong {(_tnow()-t_ctx0):.2f}s")
 
         # Chốt chặn thứ hai: kiểm tra các điều kiện không nên giao dịch (tin tức, rủi ro, v.v.)
         if cfg.nt_enabled and mt5_dict:
@@ -432,7 +432,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                 raise SystemExit("Điều kiện No-Trade được kích hoạt.")
 
         # --- GIAI ĐOẠN 5: GỌI MODEL AI VÀ XỬ LÝ KẾT QUẢ ---
-        ui_utils.ui_status(app, "Đang phân tích toàn bộ thư mục...")
+        app.ui_status("Đang phân tích toàn bộ thư mục...")
         
         all_media = []
         for i, f in enumerate(file_slots):
@@ -448,7 +448,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
         
         t_llm0 = _tnow()
         combined_text = _stream_and_process_ai_response(app, cfg, model, parts, mt5_dict)
-        ui_utils.ui_status(app, f"Model trả lời trong {(_tnow()-t_llm0):.2f}s")
+        app.ui_status(f"Model trả lời trong {(_tnow()-t_llm0):.2f}s")
         
         app._update_progress(steps_upload + 1, steps_upload + 2)
 
@@ -457,7 +457,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
         pass
     except Exception as e:
         tb_str = traceback.format_exc()
-        ui_utils.ui_status(app, f"Lỗi nghiêm trọng trong worker: {e}")
+        app.ui_status(f"Lỗi nghiêm trọng trong worker: {e}")
         combined_text = f"[LỖI PHÂN TÍCH] Đã xảy ra lỗi.\n\nChi tiết: {e}\n\nTraceback:\n{tb_str}"
         app.combined_report_text = combined_text
         ui_utils.ui_detail_replace(app, combined_text)
@@ -479,7 +479,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
             except Exception as e:
                 tb_str = traceback.format_exc()
                 err_msg = f"Lỗi nghiêm trọng khi lưu ctx_*.json: {e}\n\n{tb_str}"
-                ui_utils.ui_status(app, err_msg)
+                app.ui_status(err_msg)
                 ui_utils.ui_message(app, "error", "Lỗi Lưu JSON", err_msg)
                 logging.exception("CRITICAL: Lỗi lưu file JSON từ worker.")
             

@@ -2,6 +2,7 @@
 import re
 import json
 import math
+import hashlib
 
 def find_balanced_json_after(text: str, start_idx: int):
     depth, i = 0, start_idx
@@ -119,3 +120,51 @@ def parse_direction_from_line1(line1: str):
     if "short" in s or "sell" in s or "bear" in s:
         return "short"
     return None
+
+def create_report_signature(text: str) -> str:
+    """Creates a signature for a report to avoid duplicates."""
+    if not text:
+        return ""
+    # Normalize whitespace and case to make it more robust
+    normalized_text = " ".join(text.strip().lower().split())
+    return hashlib.sha1(normalized_text.encode("utf-8")).hexdigest()
+
+def extract_summary_lines(text: str) -> tuple[list[str], str, bool]:
+    """Extracts summary lines, a signature, and high probability flag from report text."""
+    lines = text.strip().split('\n')
+    summary = []
+    # A simple heuristic: find the first block of bullet points
+    in_summary = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("- ", "* ")):
+            summary.append(stripped)
+            in_summary = True
+        elif in_summary and stripped: # block ended
+            break
+        elif in_summary and not stripped: # allow empty lines within summary
+            pass
+
+    if not summary:  # Fallback: take first 5 non-empty lines
+        summary = [l.strip() for l in lines if l.strip()][:5]
+
+    high_prob = "HIGH PROBABILITY" in text.upper()
+    
+    summary_text = "\n".join(summary)
+    sig = create_report_signature(summary_text)
+
+    return summary, sig, high_prob
+
+def parse_setup_from_report(text: str):
+    """Extracts a trade setup from a report by finding and parsing a JSON block."""
+    json_block = extract_json_block_prefer(text)
+    return coerce_setup_from_json(json_block)
+
+def parse_mt5_data_to_report(safe_mt5_data) -> str:
+    """Converts MT5 data into a structured report."""
+    if not safe_mt5_data or not safe_mt5_data.raw:
+        return "No MT5 data available."
+    
+    # This is a placeholder implementation. 
+    # A more detailed report can be built out as needed.
+    return json.dumps(safe_mt5_data.raw, indent=2, ensure_ascii=False)
