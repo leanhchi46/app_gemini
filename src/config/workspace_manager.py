@@ -154,6 +154,9 @@ def _load_workspace(app: "TradingToolApp"):
     app.telegram_skip_verify_var.set(bool(data.get("telegram_skip_verify", False)))
     app.telegram_ca_path_var.set(data.get("telegram_ca_path", ""))
 
+    # Cấu hình Gemini API và cập nhật UI sau khi tải API key từ workspace
+    app.app_logic._configure_gemini_api_and_update_ui(app)
+
     app.mt5_enabled_var.set(bool(data.get("mt5_enabled", False)))
     app.mt5_term_path_var.set(data.get("mt5_term_path", ""))
     app.mt5_symbol_var.set(data.get("mt5_symbol", ""))

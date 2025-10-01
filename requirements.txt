@@ -1,7 +1,8 @@
-google-generativeai
+python-dotenv
 MetaTrader5
 numpy
 pandas
 matplotlib
 Pillow
 certifi
+python-dotenv

@@ -45,6 +45,7 @@ class TradingToolApp:
         """
         Khởi tạo giao diện chính và các biến trạng thái của ứng dụng.
         """
+        logging.debug("Khởi tạo TradingToolApp.")
         self.root = root
         self.app_logic = app_logic # Tham chiếu đến lớp logic nghiệp vụ
         self.root.title("TOOL GIAO DỊCH TỰ ĐỘNG")
@@ -56,6 +57,7 @@ class TradingToolApp:
         self._proposed_trade_log_lock = threading.Lock()
         self._vector_db_lock = threading.Lock()
         self._ui_log_lock = threading.Lock()
+        self.ui_queue = queue.Queue() # Di chuyển khởi tạo ui_queue lên đây
 
         self._init_tk_variables()
 
@@ -72,7 +74,7 @@ class TradingToolApp:
         self.stop_flag = False
         self.results = []
         self.combined_report_text = ""
-        self.ui_queue = queue.Queue()
+        # self.ui_queue = queue.Queue() # Xóa dòng này
 
         # Thêm các thuộc tính để theo dõi luồng worker và executor
         self.active_worker_thread = None
@@ -84,6 +86,8 @@ class TradingToolApp:
 
         # Gọi hàm từ ui_builder để xây dựng toàn bộ giao diện người dùng
         ui_builder.build_ui(self)
+        # Cấu hình Gemini API và cập nhật UI sau khi UI đã được xây dựng
+        self.app_logic._configure_gemini_api_and_update_ui(self)
         # Tải lại các cài đặt từ lần làm việc trước (nếu có)
         self._load_workspace()
         # Bắt đầu vòng lặp kiểm tra hàng đợi UI để xử lý các cập nhật từ luồng phụ
@@ -94,12 +98,14 @@ class TradingToolApp:
 
         # Đảm bảo hủy các tác vụ hẹn giờ khi đóng ứng dụng và lưu workspace
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+        logging.debug("TradingToolApp đã khởi tạo xong.")
 
     def _on_closing(self):
         """
         Xử lý sự kiện đóng cửa sổ ứng dụng.
         Hủy bỏ tất cả các tác vụ hẹn giờ đang chạy và lưu workspace.
         """
+        logging.debug("Đang xử lý sự kiện đóng cửa sổ (_on_closing).")
         if self.app_logic._mt5_reconnect_job:
             self.root.after_cancel(self.app_logic._mt5_reconnect_job)
             self.app_logic._mt5_reconnect_job = None
@@ -126,6 +132,9 @@ class TradingToolApp:
         api_init = api_init or os.environ.get("GOOGLE_API_KEY", "")
         self.api_key_var = tk.StringVar(value=api_init)
         self.model_var = tk.StringVar(value=DEFAULT_MODEL)
+
+        # Thêm trace callback để cập nhật khi API key thay đổi
+        self.api_key_var.trace_add("write", lambda *args: self.app_logic._configure_gemini_api_and_update_ui(self))
 
         self.delete_after_var = tk.BooleanVar(value=True)
         self.max_files_var = tk.IntVar(value=0)
@@ -202,12 +211,14 @@ class TradingToolApp:
 
         self.prompt_file_path_var = tk.StringVar(value="")
         self.auto_load_prompt_txt_var = tk.BooleanVar(value=True)
+        logging.debug("Các biến Tkinter đã được khởi tạo.")
 
     def compose_context(self, cfg: "RunConfig", budget_chars: int) -> str:
         """
         Hợp nhất các thành phần ngữ cảnh (dữ liệu MT5, báo cáo cũ, tin tức) để tạo chuỗi ngữ cảnh hoàn chỉnh
         cung cấp cho mô hình AI.
         """
+        logging.debug(f"Gọi app_logic.compose_context từ UI với budget_chars: {budget_chars}.")
         return self.app_logic.compose_context(cfg, budget_chars)
 
     def _images_tf_map(self, names: list[str]) -> dict[str, str]:
@@ -221,6 +232,7 @@ class TradingToolApp:
         """
         Cập nhật thông báo trạng thái trên giao diện người dùng.
         """
+        logging.debug(f"Cập nhật UI status: {message}")
         ui_utils.ui_status(self, message)
 
     def _refresh_news_cache(self, ttl: int = 300, *, async_fetch: bool = True, cfg: "RunConfig" | None = None) -> None:
@@ -228,12 +240,14 @@ class TradingToolApp:
         Làm mới bộ đệm tin tức từ Forex Factory nếu dữ liệu đã cũ (quá thời gian `ttl`).
         Có thể chạy đồng bộ hoặc không đồng bộ.
         """
+        logging.debug(f"Gọi app_logic._refresh_news_cache từ UI. Async: {async_fetch}, TTL: {ttl}")
         self.app_logic._refresh_news_cache(self, ttl, async_fetch=async_fetch, cfg=cfg)
 
     def _toggle_api_visibility(self):
         """
         Chuyển đổi trạng thái hiển thị (ẩn/hiện) của ô nhập API key trên giao diện.
         """
+        logging.debug("Đang chuyển đổi trạng thái hiển thị API key.")
         self.api_entry.configure(show="" if self.api_entry.cget("show") == "*" else "*")
 
     def _log_trade_decision(self, data: dict, folder_override: str | None = None):
@@ -241,6 +255,7 @@ class TradingToolApp:
         Ghi lại các quyết định hoặc sự kiện quan trọng vào file log JSONL.
         Sử dụng khóa (lock) để đảm bảo an toàn khi ghi file từ nhiều luồng.
         """
+        logging.debug(f"Gọi app_logic._log_trade_decision từ UI. Data keys: {data.keys()}")
         self.app_logic._log_trade_decision(self, data, folder_override)
 
     def _maybe_notify_telegram(self, report_text: str, report_path: Path | None, cfg: "RunConfig"):
@@ -249,6 +264,7 @@ class TradingToolApp:
         chứa tín hiệu giao dịch có xác suất cao ("HIGH PROBABILITY").
         Tránh gửi trùng lặp bằng cách sử dụng chữ ký báo cáo.
         """
+        logging.debug("Gọi app_logic._maybe_notify_telegram từ UI.")
         self.app_logic._maybe_notify_telegram(self, report_text, report_path, cfg)
 
     def _snapshot_config(self) -> "RunConfig":
@@ -257,6 +273,7 @@ class TradingToolApp:
         Điều này đảm bảo rằng luồng worker chạy với một cấu hình nhất quán,
         ngay cả khi người dùng thay đổi cài đặt trên giao diện trong lúc đang chạy.
         """
+        logging.debug("Gọi app_logic._snapshot_config từ UI.")
         return self.app_logic._snapshot_config(self)
 
     def _load_env(self):
@@ -264,18 +281,21 @@ class TradingToolApp:
         Mở hộp thoại cho người dùng chọn tệp .env và tải biến môi trường từ đó.
         Ưu tiên nạp GOOGLE_API_KEY.
         """
+        logging.debug("Gọi app_logic._load_env từ UI.")
         self.app_logic._load_env(self)
 
     def _save_api_safe(self):
         """
         Mã hóa và lưu API key vào tệp để sử dụng trong các lần chạy sau.
         """
+        logging.debug("Gọi app_logic._save_api_safe từ UI.")
         self.app_logic._save_api_safe(self)
 
     def _delete_api_safe(self):
         """
         Xóa tệp chứa API key đã mã hóa khỏi hệ thống.
         """
+        logging.debug("Gọi app_logic._delete_api_safe từ UI.")
         self.app_logic._delete_api_safe(self)
 
     def _get_reports_dir(self, folder_override: str | None = None) -> Path:
@@ -283,6 +303,7 @@ class TradingToolApp:
         Lấy đường dẫn đến thư mục "Reports" bên trong thư mục ảnh đã chọn.
         Nếu thư mục chưa tồn tại, nó sẽ được tạo.
         """
+        logging.debug(f"Gọi history_manager._get_reports_dir từ UI. Folder override: {folder_override}")
         return history_manager._get_reports_dir(self, folder_override)
 
     def choose_folder(self):
@@ -290,13 +311,16 @@ class TradingToolApp:
         Mở hộp thoại cho người dùng chọn thư mục chứa ảnh.
         Sau khi chọn, tải danh sách tệp và làm mới các danh sách lịch sử/JSON.
         """
+        logging.debug("Đang chọn thư mục ảnh.")
         folder = filedialog.askdirectory(title="Chọn thư mục chứa ảnh")
         if not folder:
+            logging.debug("Người dùng đã hủy chọn thư mục.")
             return
         self.folder_path.set(folder)
         self._load_files(folder)
         history_manager._refresh_history_list(self)
         history_manager._refresh_json_list(self)
+        logging.debug(f"Đã chọn thư mục: {folder}")
 
     def _load_files(self, folder):
         """
@@ -334,6 +358,7 @@ class TradingToolApp:
         Kiểm tra các điều kiện cần thiết, cấu hình Gemini API, và khởi chạy luồng worker
         để thực hiện phân tích ảnh.
         """
+        logging.debug("Gọi app_logic.start_analysis từ UI.")
         self.app_logic.start_analysis(self)
 
     def stop_analysis(self):
@@ -341,6 +366,7 @@ class TradingToolApp:
         Gửi tín hiệu dừng cho luồng worker đang chạy và hủy các tác vụ upload đang chờ
         trong executor để dừng quá trình phân tích.
         """
+        logging.debug("Gọi app_logic.stop_analysis từ UI.")
         self.app_logic.stop_analysis(self)
 
     def _find_balanced_json_after(self, text: str, start_idx: int):
@@ -378,6 +404,7 @@ class TradingToolApp:
         """
         Thực hiện xóa file đã upload lên Gemini nếu cấu hình cho phép.
         """
+        logging.debug(f"Gọi app_logic._maybe_delete từ UI. Uploaded file: {uploaded_file}")
         self.app_logic._maybe_delete(uploaded_file)
 
     def _update_progress(self, done_steps, total_steps):
@@ -385,6 +412,7 @@ class TradingToolApp:
         Cập nhật thanh tiến trình và trạng thái trên giao diện người dùng.
         """
         pct = (done_steps / max(total_steps, 1)) * 100.0
+        logging.debug(f"Cập nhật tiến độ UI: {pct:.1f}%")
         ui_utils._enqueue(self, lambda: (self.progress_var.set(pct), self.status_var.set(f"Tiến độ: {pct:.1f}%")))
 
     def _update_tree_row(self, idx, status):
@@ -411,6 +439,7 @@ class TradingToolApp:
         Hoàn tất quá trình phân tích khi người dùng yêu cầu dừng.
         Cập nhật trạng thái giao diện và lên lịch cho lần chạy tự động tiếp theo (nếu bật).
         """
+        logging.debug("Gọi app_logic._finalize_stopped từ UI.")
         self.app_logic._finalize_stopped(self)
 
     def _on_tree_select(self, _evt):
@@ -418,6 +447,7 @@ class TradingToolApp:
         Xử lý sự kiện khi người dùng chọn một hàng trong bảng hiển thị file.
         Hiển thị báo cáo tổng hợp hoặc thông báo tương ứng.
         """
+        logging.debug("Đang xử lý sự kiện chọn hàng trong treeview.")
         self.detail_text.delete("1.0", "end")
         if self.combined_report_text.strip():
             self.detail_text.insert("1.0", self.combined_report_text)
@@ -558,6 +588,7 @@ class TradingToolApp:
         Bật hoặc tắt chế độ tự động chạy phân tích.
         Nếu bật, lên lịch cho lần chạy tiếp theo. Nếu tắt, hủy lịch chạy hiện tại.
         """
+        logging.debug("Gọi app_logic._toggle_autorun từ UI.")
         self.app_logic._toggle_autorun(self)
 
     def _autorun_interval_changed(self):
@@ -565,6 +596,7 @@ class TradingToolApp:
         Xử lý khi khoảng thời gian tự động chạy thay đổi.
         Nếu chế độ tự động chạy đang bật, lên lịch lại cho lần chạy tiếp theo.
         """
+        logging.debug("Gọi app_logic._autorun_interval_changed từ UI.")
         self.app_logic._autorun_interval_changed(self)
 
     def _schedule_next_autorun(self):
@@ -585,6 +617,7 @@ class TradingToolApp:
         """
         Mở hộp thoại cho người dùng chọn đường dẫn đến file thực thi của MetaTrader 5 (terminal64.exe hoặc terminal.exe).
         """
+        logging.debug("Gọi app_logic._pick_mt5_terminal từ UI.")
         self.app_logic._pick_mt5_terminal(self)
 
     def _mt5_guess_symbol(self):
@@ -592,20 +625,24 @@ class TradingToolApp:
         Cố gắng đoán biểu tượng (symbol) giao dịch từ tên các file ảnh đã nạp.
         Ví dụ: "EURUSD_H1.png" sẽ đoán là "EURUSD".
         """
+        logging.debug("Gọi app_logic._mt5_guess_symbol từ UI.")
         self.app_logic._mt5_guess_symbol(self)
 
     def _mt5_connect(self):
         """
         Gọi logic kết nối MT5 và cập nhật UI dựa trên kết quả.
         """
+        logging.debug("Gọi app_logic._mt5_connect từ UI.")
         ok, msg = self.app_logic._mt5_connect(self)
         if ok:
             ui_utils._enqueue(self, lambda: self.mt5_status_var.set(msg))
             ui_utils.ui_message(self, "info", "MT5", "Kết nối thành công.")
             self.app_logic._schedule_mt5_connection_check(self) # Bắt đầu kiểm tra định kỳ khi kết nối thành công
+            logging.info("Kết nối MT5 thành công từ UI.")
         else:
             ui_utils._enqueue(self, lambda: self.mt5_status_var.set(msg))
             ui_utils.ui_message(self, "error", "MT5", msg)
+            logging.error(f"Kết nối MT5 thất bại từ UI: {msg}")
 
     def _mt5_build_context(self, plan=None, cfg: "RunConfig" | None = None) -> Optional["SafeMT5Data"]:
         """
@@ -618,6 +655,7 @@ class TradingToolApp:
         """
         Hiển thị một cửa sổ popup chứa dữ liệu MetaTrader 5 hiện tại dưới dạng JSON.
         """
+        logging.debug("Gọi app_logic._mt5_snapshot_popup từ UI.")
         self.app_logic._mt5_snapshot_popup(self)
 
     def _extract_text_from_obj(self, obj):
@@ -625,6 +663,7 @@ class TradingToolApp:
         Trích xuất tất cả các chuỗi văn bản từ một đối tượng Python (dict, list, str)
         một cách đệ quy và nối chúng lại thành một chuỗi duy nhất.
         """
+        logging.debug("Gọi prompt_manager._extract_text_from_obj từ UI.")
         return prompt_manager._extract_text_from_obj(obj)
 
     def _normalize_prompt_text(self, raw: str) -> str:
@@ -640,6 +679,7 @@ class TradingToolApp:
         Định dạng lại nội dung của khu vực nhập prompt hiện tại (tab "No Entry" hoặc "Entry/Run")
         bằng cách chuẩn hóa văn bản.
         """
+        logging.debug("Gọi prompt_manager._reformat_prompt_area từ UI.")
         prompt_manager._reformat_prompt_area(self)
 
     def _load_prompts_from_disk(self, silent=False):
@@ -647,12 +687,14 @@ class TradingToolApp:
         Tải nội dung các file prompt từ đĩa (`prompt_no_entry.txt` và `prompt_entry_run.txt`)
         và hiển thị chúng trên các tab prompt tương ứng.
         """
+        logging.debug(f"Gọi prompt_manager._load_prompts_from_disk từ UI. Silent: {silent}")
         prompt_manager._load_prompts_from_disk(self, silent)
 
     def _save_current_prompt_to_disk(self):
         """
         Lưu nội dung của prompt hiện tại (trên tab đang chọn) vào file tương ứng trên đĩa.
         """
+        logging.debug("Gọi prompt_manager._save_current_prompt_to_disk từ UI.")
         prompt_manager._save_current_prompt_to_disk(self)
 
     def _save_workspace(self):
@@ -660,6 +702,7 @@ class TradingToolApp:
         Lưu toàn bộ cấu hình và trạng thái hiện tại của ứng dụng vào file `workspace.json`.
         Các thông tin nhạy cảm như Telegram token được mã hóa trước khi lưu.
         """
+        logging.debug("Gọi workspace_manager._save_workspace từ UI.")
         workspace_manager._save_workspace(self)
 
     def _load_workspace(self):
@@ -673,29 +716,37 @@ class TradingToolApp:
         """
         Xóa file `workspace.json` khỏi hệ thống.
         """
+        logging.debug("Gọi workspace_manager._delete_workspace từ UI.")
         workspace_manager._delete_workspace(self)
 
     def _update_model_list_in_ui(self):
         """
         Cập nhật danh sách các mô hình AI khả dụng trong Combobox trên UI.
         """
-        try:
-            # Cấu hình API Key trước khi gọi list_models
-            genai.configure(api_key=self.api_key_var.get())
-
-            available_models = []
-            for m in genai.list_models():
-                if "generateContent" in m.supported_generation_methods:
-                    available_models.append(m.name)
-            
-            if available_models:
-                self.model_combo['values'] = available_models
-                # Nếu mô hình hiện tại không còn khả dụng, đặt lại về mô hình đầu tiên
-                if self.model_var.get() not in available_models:
-                    self.model_var.set(available_models[0])
-                self.ui_status("Đã cập nhật danh sách mô hình AI.")
-            else:
-                self.ui_status("Không tìm thấy mô hình AI khả dụng nào.")
-        except Exception as e:
-            self.ui_status(f"Lỗi khi cập nhật danh sách mô hình AI: {e}")
-            logging.error(f"Lỗi khi cập nhật danh sách mô hình AI: {e}")
+        # Hàm này sẽ được gọi từ app_logic._configure_gemini_api_and_update_ui
+        # để cập nhật danh sách mô hình AI trên UI.
+        # Logic cấu hình API đã được chuyển sang app_logic.
+        logging.debug("Đang cập nhật danh sách mô hình AI trong UI.")
+        def _do_update():
+            try:
+                available_models = []
+                for m in genai.list_models():
+                    if "generateContent" in m.supported_generation_methods:
+                        available_models.append(m.name)
+                
+                if available_models:
+                    self.model_combo['values'] = available_models
+                    # Nếu mô hình hiện tại không còn khả dụng, đặt lại về mô hình đầu tiên
+                    if self.model_var.get() not in available_models:
+                        self.model_var.set(available_models[0])
+                    self.ui_status("Đã cập nhật danh sách mô hình AI.")
+                    logging.info("Đã cập nhật danh sách mô hình AI, tìm thấy {} mô hình.".format(len(available_models)))
+                else:
+                    self.ui_status("Không tìm thấy mô hình AI khả dụng nào.")
+                    logging.warning("Không tìm thấy mô hình AI khả dụng nào.")
+            except Exception as e:
+                self.ui_status("Lỗi khi cập nhật danh sách mô hình AI: {}".format(e))
+                logging.error("Lỗi khi cập nhật danh sách mô hình AI: {}".format(e))
+            logging.debug("Kết thúc cập nhật danh sách mô hình AI trong UI.")
+        
+        ui_utils._enqueue(self, _do_update)

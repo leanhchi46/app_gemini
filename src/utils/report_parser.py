@@ -127,10 +127,171 @@ def create_report_signature(text: str) -> str:
         return ""
     # Normalize whitespace and case to make it more robust
     normalized_text = " ".join(text.strip().lower().split())
-    return hashlib.sha1(normalized_text.encode("utf-8")).hexdigest()
+import re
+import json
+import math
+import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
+
+def find_balanced_json_after(text: str, start_idx: int):
+    logger.debug(f"Bắt đầu find_balanced_json_after từ index: {start_idx}")
+    depth, i = 0, start_idx
+    if text[i] != '{':
+        logger.debug("Không tìm thấy dấu '{' ở vị trí bắt đầu.")
+        return None, None
+        
+    while i < len(text):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                logger.debug(f"Tìm thấy khối JSON cân bằng, kết thúc ở index: {i+1}")
+                return text[start_idx:i+1], i+1
+        i += 1
+    logger.debug("Không tìm thấy khối JSON cân bằng.")
+    return None, None
+
+def extract_json_block_prefer(text: str):
+    logger.debug("Bắt đầu extract_json_block_prefer.")
+    fence = re.findall(r"```json\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
+    for blob in fence:
+        try:
+            parsed_json = json.loads(blob)
+            logger.debug("Đã trích xuất và parse JSON từ khối fence.")
+            return parsed_json
+        except Exception as e:
+            logger.debug(f"Lỗi khi parse JSON từ khối fence: {e}")
+            pass
+
+    keywords = ["CHECKLIST_JSON", "EXTRACT_JSON", "setup", "trade", "signal"]
+    lowered = text.lower()
+    for kw in keywords:
+        idx = lowered.find(kw.lower())
+        if idx >= 0:
+            brace = text.find("{", idx)
+            if brace >= 0:
+                js, _ = find_balanced_json_after(text, brace)
+                if js:
+                    try:
+                        parsed_json = json.loads(js)
+                        logger.debug(f"Đã trích xuất và parse JSON từ keyword '{kw}'.")
+                        return parsed_json
+                    except Exception as e:
+                        logger.debug(f"Lỗi khi parse JSON từ keyword '{kw}': {e}")
+                        pass
+
+    first_brace = text.find("{")
+    while first_brace >= 0:
+        js, nxt = find_balanced_json_after(text, first_brace)
+        if js:
+            try:
+                import json as _json
+                parsed_json = _json.loads(js)
+                logger.debug("Đã trích xuất và parse JSON từ dấu '{' đầu tiên.")
+                return parsed_json
+            except Exception as e:
+                logger.debug(f"Lỗi khi parse JSON từ dấu '{{' đầu tiên: {e}")
+                pass
+            first_brace = text.find("{", nxt if nxt else first_brace + 1)
+        else:
+            break
+    logger.debug("Không tìm thấy khối JSON hợp lệ nào.")
+    return None
+
+def coerce_setup_from_json(obj):
+    logger.debug(f"Bắt đầu coerce_setup_from_json với obj: {obj}")
+    if obj is None:
+        return None
+
+    candidates = []
+    if isinstance(obj, dict):
+        candidates.append(obj)
+        for k in ("CHECKLIST_JSON", "EXTRACT_JSON", "setup", "trade", "signal"):
+            v = obj.get(k)
+            if isinstance(v, dict):
+                candidates.append(v)
+
+    def _num(x):
+        if x is None:
+            return None
+        if isinstance(x, (int, float)) and math.isfinite(x):
+            return float(x)
+        if isinstance(x, str):
+            xs = x.strip().replace(",", "")
+            try:
+                return float(xs)
+            except Exception:
+                return None
+        return None
+
+    def _dir(x):
+        if not x:
+            return None
+        s = str(x).strip().lower()
+
+        if s in ("long", "buy", "mua", "bull", "bullish"):
+            return "long"
+        if s in ("short", "sell", "bán", "ban", "bear", "bearish"):
+            return "short"
+        return None
+
+    for c in candidates:
+        d = {
+            "direction": _dir(c.get("direction") or c.get("dir") or c.get("side")),
+            "entry": _num(c.get("entry") or c.get("price") or c.get("ep")),
+            "sl":    _num(c.get("sl")    or c.get("stop")  or c.get("stop_loss")),
+            "tp1":   _num(c.get("tp1")   or c.get("tp_1")  or c.get("take_profit_1") or c.get("tp")),
+            "tp2":   _num(c.get("tp2")   or c.get("tp_2")  or c.get("take_profit_2")),
+        }
+
+        if d["tp1"] is None and d["tp2"] is not None:
+            d["tp1"] = d["tp2"]
+        if d["tp1"] is not None and d["sl"] is not None and d["entry"] is not None and d["direction"] in ("long","short"):
+            logger.debug(f"Đã coerce setup thành công: {d}")
+            return d
+    logger.debug("Không thể coerce setup từ JSON.")
+    return None
+
+def parse_float(s: str):
+    logger.debug(f"Bắt đầu parse_float cho chuỗi: '{s}'")
+    try:
+        result = float(s.strip().replace(",", ""))
+        logger.debug(f"Đã parse float thành công: {result}")
+        return result
+    except (ValueError, TypeError) as e:
+        logger.debug(f"Lỗi khi parse float cho '{s}': {e}")
+        return None
+
+def parse_direction_from_line1(line1: str):
+    logger.debug(f"Bắt đầu parse_direction_from_line1 cho dòng: '{line1}'")
+    s = line1.strip().lower()
+    if "long" in s or "buy" in s or "bull" in s:
+        logger.debug("Hướng lệnh: long")
+        return "long"
+    if "short" in s or "sell" in s or "bear" in s:
+        logger.debug("Hướng lệnh: short")
+        return "short"
+    logger.debug("Không xác định được hướng lệnh.")
+    return None
+
+def create_report_signature(text: str) -> str:
+    """Creates a signature for a report to avoid duplicates."""
+    logger.debug("Bắt đầu create_report_signature.")
+    if not text:
+        return ""
+    # Normalize whitespace and case to make it more robust
+    normalized_text = " ".join(text.strip().lower().split())
+    sig = hashlib.sha1(normalized_text.encode("utf-8")).hexdigest()
+    logger.debug(f"Đã tạo signature: {sig}")
+    return sig
 
 def extract_summary_lines(text: str) -> tuple[list[str], str, bool]:
     """Extracts summary lines, a signature, and high probability flag from report text."""
+    logger.debug("Bắt đầu extract_summary_lines.")
     lines = text.strip().split('\n')
     summary = []
     # A simple heuristic: find the first block of bullet points
@@ -152,18 +313,22 @@ def extract_summary_lines(text: str) -> tuple[list[str], str, bool]:
     
     summary_text = "\n".join(summary)
     sig = create_report_signature(summary_text)
-
+    logger.debug("Kết thúc extract_summary_lines.")
     return summary, sig, high_prob
 
 def parse_setup_from_report(text: str):
     """Extracts a trade setup from a report by finding and parsing a JSON block."""
+    logger.debug("Bắt đầu parse_setup_from_report.")
     json_block = extract_json_block_prefer(text)
-    return coerce_setup_from_json(json_block)
+    setup = coerce_setup_from_json(json_block)
+    logger.debug(f"Kết thúc parse_setup_from_report. Setup: {setup}")
+    return setup
 
 def _generate_extract_json(mt5_data: dict) -> dict:
     """
     Tạo một dictionary chứa các thông tin trích xuất quan trọng từ dữ liệu MT5.
     """
+    logger.debug("Bắt đầu _generate_extract_json.")
     extract_dict = {
         "symbol": mt5_data.get("symbol"),
         "broker_time": mt5_data.get("broker_time"),
@@ -241,11 +406,14 @@ def _generate_extract_json(mt5_data: dict) -> dict:
                 extract_dict[f"liquidity_voids_{tf_key}_count"] = len(lvs)
                 # Có thể thêm chi tiết hơn nếu cần, ví dụ: gần nhất, cao nhất/thấp nhất
 
+    logger.debug("Kết thúc _generate_extract_json.")
     return extract_dict
 
 def parse_mt5_data_to_report(safe_mt5_data) -> str:
     """Converts MT5 data into a structured report."""
+    logger.debug("Bắt đầu parse_mt5_data_to_report.")
     if not safe_mt5_data or not safe_mt5_data.raw:
+        logger.warning("Không có dữ liệu MT5 để tạo báo cáo.")
         return "Không có dữ liệu MT5."
 
     mt5_data = safe_mt5_data.raw
@@ -336,7 +504,7 @@ def parse_mt5_data_to_report(safe_mt5_data) -> str:
     report_lines.append("### [EXTRACT_JSON]")
     extract_dict = _generate_extract_json(mt5_data)
     report_lines.append(json.dumps(extract_dict, indent=2, ensure_ascii=False))
-
+    logger.debug("Kết thúc parse_mt5_data_to_report.")
     return "\n".join(report_lines)
 
 def repair_json_string(s: str) -> str:
@@ -344,6 +512,7 @@ def repair_json_string(s: str) -> str:
     Attempts to repair a malformed JSON string by removing common issues.
     This is a heuristic approach and may not fix all cases.
     """
+    logger.debug("Bắt đầu repair_json_string.")
     # Remove any leading/trailing non-JSON characters
     s = s.strip()
 
@@ -360,6 +529,11 @@ def repair_json_string(s: str) -> str:
     # Ensure keys are double-quoted
     s = re.sub(r"([{,]\s*)(\w+)(\s*:)", r'\1"\2"\3', s)
 
+    # Add missing commas between key-value pairs if they are on separate lines
+    # This is a heuristic and might introduce extra commas in some cases,
+    # but it's a common issue with LLM-generated JSON.
+    s = re.sub(r'(":\s*[^}\]]+)\s*\n\s*(")', r'\1,\n\2', s)
+
     # Remove trailing commas before } or ]
     s = re.sub(r",\s*([}\]])", r'\1', s)
 
@@ -375,5 +549,5 @@ def repair_json_string(s: str) -> str:
     
     # Remove any non-printable characters or control characters
     s = ''.join(ch for ch in s if ch.isprintable() or ch in ('\n', '\t', '\r'))
-
+    logger.debug("Kết thúc repair_json_string.")
     return s

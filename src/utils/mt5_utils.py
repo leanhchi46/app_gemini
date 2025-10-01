@@ -34,7 +34,9 @@ def connect(path: str | None = None) -> tuple[bool, str | None]:
 
     Returns (ok, error_message). On success, error_message is None.
     """
+    logging.debug(f"Bắt đầu connect MT5. Path: {path}")
     if mt5 is None:
+        logging.error("MetaTrader5 module not installed.")
         return False, "MetaTrader5 module not installed (pip install MetaTrader5)"
     try:
         ok = mt5.initialize(path=path) if path else mt5.initialize()
@@ -42,15 +44,20 @@ def connect(path: str | None = None) -> tuple[bool, str | None]:
             err_code = mt5.last_error()
             logging.error(f"mt5.initialize() failed with code {err_code}")
             return False, f"initialize() failed: {err_code}"
+        logging.info("Kết nối MT5 thành công.")
         return True, None
     except Exception as e:
         logging.exception("MT5 connect generated an exception")
         return False, f"MT5 connect error: {e}"
+    finally:
+        logging.debug("Kết thúc connect MT5.")
 
 
 def ensure_initialized(path: str | None = None) -> bool:
     """Ensure MT5 is initialized. Returns True if ready."""
+    logging.debug(f"Bắt đầu ensure_initialized. Path: {path}")
     ok, _ = connect(path)
+    logging.debug(f"Kết thúc ensure_initialized. Kết quả: {ok}")
     return ok
 
 
@@ -118,11 +125,14 @@ def value_per_point(symbol: str, info_obj: Any | None = None) -> float | None:
     Best-effort estimation of 1-point value per 1.00 lot for `symbol`.
     Tries broker-provided tick value/size, falls back to order_calc_profit, then contract size.
     """
+    logging.debug(f"Bắt đầu value_per_point cho symbol: {symbol}")
     if mt5 is None:
+        logging.warning("MetaTrader5 module not installed, cannot get value_per_point.")
         return None
     try:
         info_obj = info_obj or mt5.symbol_info(symbol)
         if not info_obj:
+            logging.warning(f"Không tìm thấy thông tin symbol cho {symbol}.")
             return None
 
         point = float(getattr(info_obj, "point", 0.0) or 0.0)
@@ -244,10 +254,13 @@ def vwap_from_rates(rates: Sequence[dict] | None) -> float | None:
 
 def adr_stats(symbol: str, n: int = 20) -> dict[str, float] | None:
     """Average Daily Range stats for last n days (d5/d10/d20)."""
+    logging.debug(f"Bắt đầu adr_stats cho symbol: {symbol}, n: {n}")
     if mt5 is None:
+        logging.warning("MetaTrader5 module not installed, cannot get adr_stats.")
         return None
     bars = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 0, max(25, n + 2))
     if bars is None or len(bars) < 5:
+        logging.warning(f"Không đủ dữ liệu D1 để tính adr_stats cho {symbol}.")
         return None
     ranges = [float(b["high"] - b["low"]) for b in bars[-(n + 1) : -1]]
     if not ranges:
@@ -327,6 +340,7 @@ def session_ranges_today(m1_rates: Sequence[dict] | None) -> dict[str, dict]:
 
 
 def _series_from_mt5(symbol: str, tf_code: int, bars: int) -> list[dict]:
+    logging.debug(f"Bắt đầu _series_from_mt5 cho symbol: {symbol}, tf_code: {tf_code}, bars: {bars}")
     arr = (
         mt5.copy_rates_from_pos(symbol, tf_code, 0, max(50, int(bars))) if mt5 else None
     )
@@ -345,16 +359,23 @@ def _series_from_mt5(symbol: str, tf_code: int, bars: int) -> list[dict]:
                     "vol": int(r["tick_volume"]),
                 }
             )
+        logging.debug(f"Đã lấy {len(rows)} bars cho {symbol} {tf_code}.")
+    else:
+        logging.warning(f"Không lấy được rates từ MT5 cho {symbol} {tf_code}.")
+    logging.debug("Kết thúc _series_from_mt5.")
     return rows
 
 
 def _hl_from(symbol: str, tf_code: int, bars: int) -> dict | None:
+    logging.debug(f"Bắt đầu _hl_from cho symbol: {symbol}, tf_code: {tf_code}, bars: {bars}")
     data = mt5.copy_rates_from_pos(symbol, tf_code, 0, bars) if mt5 else None
     if data is None or len(data) == 0:
+        logging.warning(f"Không lấy được dữ liệu HL từ MT5 cho {symbol} {tf_code}.")
         return None
     hi = max([float(x["high"]) for x in data])
     lo = min([float(x["low"]) for x in data])
     op = float(data[0]["open"])  # first bar open
+    logging.debug(f"Đã lấy HL từ MT5 cho {symbol} {tf_code}. High: {hi}, Low: {lo}")
     return {"open": op, "high": hi, "low": lo}
 
 
@@ -403,11 +424,14 @@ def build_context(
     Fetches MT5 data + computes helpers used by the app.
     Returns a JSON string (default) containing a single object with key MT5_DATA.
     """
+    logging.debug(f"Bắt đầu build_context cho symbol: {symbol}")
     if mt5 is None:
+        logging.warning("MetaTrader5 module not installed, cannot build MT5 context.")
         return SafeMT5Data(None)
 
     info = mt5.symbol_info(symbol)
     if not info:
+        logging.warning(f"Không tìm thấy thông tin symbol cho {symbol}.")
         return SafeMT5Data(None)
     if not getattr(info, "visible", True):
         try:
@@ -861,20 +885,24 @@ def build_context_from_app(
     (giá nến, thông tin tài khoản, các lệnh đang mở...).
     Hàm này là wrapper cho build_context, lấy thông tin từ đối tượng app.
     """
+    logging.debug("Bắt đầu build_context_from_app.")
     sym = cfg.mt5_symbol if cfg else (app.mt5_symbol_var.get() or "").strip()
     if (
         not ((cfg.mt5_enabled if cfg else app.mt5_enabled_var.get()) and sym)
         or mt5 is None
     ):
+        logging.warning("MT5 không được bật, không có symbol, hoặc module MT5 không cài đặt. Bỏ qua xây dựng ngữ cảnh MT5.")
         return None
     if not app.mt5_initialized:
+        logging.info("MT5 chưa được khởi tạo, đang cố gắng kết nối.")
         ok, _ = app._mt5_connect(app)  # Gọi _mt5_connect từ app_logic
         if not ok:
+            logging.error("Kết nối MT5 thất bại trong build_context_from_app.")
             return None
 
     # Ủy quyền cho mt5_utils.build_context để xây dựng đối tượng ngữ cảnh MT5
     try:
-        return build_context(  # Gọi hàm build_context đã có trong mt5_utils
+        result = build_context(  # Gọi hàm build_context đã có trong mt5_utils
             sym,
             n_m1=(cfg.mt5_n_M1 if cfg else int(app.mt5_n_M1.get())),
             n_m5=(cfg.mt5_n_M5 if cfg else int(app.mt5_n_M5.get())),
@@ -883,7 +911,10 @@ def build_context_from_app(
             plan=plan,
             return_json=False,  # Đảm bảo chúng ta nhận được đối tượng Python, không phải chuỗi JSON
         )
-    except Exception:
+        logging.debug("Kết thúc build_context_from_app.")
+        return result
+    except Exception as e:
+        logging.exception(f"Lỗi khi gọi build_context từ build_context_from_app: {e}")
         return None
 
 

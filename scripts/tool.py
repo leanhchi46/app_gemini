@@ -12,7 +12,9 @@ Mục tiêu:
 from __future__ import annotations
 
 import sys
+import os # Thêm import os
 from pathlib import Path
+import subprocess # Thêm import subprocess
 
 # Thêm thư mục gốc của dự án vào sys.path để có thể import các module từ `src`
 project_root = Path(__file__).resolve().parent.parent
@@ -23,6 +25,7 @@ import logging
 
 # Import các module nội bộ của dự án
 from src.config.constants import APP_DIR # APP_DIR sẽ không còn được dùng cho log file
+from src.utils.logging_utils import setup_logging # Import hàm setup_logging
 
 # Import các module mới
 from src.ui.app_ui import TradingToolApp
@@ -34,18 +37,8 @@ def main():
     Hàm chính để khởi tạo và chạy ứng dụng.
     Thiết lập cấu hình ghi log và khởi tạo giao diện người dùng.
     """
-    # Định nghĩa thư mục Log trong thư mục gốc của dự án
-    log_dir = project_root / "Log"
-    log_dir.mkdir(parents=True, exist_ok=True) # Tạo thư mục nếu chưa tồn tại
-    log_file_path = log_dir / "app_debug.log" # Cập nhật đường dẫn file log
     try:
-        # Cấu hình ghi log ra file để dễ dàng gỡ lỗi
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-            filename=str(log_file_path),
-            filemode='w',
-        )
+        setup_logging() # Gọi hàm cấu hình logging
         logging.info("Ứng dụng đang khởi động.")    
 
         root = tk.Tk()
