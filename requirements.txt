@@ -1,0 +1,7 @@
+google-generativeai
+MetaTrader5
+numpy
+pandas
+matplotlib
+Pillow
+certifi
