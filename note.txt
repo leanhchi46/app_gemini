@@ -312,3 +312,95 @@ Dưới đây là các file khác có liên quan trực tiếp hoặc gián ti�
     *   **Liên quan:** `TradingToolApp` ủy quyền nhiều tác vụ cho `AppLogic`, và `AppLogic` lại gọi `run_analysis_worker` trong một luồng riêng.
 
 Hy vọng phần giải thích này giúp bạn hiểu rõ hơn về cách `main_worker.py` hoạt động và mối quan hệ của nó với các thành phần khác trong dự án.
+
+Tôi đã phân tích các file trong thư mục `src/core/worker_modules` và hiểu rõ luồng logic cũng như sự liên kết giữa chúng. Dưới đây là tóm tắt và sơ đồ trực quan:
+
+**Tóm tắt phân tích:**
+
+1.  **`main_worker.py`**: Là trung tâm điều phối chính, 
+quản lý toàn bộ quy trình phân tích và giao dịch tự động theo từng giai đoạn: 
+khởi tạo, kiểm tra điều kiện NO-RUN, chuẩn bị/upload ảnh, 
+xây dựng ngữ cảnh/kiểm tra NO-TRADE, gọi AI và xử lý kết quả, 
+cuối cùng là lưu trữ báo cáo và dọn dẹp.
+
+2.  **`api_handlers.py`**: Chuyên xử lý tương tác với API Gemini,
+ bao gồm cơ chế retry cho streaming và khả năng kích hoạt auto-trade
+  ngay trong quá trình nhận dữ liệu từ AI.
+
+3.  **`context_coordinator.py`**: Tập hợp các thông tin cần thiết 
+(lịch sử, dữ liệu MT5 thời gian thực, phân tích tin tức) 
+để tạo ngữ cảnh đầy đủ cho model AI.
+
+4.  **`image_processor.py`**: Đảm nhiệm việc tối ưu hóa và 
+upload các file ảnh biểu đồ lên Gemini, có cơ chế cache để tăng hiệu quả.
+
+5.  **`prompt_manager.py`**: Quản lý việc lựa chọn prompt phù hợp 
+dựa trên trạng thái giao dịch và xây dựng nội dung prompt cuối cùng
+ bằng cách tích hợp các dữ liệu liên quan.
+
+6.  **`trade_actions.py`**: Chứa logic cốt lõi cho việc thực hiện giao dịch tự động. 
+Nó phân tích kết quả từ AI, kiểm tra các điều kiện giao dịch
+ (như tỷ lệ R:R, khoảng cách đến key level), 
+ tính toán khối lượng và gửi lệnh đến MetaTrader 5. 
+ Nó cũng ghi lại các quyết định giao dịch.
+7.  **`trade_conditions.py`**: Đóng vai trò là các "chốt chặn" sớm, 
+kiểm tra các điều kiện tổng thể (NO-RUN) và các điều kiện giao dịch cụ thể (NO-TRADE)
+ để quyết định có nên tiếp tục hay thoát sớm.
+
+**Sơ đồ luồng logic trực quan:**
+
+```mermaid
+graph TD
+    A[scripts/tool.py (TradingToolApp)] --> B(main_worker.py::run_analysis_worker)
+
+    B -- Giai đoạn 1: Khởi tạo --> C{Kiểm tra đầu vào & Khởi tạo Model}
+    C --> D{Kiểm tra NO-RUN}
+    D -- True (Thoát sớm) --> E[Kết thúc Worker]
+    D -- False (Tiếp tục) --> F{Chuẩn bị & Upload ảnh}
+
+    F -- Sử dụng --> G[image_processor.py]
+    G -- Tối ưu hóa ảnh --> G1(prepare_image)
+    G -- Upload song song --> G2(upload_images_parallel)
+    G -- Quản lý cache --> G3(UploadCache)
+
+    F --> H{Xây dựng ngữ cảnh & Kiểm tra NO-TRADE}
+
+    H -- Sử dụng --> I[context_coordinator.py]
+    I -- Xây dựng ngữ cảnh lịch sử --> I1(context_builder.compose_context)
+    I -- Lấy dữ liệu MT5 --> I2(app._mt5_build_context)
+    I -- Phân tích tin tức --> I3(services/news.py)
+
+    H -- Sử dụng --> J[trade_conditions.py]
+    J -- Kiểm tra NO-RUN --> J1(handle_no_run_check)
+    J -- Kiểm tra NO-TRADE --> J2(handle_no_trade_check)
+    J -- Xử lý không thay đổi --> J3(handle_no_change_scenario)
+
+    H --> K{Gọi Model AI & Xử lý kết quả}
+
+    K -- Sử dụng --> L[prompt_manager.py]
+    L -- Chọn prompt động --> L1(select_prompt_dynamically)
+    L -- Xây dựng prompt cuối cùng --> L2(construct_final_prompt)
+    L -- Phân tích báo cáo --> L3(utils/report_parser.py)
+
+    K -- Sử dụng --> M[api_handlers.py]
+    M -- Gọi API streaming với retry --> M1(_gen_stream_with_retry)
+    M -- Xử lý stream & Auto-Trade --> M2(stream_and_process_ai_response)
+
+    M2 -- Kích hoạt trong stream --> N[trade_actions.py::auto_trade_if_high_prob]
+    N -- Kiểm tra NO-TRADE --> N1(no_trade.evaluate)
+    N -- Phân tích setup từ AI --> N2(report_parser.extract_json_block_prefer)
+    N -- Gửi lệnh MT5 --> N3(_order_send_smart)
+    N -- Ghi log giao dịch --> N4(_log_trade_decision)
+
+    K --> O{Hoàn tất, Lưu trữ & Dọn dẹp}
+    O -- Lưu báo cáo MD --> O1(utils/md_saver.save_md_report)
+    O -- Lưu báo cáo JSON --> O2(utils/json_saver.save_json_report)
+    O -- Gửi Telegram (tùy chọn) --> O3(services/telegram_client.py)
+    O -- Dọn dẹp file upload --> O4(image_processor.maybe_delete_uploaded_file)
+
+    O --> E
+```
+
+Sơ đồ này minh họa cách `main_worker.py` điều phối các module khác để thực hiện quy trình phân tích và giao dịch tự động, từ việc chuẩn bị dữ liệu đến tương tác với AI và thực hiện các hành động giao dịch.
+
+Bạn có muốn tôi đi sâu vào chi tiết hơn về bất kỳ module hoặc luồng logic cụ thể nào không? Hoặc bạn đã hài lòng với phân tích này và muốn tôi chuyển sang chế độ ACT để thực hiện một tác vụ khác?
