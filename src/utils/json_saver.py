@@ -51,22 +51,25 @@ def save_json_report(app: "TradingToolApp", text: str, cfg: "RunConfig", names: 
             try:
                 # Repair and validate the JSON string
                 repaired_str = report_parser.repair_json_string(json_str)
-                json.loads(repaired_str, strict=False)
+                json.loads(repaired_str, strict=False) # Validate after repair
                 found.append(repaired_str) # Save the repaired version
                 start_search_idx = next_idx
             except Exception as e:
-                try:
-                    with open(APP_DIR / "json_error_dump.txt", "w", encoding="utf-8") as f:
-                        f.write(f"--- JSON PARSE ERROR ---\n")
-                        f.write(f"Time: {datetime.now().isoformat()}\n")
-                        f.write(f"Error: {e}\n\n")
-                        f.write(f"--- Problematic JSON String ---\n")
-                        f.write(json_str)
-                except Exception:
-                    pass  # Ignore if logging fails
-                logging.error(f"Failed to parse JSON block: {e}")
+                # Log the error and the problematic string for debugging
+                logging.error(f"Failed to parse or repair JSON block: {e}")
                 logging.debug(f"Problematic JSON string:\n---\n{json_str}\n---")
-                # If it's not valid JSON, just move on
+                # Optionally dump to a file if needed, but logging is usually sufficient
+                # try:
+                #     with open(APP_DIR / "json_error_dump.txt", "a", encoding="utf-8") as f:
+                #         f.write(f"--- JSON PARSE ERROR ---\n")
+                #         f.write(f"Time: {datetime.now().isoformat()}\n")
+                #         f.write(f"Error: {e}\n\n")
+                #         f.write(f"--- Problematic JSON String ---\n")
+                #         f.write(json_str)
+                # except Exception:
+                #     pass  # Ignore if logging to file fails
+                
+                # If it's not valid JSON even after repair, just move on
                 start_search_idx = brace_idx + 1
         else:
             # No more balanced JSON found

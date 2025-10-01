@@ -1,3 +1,4 @@
+J.[B6Y|5.00<<yB
 Chào bạn, tôi đã phân tích kỹ lưỡng mã nguồn của file `scripts/tool.py`. Dưới đây là sơ đồ logic thuật toán và giải thích chi tiết từng phần.
 
 ### I. Sơ đồ Logic Thuật toán (Luồng hoạt động chính)
@@ -194,3 +195,120 @@ thực hiện các đề xuất sau:
 4. Gom các hàm Quản lý file và lịch sử vào một module hoặc lớp  `ReportManager` riêng.
 5. Gom các hàm Xử lý Prompt vào một module hoặc lớp `PromptManager`.
 6. Cải thiện luồng Auto-Run: Khi tách `TradingCore`, `_autorun_tick` trong `TradingToolApp` sẽ chỉ cần gọi một phương thức tương ứng trong `TradingCore` để kích hoạt chu trình tự động.
+
+Chào bạn, tôi sẽ giải thích chi tiết code và logic của file `src/core/worker_modules/main_worker.py`, cùng với các file liên quan.
+
+### Giải thích file `src/core/worker_modules/main_worker.py`
+
+File `main_worker.py` chứa hàm `run_analysis_worker`, là luồng phân tích chính của ứng dụng. Hàm này điều phối toàn bộ quy trình từ việc chuẩn bị và upload ảnh, xây dựng ngữ cảnh, gọi mô hình AI để phân tích, đến việc xử lý kết quả và thực hiện các hành động giao dịch tự động. Nó được thiết kế để chạy trong một luồng riêng biệt để không làm treo giao diện người dùng.
+
+Dưới đây là các giai đoạn chính trong hàm `run_analysis_worker`:
+
+1.  **GIAI ĐOẠN 1: KHỞI TẠO VÀ KIỂM TRA ĐẦU VÀO**
+    *   **Mục đích:** Chuẩn bị danh sách các đường dẫn ảnh cần phân tích và khởi tạo mô hình AI.
+    *   **Logic:**
+        *   Lấy danh sách các đường dẫn ảnh (`paths`) và tên ảnh (`names`) từ `app.results`.
+        *   Áp dụng giới hạn số lượng file tối đa (`cfg.max_files`) nếu được cấu hình.
+        *   Kiểm tra nếu không có ảnh nào để phân tích, sẽ dừng quá trình.
+        *   Khởi tạo mô hình Gemini (`genai.GenerativeModel`) với `model_name` được truyền vào. Nếu có lỗi khởi tạo mô hình (ví dụ: tên mô hình không hợp lệ như lỗi `404 models/gemini-1.5-flash` trước đó), sẽ hiển thị thông báo lỗi và dừng.
+
+2.  **GIAI ĐOẠN 2: KIỂM TRA ĐIỀU KIỆN NO-RUN**
+    *   **Mục đích:** Thực hiện kiểm tra các điều kiện không nên chạy phân tích (ví dụ: cuối tuần, ngoài giờ giao dịch).
+    *   **Logic:**
+        *   Gọi `trade_conditions.handle_no_run_check(app, cfg)`. Nếu điều kiện `No-Run` được kích hoạt, `early_exit` sẽ được đặt thành `True` và luồng sẽ thoát một cách có kiểm soát.
+
+3.  **GIAI ĐOẠN 3: CHUẨN BỊ VÀ UPLOAD ẢNH**
+    *   **Mục đích:** Chuẩn bị các file ảnh để upload lên Gemini và thực hiện upload.
+    *   **Logic:**
+        *   Tải bộ đệm upload (`UploadCache`) nếu `cfg.cache_enabled` là `True`.
+        *   Duyệt qua từng ảnh:
+            *   Kiểm tra xem ảnh đã được upload lên Gemini và còn hoạt động trong bộ đệm chưa. Nếu có, sử dụng file đã upload.
+            *   Nếu không, chuẩn bị ảnh (tối ưu hóa nếu `cfg.optimize_lossless` là `True`) và thêm vào danh sách `to_upload`.
+        *   Nếu `cfg.only_generate_if_changed` là `True` và không có ảnh nào thay đổi (tức là tất cả đều đã có trong cache và đang hoạt động), sẽ kích hoạt `No-Change` và thoát sớm.
+        *   Hiển thị trạng thái "Đang upload..." trên UI cho các file cần upload.
+        *   Thực hiện upload ảnh song song bằng `image_processor.upload_images_parallel`.
+        *   Cập nhật bộ đệm upload sau khi upload thành công.
+        *   Kiểm tra `app.stop_flag` để dừng nếu người dùng yêu cầu.
+
+4.  **GIAI ĐOẠN 4: XÂY DỰNG NGỮ CẢNH VÀ KIỂM TRA NO-TRADE**
+    *   **Mục đích:** Chuẩn bị dữ liệu từ MetaTrader 5 (MT5) và các ngữ cảnh khác, sau đó kiểm tra các điều kiện không nên giao dịch.
+    *   **Logic:**
+        *   Gọi `context_coordinator.prepare_and_build_context(app, cfg)` để lấy dữ liệu MT5 an toàn (`safe_mt5_data`), từ điển MT5 (`mt5_dict`), khối ngữ cảnh (`context_block`) và JSON MT5 đầy đủ (`mt5_json_full`).
+        *   Hiển thị trạng thái "Context+MT5 xong".
+        *   Gọi `trade_conditions.handle_no_trade_check(app, cfg, ...)` để kiểm tra các điều kiện `No-Trade` (ví dụ: tin tức, rủi ro). Nếu điều kiện được kích hoạt, `early_exit` sẽ được đặt thành `True` và luồng sẽ thoát.
+
+5.  **GIAI ĐOẠN 5: GỌI MODEL AI VÀ XỬ LÝ KẾT QUẢ**
+    *   **Mục đích:** Gửi các ảnh và prompt đã chuẩn bị đến mô hình AI Gemini, sau đó xử lý phản hồi streaming.
+    *   **Logic:**
+        *   Tạo danh sách `all_media` chứa các đối tượng media (file đã upload hoặc ảnh inline) từ `file_slots` và `prepared_map`.
+        *   Chọn prompt phù hợp (`prompt_no_entry` hoặc `prompt_entry_run`) một cách linh hoạt bằng `prompt_manager.select_prompt_dynamically`.
+        *   Xây dựng prompt cuối cùng (`prompt_final`) bằng `prompt_manager.construct_final_prompt`, kết hợp prompt đã chọn với dữ liệu MT5, ngữ cảnh và đường dẫn ảnh.
+        *   Tạo danh sách `parts` bao gồm tất cả media và `prompt_final`.
+        *   Gọi `api_handlers.stream_and_process_ai_response(app, cfg, model, parts, mt5_dict)` để gửi yêu cầu đến mô hình AI và xử lý phản hồi streaming. Hàm này cũng kích hoạt `auto-trade` ngay trong quá trình nhận dữ liệu từ AI.
+        *   Cập nhật thanh tiến trình.
+
+6.  **GIAI ĐOẠN 6: HOÀN TẤT, LƯU TRỮ VÀ DỌN DẸP**
+    *   **Mục đích:** Xử lý các tác vụ sau khi phân tích hoàn tất (hoặc bị dừng), bao gồm cập nhật UI, lưu báo cáo, gửi thông báo và dọn dẹp.
+    *   **Logic:**
+        *   Nếu không có `early_exit`:
+            *   Cập nhật trạng thái "Hoàn tất" cho tất cả các file trên UI.
+            *   Lưu báo cáo tổng hợp dưới dạng Markdown (`md_saver.save_md_report`) và JSON (`json_saver.save_json_report`).
+            *   Làm mới danh sách lịch sử trên UI.
+            *   Gửi thông báo Telegram nếu `cfg.telegram_enabled` là `True` và báo cáo chứa tín hiệu giao dịch.
+            *   (Phần `trade_actions.mt5_manage_be_trailing` hiện đang bị vô hiệu hóa).
+        *   Nếu `cfg.delete_after` là `True` và `cfg.cache_enabled` là `False`, sẽ xóa các file đã upload lên Gemini.
+        *   Cập nhật thanh tiến trình về 0% và thông báo cho luồng chính biết worker đã hoàn thành hoặc bị dừng.
+
+### Các file liên quan và vai trò của chúng
+
+Dưới đây là các file khác có liên quan trực tiếp hoặc gián tiếp đến hoạt động của `main_worker.py`:
+
+*   **`src/core/worker_modules/api_handlers.py`**:
+    *   **Vai trò:** Xử lý tương tác với API Gemini, bao gồm cơ chế thử lại (retry) và xử lý phản hồi streaming.
+    *   **Liên quan:** Hàm `stream_and_process_ai_response` trong file này được gọi bởi `main_worker.py` để gửi yêu cầu đến mô hình AI và nhận kết quả.
+
+*   **`src/core/worker_modules/context_coordinator.py`**:
+    *   **Vai trò:** Điều phối việc xây dựng ngữ cảnh cho worker, bao gồm việc lấy dữ liệu từ MetaTrader 5 (MT5) và các báo cáo lịch sử.
+    *   **Liên quan:** Hàm `prepare_and_build_context` được gọi để thu thập tất cả dữ liệu cần thiết trước khi gửi đến AI.
+
+*   **`src/core/worker_modules/image_processor.py`**:
+    *   **Vai trò:** Xử lý, chuẩn bị và upload ảnh lên Gemini. Bao gồm các chức năng tối ưu hóa ảnh và quản lý bộ đệm upload.
+    *   **Liên quan:** Các hàm như `prepare_image`, `upload_images_parallel`, `UploadCache` được sử dụng để quản lý quá trình upload ảnh.
+
+*   **`src/core/worker_modules/prompt_manager.py`**:
+    *   **Vai trò:** Quản lý, chọn và xây dựng nội dung prompt (lời nhắc) cho mô hình AI.
+    *   **Liên quan:** Các hàm `select_prompt_dynamically` và `construct_final_prompt` được sử dụng để tạo prompt phù hợp dựa trên trạng thái giao dịch và dữ liệu hiện có.
+
+*   **`src/core/worker_modules/trade_conditions.py`**:
+    *   **Vai trò:** Điều phối kiểm tra các điều kiện `NO-RUN` (không nên chạy) và `NO-TRADE` (không nên giao dịch), cũng như xử lý thoát sớm.
+    *   **Liên quan:** Các hàm `handle_no_run_check` và `handle_no_trade_check` là các "chốt chặn" quan trọng để ngăn chặn việc phân tích hoặc giao dịch trong các điều kiện không thuận lợi.
+
+*   **`src/utils/ui_utils.py`**:
+    *   **Vai trò:** Chứa các hàm tiện ích để cập nhật giao diện người dùng (UI) một cách an toàn từ các luồng phụ.
+    *   **Liên quan:** Được sử dụng rộng rãi trong `main_worker.py` để cập nhật trạng thái, tiến trình và hiển thị thông báo trên UI.
+
+*   **`src/utils/json_saver.py` và `src/utils/md_saver.py`**:
+    *   **Vai trò:** Các tiện ích để lưu báo cáo dưới dạng JSON và Markdown.
+    *   **Liên quan:** Được sử dụng ở giai đoạn cuối để lưu trữ kết quả phân tích.
+
+*   **`src/config/constants.py`**:
+    *   **Vai trò:** Chứa các hằng số của ứng dụng, bao gồm tên mô hình AI mặc định (`DEFAULT_MODEL`).
+    *   **Liên quan:** Định nghĩa `DEFAULT_MODEL` mà `main_worker.py` sử dụng để khởi tạo mô hình AI.
+
+*   **`src/config/config.py`**:
+    *   **Vai trò:** Định nghĩa lớp `RunConfig` chứa tất cả các cài đặt cấu hình cho một lần chạy phân tích.
+    *   **Liên quan:** Đối tượng `cfg` được truyền vào `run_analysis_worker` là một instance của `RunConfig`, chứa tất cả các tham số điều khiển hành vi của worker.
+
+*   **`scripts/tool.py`**:
+    *   **Vai trò:** Script chính để khởi chạy ứng dụng, thiết lập môi trường và khởi tạo giao diện người dùng.
+    *   **Liên quan:** Đây là điểm vào của ứng dụng, nơi `TradingToolApp` được tạo và `main_worker.py` được gọi thông qua `app_logic.start_analysis`.
+
+*   **`src/ui/app_ui.py`**:
+    *   **Vai trò:** Định nghĩa lớp giao diện người dùng chính (`TradingToolApp`), quản lý các widget và tương tác người dùng.
+    *   **Liên quan:** `main_worker.py` tương tác với đối tượng `app` (một instance của `TradingToolApp`) để cập nhật UI và truy cập các thuộc tính của ứng dụng.
+
+*   **`src/core/app_logic.py`**:
+    *   **Vai trò:** Chứa logic nghiệp vụ chính của ứng dụng, điều phối các thành phần khác và cung cấp các phương thức được gọi từ UI.
+    *   **Liên quan:** `TradingToolApp` ủy quyền nhiều tác vụ cho `AppLogic`, và `AppLogic` lại gọi `run_analysis_worker` trong một luồng riêng.
+
+Hy vọng phần giải thích này giúp bạn hiểu rõ hơn về cách `main_worker.py` hoạt động và mối quan hệ của nó với các thành phần khác trong dự án.

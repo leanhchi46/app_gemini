@@ -10,6 +10,8 @@ import queue # Cần cho self.ui_queue
 import threading # Cần cho threading.Lock
 from datetime import datetime # Cần cho export_markdown
 from typing import TYPE_CHECKING, Optional
+import logging # Thêm import logging
+import google.generativeai as genai # Thêm import genai
 
 # Để tránh lỗi import vòng tròn, sử dụng TYPE_CHECKING cho type hints
 if TYPE_CHECKING:
@@ -28,6 +30,7 @@ from src.utils.utils import (
 from src.utils import ui_utils
 from src.utils import ui_builder
 from src.utils import report_parser # Giữ lại vì một số hàm vẫn dùng trực tiếp
+from src.utils import mt5_utils # Cần cho _mt5_build_context
 from src.ui import history_manager
 from src.ui import prompt_manager
 from src.ui import timeframe_detector
@@ -401,7 +404,7 @@ class TradingToolApp:
         Hoàn tất quá trình phân tích khi tất cả các file đã được xử lý.
         Ghi log kết thúc, cập nhật trạng thái giao diện và lên lịch cho lần chạy tự động tiếp theo (nếu bật).
         """
-        self.app_logic._finalize_done(self)
+        self.app_logic._finalize_stopped(self)
 
     def _finalize_stopped(self):
         """
@@ -609,7 +612,7 @@ class TradingToolApp:
         Xây dựng đối tượng ngữ cảnh MetaTrader 5 (SafeMT5Data) chứa dữ liệu thị trường hiện tại
         (giá nến, thông tin tài khoản, các lệnh đang mở...).
         """
-        return self.app_logic._mt5_build_context(self, plan, cfg)
+        return mt5_utils.build_context_from_app(self, plan, cfg)
 
     def _mt5_snapshot_popup(self):
         """
@@ -671,3 +674,28 @@ class TradingToolApp:
         Xóa file `workspace.json` khỏi hệ thống.
         """
         workspace_manager._delete_workspace(self)
+
+    def _update_model_list_in_ui(self):
+        """
+        Cập nhật danh sách các mô hình AI khả dụng trong Combobox trên UI.
+        """
+        try:
+            # Cấu hình API Key trước khi gọi list_models
+            genai.configure(api_key=self.api_key_var.get())
+
+            available_models = []
+            for m in genai.list_models():
+                if "generateContent" in m.supported_generation_methods:
+                    available_models.append(m.name)
+            
+            if available_models:
+                self.model_combo['values'] = available_models
+                # Nếu mô hình hiện tại không còn khả dụng, đặt lại về mô hình đầu tiên
+                if self.model_var.get() not in available_models:
+                    self.model_var.set(available_models[0])
+                self.ui_status("Đã cập nhật danh sách mô hình AI.")
+            else:
+                self.ui_status("Không tìm thấy mô hình AI khả dụng nào.")
+        except Exception as e:
+            self.ui_status(f"Lỗi khi cập nhật danh sách mô hình AI: {e}")
+            logging.error(f"Lỗi khi cập nhật danh sách mô hình AI: {e}")

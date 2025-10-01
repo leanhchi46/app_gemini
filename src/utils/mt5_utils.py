@@ -7,10 +7,14 @@ import time
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from statistics import median
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Sequence, Optional, TYPE_CHECKING, Dict
 
 from src.core import ict_analysis
 from .safe_data import SafeMT5Data
+
+if TYPE_CHECKING:  # Thêm TYPE_CHECKING
+    from scripts.tool import TradingToolApp
+    from src.config.config import RunConfig
 
 
 try:
@@ -22,6 +26,7 @@ except Exception:  # pragma: no cover - optional dependency
 # ------------------------------
 # MT5 connection helpers
 # ------------------------------
+
 
 def connect(path: str | None = None) -> tuple[bool, str | None]:
     """
@@ -53,13 +58,18 @@ def ensure_initialized(path: str | None = None) -> bool:
 # Price unit helpers
 # ------------------------------
 
+
 def points_per_pip_from_info(info: dict | Any) -> int:
     """
     Infer points-per-pip from symbol info.
     Accepts either a dict or an mt5.symbol_info(...) object.
     """
     try:
-        digits = (info.get("digits") if isinstance(info, dict) else getattr(info, "digits", None)) or 0
+        digits = (
+            info.get("digits")
+            if isinstance(info, dict)
+            else getattr(info, "digits", None)
+        ) or 0
         digits = int(digits)
     except Exception:
         digits = 0
@@ -67,7 +77,9 @@ def points_per_pip_from_info(info: dict | Any) -> int:
 
 
 def pip_size_from_info(info: dict | Any) -> float:
-    point = (info.get("point") if isinstance(info, dict) else getattr(info, "point", None)) or 0.0
+    point = (
+        info.get("point") if isinstance(info, dict) else getattr(info, "point", None)
+    ) or 0.0
     try:
         point = float(point)
     except Exception:
@@ -130,7 +142,9 @@ def value_per_point(symbol: str, info_obj: Any | None = None) -> float | None:
                 ask = float(getattr(tick, "ask", 0.0) or 0.0)
                 mid = (bid + ask) / 2.0 if (bid and ask) else (ask or bid)
             if mid and point > 0:
-                pr = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, symbol, 1.0, mid, mid + point)
+                pr = mt5.order_calc_profit(
+                    mt5.ORDER_TYPE_BUY, symbol, 1.0, mid, mid + point
+                )
                 if isinstance(pr, (int, float)):
                     return abs(float(pr))
         except Exception:
@@ -148,7 +162,10 @@ def value_per_point(symbol: str, info_obj: Any | None = None) -> float | None:
 # Math/stat helpers
 # ------------------------------
 
-def quantiles(vals: Sequence[float] | None, q_list: Iterable[float]) -> dict[float, float | None]:
+
+def quantiles(
+    vals: Sequence[float] | None, q_list: Iterable[float]
+) -> dict[float, float | None]:
     if not vals:
         return {q: None for q in q_list}
     arr = sorted(vals)
@@ -183,7 +200,9 @@ def ema(values: Sequence[float] | None, period: int) -> float | None:
         return None
 
 
-def atr_series(rates: Sequence[dict] | None, period: int = 14) -> tuple[float | None, list[float]]:
+def atr_series(
+    rates: Sequence[dict] | None, period: int = 14
+) -> tuple[float | None, list[float]]:
     """
     rates: list of {high, low, close}
     Returns (atr_last, list_of_TRs)
@@ -194,7 +213,7 @@ def atr_series(rates: Sequence[dict] | None, period: int = 14) -> tuple[float | 
     prev_close = float(rates[0]["close"])  # type: ignore[index]
     for r in rates[1:]:
         hi = float(r["high"])  # type: ignore[index]
-        lo = float(r["low"])   # type: ignore[index]
+        lo = float(r["low"])  # type: ignore[index]
         pc = float(prev_close)
         tr = max(hi - lo, abs(hi - pc), abs(lo - pc))
         trs.append(tr)
@@ -244,6 +263,7 @@ def adr_stats(symbol: str, n: int = 20) -> dict[str, float] | None:
 # Time/session helpers
 # ------------------------------
 
+
 def _is_us_dst(d: datetime) -> bool:
     """Checks if a given date is within US Daylight Saving Time."""
     if not isinstance(d, datetime):
@@ -251,7 +271,9 @@ def _is_us_dst(d: datetime) -> bool:
     # DST starts on the second Sunday in March at 2 AM
     march_first = datetime(d.year, 3, 1)
     # Day of week: Monday is 0 and Sunday is 6.
-    march_second_sunday = march_first + timedelta(days=(6 - march_first.weekday() + 7) % 7 + 7)
+    march_second_sunday = march_first + timedelta(
+        days=(6 - march_first.weekday() + 7) % 7 + 7
+    )
 
     # DST ends on the first Sunday in November at 2 AM
     nov_first = datetime(d.year, 11, 1)
@@ -262,7 +284,9 @@ def _is_us_dst(d: datetime) -> bool:
     return march_second_sunday <= check_date < nov_first_sunday
 
 
-def _killzone_ranges_vn(d: datetime | None = None, target_tz: str | None = None) -> dict[str, dict[str, str]]:
+def _killzone_ranges_vn(
+    d: datetime | None = None, target_tz: str | None = None
+) -> dict[str, dict[str, str]]:
     """
     Build London/NY killzones in Vietnam time based on US DST.
     """
@@ -303,13 +327,17 @@ def session_ranges_today(m1_rates: Sequence[dict] | None) -> dict[str, dict]:
 
 
 def _series_from_mt5(symbol: str, tf_code: int, bars: int) -> list[dict]:
-    arr = mt5.copy_rates_from_pos(symbol, tf_code, 0, max(50, int(bars))) if mt5 else None
+    arr = (
+        mt5.copy_rates_from_pos(symbol, tf_code, 0, max(50, int(bars))) if mt5 else None
+    )
     rows: list[dict] = []
     if arr is not None:
         for r in arr:
             rows.append(
                 {
-                    "time": datetime.fromtimestamp(int(r["time"])).strftime("%Y-%m-%d %H:%M:%S"),
+                    "time": datetime.fromtimestamp(int(r["time"])).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
                     "open": float(r["open"]),
                     "high": float(r["high"]),
                     "low": float(r["low"]),
@@ -330,7 +358,9 @@ def _hl_from(symbol: str, tf_code: int, bars: int) -> dict | None:
     return {"open": op, "high": hi, "low": lo}
 
 
-def _nearby_key_levels(cp: float, info: Any, daily: dict | None, prev_day: dict | None) -> list[dict]:
+def _nearby_key_levels(
+    cp: float, info: Any, daily: dict | None, prev_day: dict | None
+) -> list[dict]:
     lv: list[dict] = []
     if prev_day:
         if "high" in prev_day:
@@ -348,10 +378,15 @@ def _nearby_key_levels(cp: float, info: Any, daily: dict | None, prev_day: dict 
     for x in lv:
         rel = "ABOVE" if x["price"] > cp else ("BELOW" if x["price"] < cp else "INSIDE")
         dist = abs(x["price"] - cp) / (point or 0.01) if cp and point else None
-        out.append({"name": x["name"], "price": x["price"], "relation": rel, "distance_pips": dist})
+        out.append(
+            {
+                "name": x["name"],
+                "price": x["price"],
+                "relation": rel,
+                "distance_pips": dist,
+            }
+        )
     return out
-
-
 
 
 def build_context(
@@ -361,7 +396,7 @@ def build_context(
     n_m5: int = 180,
     n_m15: int = 96,
     n_h1: int = 120,
-    return_json: bool = False, # Default changed to return the object
+    return_json: bool = False,  # Default changed to return the object
     plan: dict | None = None,
 ) -> SafeMT5Data:
     """
@@ -462,13 +497,23 @@ def build_context(
             for t in ticks:
                 b, a = float(t["bid"]), float(t["ask"])  # type: ignore[index]
                 if a > 0 and b > 0:
-                    spreads.append(int(round((a - b) / (getattr(info, "point", 0.01) or 0.01))))
+                    spreads.append(
+                        int(round((a - b) / (getattr(info, "point", 0.01) or 0.01)))
+                    )
             med = median(spreads) if spreads else None
             p90 = sorted(spreads)[int(len(spreads) * 0.9)] if spreads else None
             if minutes == 5:
-                tick_stats_5m = {"ticks_per_min": int(len(ticks) / 5), "median_spread": med, "p90_spread": p90}
+                tick_stats_5m = {
+                    "ticks_per_min": int(len(ticks) / 5),
+                    "median_spread": med,
+                    "p90_spread": p90,
+                }
             else:
-                tick_stats_30m = {"ticks_per_min": int(len(ticks) / 30), "median_spread": med, "p90_spread": p90}
+                tick_stats_30m = {
+                    "ticks_per_min": int(len(ticks) / 30),
+                    "median_spread": med,
+                    "p90_spread": p90,
+                }
     except Exception:
         pass
 
@@ -516,8 +561,16 @@ def build_context(
     # Sessions and VWAPs
     sessions_today = session_ranges_today(series["M1"]) if series["M1"] else {}
     now_hhmm_for_sessions = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%H:%M")
-    session_liquidity = ict_analysis.get_session_liquidity(series.get("M15", []), sessions_today, now_hhmm_for_sessions)
-    vwap_day = vwap_from_rates([r for r in series["M1"] if str(r["time"])[:10] == datetime.now().strftime("%Y-%m-%d")])
+    session_liquidity = ict_analysis.get_session_liquidity(
+        series.get("M15", []), sessions_today, now_hhmm_for_sessions
+    )
+    vwap_day = vwap_from_rates(
+        [
+            r
+            for r in series["M1"]
+            if str(r["time"])[:10] == datetime.now().strftime("%Y-%m-%d")
+        ]
+    )
     vwaps: dict[str, float | None] = {"day": vwap_day}
     for sess in ["asia", "london", "newyork_am", "newyork_pm"]:
         rng = sessions_today.get(sess, {})
@@ -525,7 +578,10 @@ def build_context(
         if rng and rng.get("start") and rng.get("end"):
             for r in series["M1"]:
                 hh = str(r["time"])[11:16]
-                if str(r["time"])[:10] == datetime.now().strftime("%Y-%m-%d") and rng["start"] <= hh < rng["end"]:
+                if (
+                    str(r["time"])[:10] == datetime.now().strftime("%Y-%m-%d")
+                    and rng["start"] <= hh < rng["end"]
+                ):
                     sub.append(r)
         vwaps[sess] = vwap_from_rates(sub) if sub else None
 
@@ -533,7 +589,10 @@ def build_context(
     ema_block: dict[str, dict[str, float | None]] = {}
     for k in ["M1", "M5", "M15", "H1"]:
         closes = [float(r["close"]) for r in series.get(k, [])]
-        ema_block[k] = {"ema50": ema(closes, 50) if closes else None, "ema200": ema(closes, 200) if closes else None}
+        ema_block[k] = {
+            "ema50": ema(closes, 50) if closes else None,
+            "ema200": ema(closes, 200) if closes else None,
+        }
 
     atr_block: dict[str, float | None] = {}
     atr_m5_now, tr_m5 = atr_series(series.get("M5", []), period=14)
@@ -548,7 +607,9 @@ def build_context(
         e50 = ema_block["M5"]["ema50"]
         e200 = ema_block["M5"]["ema200"]
         if e50 is not None and e200 is not None and atr_m5_now:
-            vol_regime = "trending" if abs(e50 - e200) > (atr_m5_now * 0.2) else "choppy"
+            vol_regime = (
+                "trending" if abs(e50 - e200) > (atr_m5_now * 0.2) else "choppy"
+            )
     except Exception:
         pass
 
@@ -557,7 +618,7 @@ def build_context(
 
     # ADR and day position
     adr = adr_stats(symbol, n=20)
-    day_open = daily.get("open") if daily else None
+    # day_open = daily.get("open") if daily else None # Biến này không được sử dụng
     prev_close = None
     try:
         d1_prev_close_arr = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, 1)
@@ -589,6 +650,7 @@ def build_context(
     kill_active = None
     mins_to_next = None
     try:
+
         def _mins(t1: str, t2: str) -> int:
             h1, m1 = map(int, t1.split(":"))
             h2, m2 = map(int, t2.split(":"))
@@ -610,8 +672,7 @@ def build_context(
         if kill_active is None:
             # Sort session start times to find the next one accurately
             sorted_sessions = sorted(
-                [(k, v["start"]) for k, v in kills.items()],
-                key=lambda item: item[1]
+                [(k, v["start"]) for k, v in kills.items()], key=lambda item: item[1]
             )
             for name, start_time in sorted_sessions:
                 if now_hhmm < start_time:
@@ -627,7 +688,10 @@ def build_context(
         point = float(info_obj.get("point") or 0.0)
         pip = point * ppp if point else 0.0
         if cp and pip:
-            pivots = [int(math.floor((cp / pip))) * pip + (s * pip / 100.0) for s in (0, 25, 50, 75)]
+            pivots = [
+                int(math.floor((cp / pip))) * pip + (s * pip / 100.0)
+                for s in (0, 25, 50, 75)
+            ]
             seen: set[float] = set()
             for price in pivots:
                 if price in seen:
@@ -649,10 +713,16 @@ def build_context(
     if tick and info and getattr(info, "point", None):
         b = float(getattr(tick, "bid", 0.0))
         a = float(getattr(tick, "ask", 0.0))
-        spread_points = (a - b) / (getattr(info, "point", 0.01) or 0.01) if (a > 0 and b > 0) else None
+        spread_points = (
+            (a - b) / (getattr(info, "point", 0.01) or 0.01)
+            if (a > 0 and b > 0)
+            else None
+        )
     atr_norm = {"spread_as_pct_of_atr_m5": None}
     if spread_points and atr_m5_now and atr_m5_now > 0 and getattr(info, "point", None):
-        atr_norm["spread_as_pct_of_atr_m5"] = (spread_points / (atr_m5_now / (getattr(info, "point", 0.01) or 0.01))) * 100.0
+        atr_norm["spread_as_pct_of_atr_m5"] = (
+            spread_points / (atr_m5_now / (getattr(info, "point", 0.01) or 0.01))
+        ) * 100.0
 
     # Risk block from plan (optional, minimal)
     risk_model = None
@@ -689,14 +759,22 @@ def build_context(
 
             # 2. Find other ICT patterns
             ict_patterns[f"fvgs_{tf_key}"] = ict_analysis.find_fvgs(tf_series, cp) or []
-            ict_patterns[f"order_blocks_{tf_key}"] = ict_analysis.find_order_blocks(tf_series) or []
-            ict_patterns[f"premium_discount_{tf_key}"] = ict_analysis.analyze_premium_discount(tf_series, cp) or {}
-            ict_patterns[f"liquidity_voids_{tf_key}"] = ict_analysis.find_liquidity_voids(tf_series) or []
-            
+            ict_patterns[f"order_blocks_{tf_key}"] = (
+                ict_analysis.find_order_blocks(tf_series) or []
+            )
+            ict_patterns[f"premium_discount_{tf_key}"] = (
+                ict_analysis.analyze_premium_discount(tf_series, cp) or {}
+            )
+            ict_patterns[f"liquidity_voids_{tf_key}"] = (
+                ict_analysis.find_liquidity_voids(tf_series) or []
+            )
+
             # 3. Find MSS/BOS (which depends on liquidity levels)
             swing_highs = liquidity.get("swing_highs_BSL", [])
             swing_lows = liquidity.get("swing_lows_SSL", [])
-            ict_patterns[f"mss_{tf_key}"] = ict_analysis.find_market_structure_shift(tf_series, swing_highs, swing_lows)
+            ict_patterns[f"mss_{tf_key}"] = ict_analysis.find_market_structure_shift(
+                tf_series, swing_highs, swing_lows
+            )
 
     except Exception:
         # If any ICT analysis fails, ensure ict_patterns is an empty dict
@@ -706,7 +784,9 @@ def build_context(
         "MT5_DATA": {
             "symbol": symbol,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "broker_time": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "broker_time": datetime.now(timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
             "account": account_obj or {},
             "positions": positions_list,
             "info": info_obj or {},
@@ -715,7 +795,8 @@ def build_context(
                 "points_per_pip": points_per_pip_from_info(info_obj),
                 "value_per_point": value_per_point(symbol, info),
                 "pip_value_per_lot": (
-                    (value_per_point(symbol, info) or 0.0) * points_per_pip_from_info(info_obj)
+                    (value_per_point(symbol, info) or 0.0)
+                    * points_per_pip_from_info(info_obj)
                 ),
             },
             "tick": tick_obj or {},
@@ -732,8 +813,12 @@ def build_context(
             "prev_day_close": prev_close,
             "adr": adr or {},
             "day_range": day_range,
-            "day_range_pct_of_adr20": (float(day_range_pct) if day_range_pct is not None else None),
-            "position_in_day_range": (float(pos_in_day) if pos_in_day is not None else None),
+            "day_range_pct_of_adr20": (
+                float(day_range_pct) if day_range_pct is not None else None
+            ),
+            "position_in_day_range": (
+                float(pos_in_day) if pos_in_day is not None else None
+            ),
             "sessions_today": sessions_today or {},
             "session_liquidity": session_liquidity or {},
             "volatility": {"ATR": atr_block or {}},
@@ -755,15 +840,51 @@ def build_context(
 
     # Always wrap in SafeMT5Data. The caller can decide to get the raw dict or json.
     safe_data_obj = SafeMT5Data(payload.get("MT5_DATA"))
-    
+
     if return_json:
         try:
             # This path is now less common, but supported for compatibility.
             return json.dumps(payload, ensure_ascii=False)
         except Exception:
             return str(payload)
-            
+
     return safe_data_obj
+
+
+def build_context_from_app(
+    app: "TradingToolApp",
+    plan: Optional[Dict] = None,
+    cfg: Optional["RunConfig"] = None,
+) -> Optional["SafeMT5Data"]:
+    """
+    Xây dựng đối tượng ngữ cảnh MetaTrader 5 (SafeMT5Data) chứa dữ liệu thị trường hiện tại
+    (giá nến, thông tin tài khoản, các lệnh đang mở...).
+    Hàm này là wrapper cho build_context, lấy thông tin từ đối tượng app.
+    """
+    sym = cfg.mt5_symbol if cfg else (app.mt5_symbol_var.get() or "").strip()
+    if (
+        not ((cfg.mt5_enabled if cfg else app.mt5_enabled_var.get()) and sym)
+        or mt5 is None
+    ):
+        return None
+    if not app.mt5_initialized:
+        ok, _ = app._mt5_connect(app)  # Gọi _mt5_connect từ app_logic
+        if not ok:
+            return None
+
+    # Ủy quyền cho mt5_utils.build_context để xây dựng đối tượng ngữ cảnh MT5
+    try:
+        return build_context(  # Gọi hàm build_context đã có trong mt5_utils
+            sym,
+            n_m1=(cfg.mt5_n_M1 if cfg else int(app.mt5_n_M1.get())),
+            n_m5=(cfg.mt5_n_M5 if cfg else int(app.mt5_n_M5.get())),
+            n_m15=(cfg.mt5_n_M15 if cfg else int(app.mt5_n_M15.get())),
+            n_h1=(cfg.mt5_n_H1 if cfg else int(app.mt5_n_H1.get())),
+            plan=plan,
+            return_json=False,  # Đảm bảo chúng ta nhận được đối tượng Python, không phải chuỗi JSON
+        )
+    except Exception:
+        return None
 
 
 __all__ = [
@@ -780,4 +901,5 @@ __all__ = [
     "adr_stats",
     "session_ranges_today",
     "build_context",
+    "build_context_from_app",  # Thêm hàm mới vào __all__
 ]

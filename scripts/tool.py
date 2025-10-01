@@ -22,7 +22,7 @@ import tkinter as tk
 import logging
 
 # Import các module nội bộ của dự án
-from src.config.constants import APP_DIR
+from src.config.constants import APP_DIR # APP_DIR sẽ không còn được dùng cho log file
 
 # Import các module mới
 from src.ui.app_ui import TradingToolApp
@@ -34,7 +34,10 @@ def main():
     Hàm chính để khởi tạo và chạy ứng dụng.
     Thiết lập cấu hình ghi log và khởi tạo giao diện người dùng.
     """
-    log_file_path = APP_DIR / "app_debug.log"
+    # Định nghĩa thư mục Log trong thư mục gốc của dự án
+    log_dir = project_root / "Log"
+    log_dir.mkdir(parents=True, exist_ok=True) # Tạo thư mục nếu chưa tồn tại
+    log_file_path = log_dir / "app_debug.log" # Cập nhật đường dẫn file log
     try:
         # Cấu hình ghi log ra file để dễ dàng gỡ lỗi
         logging.basicConfig(
@@ -43,7 +46,7 @@ def main():
             filename=str(log_file_path),
             filemode='w',
         )
-        logging.info("Ứng dụng đang khởi động.")
+        logging.info("Ứng dụng đang khởi động.")    
 
         root = tk.Tk()
         app_logic = AppLogic() # Khởi tạo AppLogic mà không truyền UI ban đầu

@@ -53,11 +53,14 @@ def _build_top_frame(app):
     app.model_combo = ttk.Combobox(
         config_frame,
         textvariable=app.model_var,
-        values=["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"],
+        values=[], # Khởi tạo rỗng, sẽ được điền sau
         state="readonly",
-        width=20,
+        width=40,
     )
     app.model_combo.grid(row=0, column=1, sticky="w", padx=6)
+    
+    # Gọi hàm để cập nhật danh sách mô hình sau khi combobox được tạo
+    app._update_model_list_in_ui()
 
     ttk.Label(config_frame, text="Thư mục ảnh:").grid(row=0, column=2, sticky="w", padx=(10, 0))
     app.folder_label = ttk.Entry(config_frame, textvariable=app.folder_path, state="readonly")
