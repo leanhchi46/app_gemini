@@ -12,6 +12,8 @@ from typing import Any, Iterable, Sequence, Optional, TYPE_CHECKING, Dict
 from src.core import ict_analysis
 from .safe_data import SafeMT5Data
 
+logger = logging.getLogger(__name__) # Khởi tạo logger
+
 if TYPE_CHECKING:  # Thêm TYPE_CHECKING
     from scripts.tool import TradingToolApp
     from src.config.config import RunConfig
@@ -19,8 +21,9 @@ if TYPE_CHECKING:  # Thêm TYPE_CHECKING
 
 try:
     import MetaTrader5 as mt5  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
+except Exception as e:  # pragma: no cover - optional dependency
     mt5 = None  # type: ignore
+    logger.warning(f"Không thể import MetaTrader5: {e}. Các chức năng MT5 sẽ bị vô hiệu hóa.")
 
 
 # ------------------------------
@@ -34,30 +37,30 @@ def connect(path: str | None = None) -> tuple[bool, str | None]:
 
     Returns (ok, error_message). On success, error_message is None.
     """
-    logging.debug(f"Bắt đầu connect MT5. Path: {path}")
+    logger.debug(f"Bắt đầu connect MT5. Path: {path}")
     if mt5 is None:
-        logging.error("MetaTrader5 module not installed.")
+        logger.error("MetaTrader5 module not installed.")
         return False, "MetaTrader5 module not installed (pip install MetaTrader5)"
     try:
         ok = mt5.initialize(path=path) if path else mt5.initialize()
         if not ok:
             err_code = mt5.last_error()
-            logging.error(f"mt5.initialize() failed with code {err_code}")
+            logger.error(f"mt5.initialize() failed with code {err_code}")
             return False, f"initialize() failed: {err_code}"
-        logging.info("Kết nối MT5 thành công.")
+        logger.info("Kết nối MT5 thành công.")
         return True, None
     except Exception as e:
-        logging.exception("MT5 connect generated an exception")
+        logger.exception("MT5 connect generated an exception")
         return False, f"MT5 connect error: {e}"
     finally:
-        logging.debug("Kết thúc connect MT5.")
+        logger.debug("Kết thúc connect MT5.")
 
 
 def ensure_initialized(path: str | None = None) -> bool:
     """Ensure MT5 is initialized. Returns True if ready."""
-    logging.debug(f"Bắt đầu ensure_initialized. Path: {path}")
+    logger.debug(f"Bắt đầu ensure_initialized. Path: {path}")
     ok, _ = connect(path)
-    logging.debug(f"Kết thúc ensure_initialized. Kết quả: {ok}")
+    logger.debug(f"Kết thúc ensure_initialized. Kết quả: {ok}")
     return ok
 
 
@@ -71,6 +74,7 @@ def points_per_pip_from_info(info: dict | Any) -> int:
     Infer points-per-pip from symbol info.
     Accepts either a dict or an mt5.symbol_info(...) object.
     """
+    logger.debug(f"Bắt đầu points_per_pip_from_info cho info: {info}")
     try:
         digits = (
             info.get("digits")
@@ -78,21 +82,28 @@ def points_per_pip_from_info(info: dict | Any) -> int:
             else getattr(info, "digits", None)
         ) or 0
         digits = int(digits)
-    except Exception:
+    except Exception as e:
         digits = 0
-    return 10 if digits >= 3 else 1
+        logger.warning(f"Lỗi khi lấy digits từ info: {e}, đặt mặc định là 0.")
+    result = 10 if digits >= 3 else 1
+    logger.debug(f"Kết thúc points_per_pip_from_info. Digits: {digits}, PPP: {result}")
+    return result
 
 
 def pip_size_from_info(info: dict | Any) -> float:
+    logger.debug(f"Bắt đầu pip_size_from_info cho info: {info}")
     point = (
         info.get("point") if isinstance(info, dict) else getattr(info, "point", None)
     ) or 0.0
     try:
         point = float(point)
-    except Exception:
+    except Exception as e:
         point = 0.0
+        logger.warning(f"Lỗi khi lấy point từ info: {e}, đặt mặc định là 0.0.")
     ppp = points_per_pip_from_info(info)
-    return point * ppp if point else 0.0
+    result = point * ppp if point else 0.0
+    logger.debug(f"Kết thúc pip_size_from_info. Point: {point}, PPP: {ppp}, Pip Size: {result}")
+    return result
 
 
 def info_get(info: dict | Any, key: str, default: Any = None) -> Any:
@@ -105,10 +116,14 @@ def info_get(info: dict | Any, key: str, default: Any = None) -> Any:
     - info_get(info, "contract_size") -> maps to attr "trade_contract_size" on objects
     - info_get(info, "spread_current") -> maps to attr "spread" on objects
     """
+    logger.debug(f"Bắt đầu info_get cho key: {key}, default: {default}")
     if info is None:
+        logger.debug("Info object trống, trả về default.")
         return default
     if isinstance(info, dict):
-        return info.get(key, default)
+        result = info.get(key, default)
+        logger.debug(f"Tìm thấy key '{key}' trong dict. Giá trị: {result}")
+        return result
     # Map commonly renamed fields from our JSON schema back to MT5 attributes
     attr_map = {
         "contract_size": "trade_contract_size",
@@ -117,7 +132,9 @@ def info_get(info: dict | Any, key: str, default: Any = None) -> Any:
         "freeze_level_points": "trade_freeze_level",
     }
     attr = attr_map.get(key, key)
-    return getattr(info, attr, default)
+    result = getattr(info, attr, default)
+    logger.debug(f"Tìm thấy attribute '{attr}' trong object. Giá trị: {result}")
+    return result
 
 
 def value_per_point(symbol: str, info_obj: Any | None = None) -> float | None:
@@ -125,24 +142,27 @@ def value_per_point(symbol: str, info_obj: Any | None = None) -> float | None:
     Best-effort estimation of 1-point value per 1.00 lot for `symbol`.
     Tries broker-provided tick value/size, falls back to order_calc_profit, then contract size.
     """
-    logging.debug(f"Bắt đầu value_per_point cho symbol: {symbol}")
+    logger.debug(f"Bắt đầu value_per_point cho symbol: {symbol}")
     if mt5 is None:
-        logging.warning("MetaTrader5 module not installed, cannot get value_per_point.")
+        logger.warning("MetaTrader5 module not installed, cannot get value_per_point.")
         return None
     try:
         info_obj = info_obj or mt5.symbol_info(symbol)
         if not info_obj:
-            logging.warning(f"Không tìm thấy thông tin symbol cho {symbol}.")
+            logger.warning(f"Không tìm thấy thông tin symbol cho {symbol}.")
             return None
 
         point = float(getattr(info_obj, "point", 0.0) or 0.0)
         if point <= 0:
+            logger.debug("Point size <= 0, không thể tính value_per_point.")
             return None
 
         tick_value = float(getattr(info_obj, "trade_tick_value", 0.0) or 0.0)
         tick_size = float(getattr(info_obj, "trade_tick_size", 0.0) or 0.0)
         if tick_value > 0 and tick_size > 0:
-            return tick_value * (point / tick_size)
+            result = tick_value * (point / tick_size)
+            logger.debug(f"Tính value_per_point từ tick_value/tick_size: {result}")
+            return result
 
         try:
             tick = mt5.symbol_info_tick(symbol)
@@ -156,15 +176,22 @@ def value_per_point(symbol: str, info_obj: Any | None = None) -> float | None:
                     mt5.ORDER_TYPE_BUY, symbol, 1.0, mid, mid + point
                 )
                 if isinstance(pr, (int, float)):
-                    return abs(float(pr))
-        except Exception:
+                    result = abs(float(pr))
+                    logger.debug(f"Tính value_per_point từ order_calc_profit: {result}")
+                    return result
+        except Exception as e:
+            logger.debug(f"Lỗi khi tính value_per_point từ order_calc_profit: {e}")
             pass
 
         csize = float(getattr(info_obj, "trade_contract_size", 0.0) or 0.0)
         if csize > 0:
-            return csize * point
+            result = csize * point
+            logger.debug(f"Tính value_per_point từ contract_size: {result}")
+            return result
+        logger.debug("Không thể tính value_per_point, trả về None.")
         return None
-    except Exception:
+    except Exception as e:
+        logger.error(f"Lỗi ngoại lệ trong value_per_point: {e}")
         return None
 
 
@@ -176,16 +203,20 @@ def value_per_point(symbol: str, info_obj: Any | None = None) -> float | None:
 def quantiles(
     vals: Sequence[float] | None, q_list: Iterable[float]
 ) -> dict[float, float | None]:
+    logger.debug(f"Bắt đầu quantiles cho {len(vals) if vals else 0} giá trị, q_list: {q_list}")
     if not vals:
+        logger.debug("Vals trống, trả về quantiles None.")
         return {q: None for q in q_list}
     arr = sorted(vals)
     out: dict[float, float | None] = {}
     for q in q_list:
         if q <= 0:
             out[q] = arr[0]
+            logger.debug(f"Quantile {q}: {arr[0]}")
             continue
         if q >= 1:
             out[q] = arr[-1]
+            logger.debug(f"Quantile {q}: {arr[-1]}")
             continue
         pos = (len(arr) - 1) * q
         lo = int(math.floor(pos))
@@ -194,19 +225,26 @@ def quantiles(
             out[q] = arr[lo]
         else:
             out[q] = arr[lo] + (arr[hi] - arr[lo]) * (pos - lo)
+        logger.debug(f"Quantile {q}: {out[q]}")
+    logger.debug("Kết thúc quantiles.")
     return out
 
 
 def ema(values: Sequence[float] | None, period: int) -> float | None:
+    logger.debug(f"Bắt đầu ema cho {len(values) if values else 0} giá trị, period: {period}")
     if not values or period <= 1:
+        logger.debug("Không đủ giá trị hoặc period <= 1, không thể tính EMA.")
         return None
     alpha = 2.0 / (period + 1.0)
     e = values[0]
     for v in values[1:]:
         e = alpha * v + (1 - alpha) * e
     try:
-        return float(e)
-    except Exception:
+        result = float(e)
+        logger.debug(f"Kết thúc ema. EMA: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Lỗi khi tính EMA: {e}")
         return None
 
 
@@ -217,7 +255,9 @@ def atr_series(
     rates: list of {high, low, close}
     Returns (atr_last, list_of_TRs)
     """
+    logger.debug(f"Bắt đầu atr_series cho {len(rates) if rates else 0} rates, period: {period}")
     if not rates or len(rates) < period + 1:
+        logger.debug("Không đủ rates để tính ATR.")
         return None, []
     trs: list[float] = []
     prev_close = float(rates[0]["close"])  # type: ignore[index]
@@ -229,6 +269,7 @@ def atr_series(
         trs.append(tr)
         prev_close = float(r["close"])  # type: ignore[index]
     if len(trs) < period:
+        logger.debug("Không đủ TRs để tính ATR ban đầu.")
         return None, trs
     alpha = 1.0 / period
     atr = sum(trs[:period]) / period
@@ -236,11 +277,15 @@ def atr_series(
     for tr in trs[period:]:
         atr = (1 - alpha) * atr + alpha * tr
         out.append(atr)
-    return (out[-1] if out else None), trs
+    result = (out[-1] if out else None), trs
+    logger.debug(f"Kết thúc atr_series. Last ATR: {result[0]}, TRs count: {len(result[1])}")
+    return result
 
 
 def vwap_from_rates(rates: Sequence[dict] | None) -> float | None:
+    logger.debug(f"Bắt đầu vwap_from_rates cho {len(rates) if rates else 0} rates.")
     if not rates:
+        logger.debug("Rates trống, không thể tính VWAP.")
         return None
     s_pv = 0.0
     s_v = 0.0
@@ -249,27 +294,32 @@ def vwap_from_rates(rates: Sequence[dict] | None) -> float | None:
         v = max(1, int(r.get("vol", 0)))
         s_pv += tp * v
         s_v += v
-    return s_pv / s_v if s_v > 0 else None
+    result = s_pv / s_v if s_v > 0 else None
+    logger.debug(f"Kết thúc vwap_from_rates. VWAP: {result}")
+    return result
 
 
 def adr_stats(symbol: str, n: int = 20) -> dict[str, float] | None:
     """Average Daily Range stats for last n days (d5/d10/d20)."""
-    logging.debug(f"Bắt đầu adr_stats cho symbol: {symbol}, n: {n}")
+    logger.debug(f"Bắt đầu adr_stats cho symbol: {symbol}, n: {n}")
     if mt5 is None:
-        logging.warning("MetaTrader5 module not installed, cannot get adr_stats.")
+        logger.warning("MetaTrader5 module not installed, cannot get adr_stats.")
         return None
     bars = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 0, max(25, n + 2))
     if bars is None or len(bars) < 5:
-        logging.warning(f"Không đủ dữ liệu D1 để tính adr_stats cho {symbol}.")
+        logger.warning(f"Không đủ dữ liệu D1 để tính adr_stats cho {symbol}.")
         return None
     ranges = [float(b["high"] - b["low"]) for b in bars[-(n + 1) : -1]]
     if not ranges:
+        logger.debug("Không có ranges để tính adr_stats.")
         return None
 
     def _avg(m: int) -> float | None:
         return sum(ranges[-m:]) / max(1, m) if len(ranges) >= m else None
 
-    return {"d5": _avg(5), "d10": _avg(10), "d20": _avg(20)}  # type: ignore[return-value]
+    result = {"d5": _avg(5), "d10": _avg(10), "d20": _avg(20)}  # type: ignore[return-value]
+    logger.debug(f"Kết thúc adr_stats. Kết quả: {result}")
+    return result
 
 
 # ------------------------------
@@ -279,7 +329,9 @@ def adr_stats(symbol: str, n: int = 20) -> dict[str, float] | None:
 
 def _is_us_dst(d: datetime) -> bool:
     """Checks if a given date is within US Daylight Saving Time."""
+    logger.debug(f"Bắt đầu _is_us_dst cho ngày: {d}")
     if not isinstance(d, datetime):
+        logger.debug("D không phải datetime object, trả về False.")
         return False
     # DST starts on the second Sunday in March at 2 AM
     march_first = datetime(d.year, 3, 1)
@@ -294,7 +346,9 @@ def _is_us_dst(d: datetime) -> bool:
 
     # Create timezone-naive datetime objects for comparison
     check_date = datetime(d.year, d.month, d.day)
-    return march_second_sunday <= check_date < nov_first_sunday
+    result = march_second_sunday <= check_date < nov_first_sunday
+    logger.debug(f"Kết thúc _is_us_dst. Ngày {d} trong DST: {result}")
+    return result
 
 
 def _killzone_ranges_vn(
@@ -303,29 +357,36 @@ def _killzone_ranges_vn(
     """
     Build London/NY killzones in Vietnam time based on US DST.
     """
+    logger.debug(f"Bắt đầu _killzone_ranges_vn. Date: {d}, Target TZ: {target_tz}")
     if d is None:
         tz_vn = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
         d = datetime.now(tz=tz_vn)
+        logger.debug(f"Sử dụng thời gian hiện tại ở TZ: {tz_vn}, Date: {d}")
 
     is_summer = _is_us_dst(d)
+    logger.debug(f"Is US DST (summer): {is_summer}")
 
     asia_session = {"start": "06:00", "end": "09:00"}
     if is_summer:
         # Mùa hè (Tháng 3 – Tháng 11, US DST)
-        return {
+        result = {
             "asia": asia_session,
             "london": {"start": "14:00", "end": "17:00"},
             "newyork_am": {"start": "19:30", "end": "22:00"},
             "newyork_pm": {"start": "00:00", "end": "03:00"},
         }
+        logger.debug("Đã tạo killzone ranges cho mùa hè.")
+        return result
     else:
         # Mùa đông (Tháng 11 – Tháng 3, US Standard Time)
-        return {
+        result = {
             "asia": asia_session,
             "london": {"start": "15:00", "end": "18:00"},
             "newyork_am": {"start": "20:30", "end": "23:00"},
             "newyork_pm": {"start": "01:00", "end": "04:00"},
         }
+        logger.debug("Đã tạo killzone ranges cho mùa đông.")
+        return result
 
 
 def session_ranges_today(m1_rates: Sequence[dict] | None) -> dict[str, dict]:
@@ -333,14 +394,17 @@ def session_ranges_today(m1_rates: Sequence[dict] | None) -> dict[str, dict]:
     Compute session ranges for Asia/London/NY (split NY into AM/PM) in local VN time.
     Input: M1 rates with keys {time:"YYYY-MM-DD HH:MM:SS", high, low, close, vol}.
     """
+    logger.debug(f"Bắt đầu session_ranges_today. M1 rates count: {len(m1_rates) if m1_rates else 0}")
     # The m1_rates are not strictly needed anymore since we use system time,
     # but we keep the signature for compatibility. It can be used to check historical sessions.
     # For now, we pass `None` to `_killzone_ranges_vn` to use the current system time.
-    return _killzone_ranges_vn(d=None)
+    result = _killzone_ranges_vn(d=None)
+    logger.debug("Kết thúc session_ranges_today.")
+    return result
 
 
 def _series_from_mt5(symbol: str, tf_code: int, bars: int) -> list[dict]:
-    logging.debug(f"Bắt đầu _series_from_mt5 cho symbol: {symbol}, tf_code: {tf_code}, bars: {bars}")
+    logger.debug(f"Bắt đầu _series_from_mt5 cho symbol: {symbol}, tf_code: {tf_code}, bars: {bars}")
     arr = (
         mt5.copy_rates_from_pos(symbol, tf_code, 0, max(50, int(bars))) if mt5 else None
     )
@@ -359,40 +423,46 @@ def _series_from_mt5(symbol: str, tf_code: int, bars: int) -> list[dict]:
                     "vol": int(r["tick_volume"]),
                 }
             )
-        logging.debug(f"Đã lấy {len(rows)} bars cho {symbol} {tf_code}.")
+        logger.debug(f"Đã lấy {len(rows)} bars cho {symbol} {tf_code}.")
     else:
-        logging.warning(f"Không lấy được rates từ MT5 cho {symbol} {tf_code}.")
-    logging.debug("Kết thúc _series_from_mt5.")
+        logger.warning(f"Không lấy được rates từ MT5 cho {symbol} {tf_code}.")
+    logger.debug("Kết thúc _series_from_mt5.")
     return rows
 
 
 def _hl_from(symbol: str, tf_code: int, bars: int) -> dict | None:
-    logging.debug(f"Bắt đầu _hl_from cho symbol: {symbol}, tf_code: {tf_code}, bars: {bars}")
+    logger.debug(f"Bắt đầu _hl_from cho symbol: {symbol}, tf_code: {tf_code}, bars: {bars}")
     data = mt5.copy_rates_from_pos(symbol, tf_code, 0, bars) if mt5 else None
     if data is None or len(data) == 0:
-        logging.warning(f"Không lấy được dữ liệu HL từ MT5 cho {symbol} {tf_code}.")
+        logger.warning(f"Không lấy được dữ liệu HL từ MT5 cho {symbol} {tf_code}.")
         return None
     hi = max([float(x["high"]) for x in data])
     lo = min([float(x["low"]) for x in data])
     op = float(data[0]["open"])  # first bar open
-    logging.debug(f"Đã lấy HL từ MT5 cho {symbol} {tf_code}. High: {hi}, Low: {lo}")
-    return {"open": op, "high": hi, "low": lo}
+    result = {"open": op, "high": hi, "low": lo}
+    logger.debug(f"Đã lấy HL từ MT5 cho {symbol} {tf_code}. Kết quả: {result}")
+    return result
 
 
 def _nearby_key_levels(
     cp: float, info: Any, daily: dict | None, prev_day: dict | None
 ) -> list[dict]:
+    logger.debug(f"Bắt đầu _nearby_key_levels cho cp: {cp}, daily: {daily}, prev_day: {prev_day}")
     lv: list[dict] = []
     if prev_day:
         if "high" in prev_day:
             lv.append({"name": "PDH", "price": float(prev_day["high"])})
+            logger.debug(f"Thêm PDH: {prev_day['high']}")
         if "low" in prev_day:
             lv.append({"name": "PDL", "price": float(prev_day["low"])})
+            logger.debug(f"Thêm PDL: {prev_day['low']}")
     if daily:
         if daily.get("eq50") is not None:
             lv.append({"name": "EQ50_D", "price": float(daily["eq50"])})
+            logger.debug(f"Thêm EQ50_D: {daily['eq50']}")
         if daily.get("open") is not None:
             lv.append({"name": "DO", "price": float(daily["open"])})
+            logger.debug(f"Thêm DO: {daily['open']}")
 
     out = []
     point = float(getattr(info, "point", 0.0) or 0.0)
@@ -407,6 +477,8 @@ def _nearby_key_levels(
                 "distance_pips": dist,
             }
         )
+        logger.debug(f"Key level: {x['name']}, Price: {x['price']}, Relation: {rel}, Distance: {dist}")
+    logger.debug(f"Kết thúc _nearby_key_levels. Số key levels: {len(out)}")
     return out
 
 
@@ -424,22 +496,25 @@ def build_context(
     Fetches MT5 data + computes helpers used by the app.
     Returns a JSON string (default) containing a single object with key MT5_DATA.
     """
-    logging.debug(f"Bắt đầu build_context cho symbol: {symbol}")
+    logger.debug(f"Bắt đầu build_context cho symbol: {symbol}")
     if mt5 is None:
-        logging.warning("MetaTrader5 module not installed, cannot build MT5 context.")
+        logger.warning("MetaTrader5 module not installed, cannot build MT5 context.")
         return SafeMT5Data(None)
 
     info = mt5.symbol_info(symbol)
     if not info:
-        logging.warning(f"Không tìm thấy thông tin symbol cho {symbol}.")
+        logger.warning(f"Không tìm thấy thông tin symbol cho {symbol}.")
         return SafeMT5Data(None)
     if not getattr(info, "visible", True):
         try:
             mt5.symbol_select(symbol, True)
-        except Exception:
+            logger.debug(f"Đã chọn symbol '{symbol}' để hiển thị.")
+        except Exception as e:
+            logger.warning(f"Lỗi khi chọn symbol '{symbol}': {e}")
             pass
     acc = mt5.account_info()
     tick = mt5.symbol_info_tick(symbol)
+    logger.debug("Đã lấy symbol info, account info, tick info.")
 
     # --- Fetch Open Positions ---
     positions_list = []
@@ -460,7 +535,9 @@ def build_context(
                     "comment": pos.comment,
                 }
                 positions_list.append(pos_dict)
-    except Exception:
+            logger.debug(f"Đã lấy {len(positions_list)} lệnh đang mở.")
+    except Exception as e:
+        logger.error(f"Lỗi khi lấy lệnh đang mở: {e}")
         # In case of any error, ensure the list is empty
         positions_list = []
 
@@ -492,6 +569,7 @@ def build_context(
         "margin_initial": getattr(info, "margin_initial", None),
         "margin_maintenance": getattr(info, "margin_maintenance", None),
     }
+    logger.debug("Đã xây dựng info_obj, account_obj, rules_obj.")
 
     tick_obj: dict[str, Any] = {}
     if tick:
@@ -502,6 +580,7 @@ def build_context(
             "time": int(getattr(tick, "time", 0)),
         }
     cp = float(tick_obj.get("bid") or tick_obj.get("last") or 0.0)
+    logger.debug(f"Current price (cp): {cp}")
 
     # Short and long horizon tick stats
     tick_stats_5m: dict[str, Any] = {}
@@ -512,6 +591,7 @@ def build_context(
             frm = now_ts - minutes * 60
             ticks = mt5.copy_ticks_range(symbol, frm, now_ts, mt5.COPY_TICKS_INFO)
             if ticks is None or len(ticks) < 5 or not info:
+                logger.warning(f"Không đủ dữ liệu tick cho {minutes}m để tính tick stats.")
                 if minutes == 5:
                     tick_stats_5m = {}
                 else:
@@ -532,13 +612,16 @@ def build_context(
                     "median_spread": med,
                     "p90_spread": p90,
                 }
+                logger.debug(f"Tick stats 5m: {tick_stats_5m}")
             else:
                 tick_stats_30m = {
                     "ticks_per_min": int(len(ticks) / 30),
                     "median_spread": med,
                     "p90_spread": p90,
                 }
-    except Exception:
+                logger.debug(f"Tick stats 30m: {tick_stats_30m}")
+    except Exception as e:
+        logger.error(f"Lỗi khi tính tick stats: {e}")
         pass
 
     # OHLCV series
@@ -548,6 +631,7 @@ def build_context(
         "M15": _series_from_mt5(symbol, mt5.TIMEFRAME_M15, n_m15),
         "H1": _series_from_mt5(symbol, mt5.TIMEFRAME_H1, n_h1),
     }
+    logger.debug("Đã lấy OHLCV series cho các khung thời gian.")
 
     # Higher timeframe levels
     daily = _hl_from(symbol, mt5.TIMEFRAME_D1, 2) or {}
@@ -556,17 +640,22 @@ def build_context(
         d2 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, 1)
         if d2 is not None and len(d2) == 1:
             prev_day = {"high": float(d2[0]["high"]), "low": float(d2[0]["low"])}
-    except Exception:
+            logger.debug(f"Đã lấy prev_day HL: {prev_day}")
+    except Exception as e:
         prev_day = None
+        logger.warning(f"Lỗi khi lấy prev_day HL: {e}")
     weekly = _hl_from(symbol, mt5.TIMEFRAME_W1, 1) or {}
     prev_week: dict[str, float] | None = None
     try:
         w2 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_W1, 1, 1)
         if w2 is not None and len(w2) == 1:
             prev_week = {"high": float(w2[0]["high"]), "low": float(w2[0]["low"])}
-    except Exception:
+            logger.debug(f"Đã lấy prev_week HL: {prev_week}")
+    except Exception as e:
         prev_week = None
+        logger.warning(f"Lỗi khi lấy prev_week HL: {e}")
     monthly = _hl_from(symbol, mt5.TIMEFRAME_MN1, 1) or {}
+    logger.debug("Đã lấy higher timeframe levels.")
 
     # Enrich daily
     midnight_open = None
@@ -574,6 +663,7 @@ def build_context(
         for r in series["M1"]:
             if str(r["time"]).endswith("00:00:00"):
                 midnight_open = r["open"]
+                logger.debug(f"Midnight open: {midnight_open}")
                 break
     if daily:
         hi = daily.get("high")
@@ -581,6 +671,7 @@ def build_context(
         eq50 = (hi + lo) / 2.0 if (hi and lo) else None
         daily["eq50"] = eq50
         daily["midnight_open"] = midnight_open
+        logger.debug(f"Đã enrich daily data: {daily}")
 
     # Sessions and VWAPs
     sessions_today = session_ranges_today(series["M1"]) if series["M1"] else {}
@@ -597,7 +688,7 @@ def build_context(
     )
     vwaps: dict[str, float | None] = {"day": vwap_day}
     for sess in ["asia", "london", "newyork_am", "newyork_pm"]:
-        rng = sessions_today.get(sess, {})
+        rng = sessions_today.get(sess)
         sub: list[dict] = []
         if rng and rng.get("start") and rng.get("end"):
             for r in series["M1"]:
@@ -608,6 +699,7 @@ def build_context(
                 ):
                     sub.append(r)
         vwaps[sess] = vwap_from_rates(sub) if sub else None
+    logger.debug(f"Đã tính toán sessions, session liquidity và VWAPs: {vwaps}")
 
     # Trend refs (EMA) and ATR
     ema_block: dict[str, dict[str, float | None]] = {}
@@ -617,6 +709,7 @@ def build_context(
             "ema50": ema(closes, 50) if closes else None,
             "ema200": ema(closes, 200) if closes else None,
         }
+    logger.debug(f"Đã tính toán EMA: {ema_block}")
 
     atr_block: dict[str, float | None] = {}
     atr_m5_now, tr_m5 = atr_series(series.get("M5", []), period=14)
@@ -624,6 +717,7 @@ def build_context(
     atr_block["M1"] = atr_series(series.get("M1", []), period=14)[0]
     atr_block["M15"] = atr_series(series.get("M15", []), period=14)[0]
     atr_block["H1"] = atr_series(series.get("H1", []), period=14)[0]
+    logger.debug(f"Đã tính toán ATR: {atr_block}")
 
     # Volatility regime: based on EMA M5 separation vs ATR
     vol_regime = None
@@ -634,11 +728,14 @@ def build_context(
             vol_regime = (
                 "trending" if abs(e50 - e200) > (atr_m5_now * 0.2) else "choppy"
             )
-    except Exception:
+        logger.debug(f"Volatility regime: {vol_regime}")
+    except Exception as e:
+        logger.warning(f"Lỗi khi xác định volatility regime: {e}")
         pass
 
     # Key levels around cp
     key_near = _nearby_key_levels(cp, info, daily, prev_day)
+    logger.debug(f"Key levels nearby: {key_near}")
 
     # ADR and day position
     adr = adr_stats(symbol, n=20)
@@ -648,7 +745,10 @@ def build_context(
         d1_prev_close_arr = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, 1)
         if d1_prev_close_arr is not None and len(d1_prev_close_arr) == 1:
             prev_close = float(d1_prev_close_arr[0]["close"])  # type: ignore[index]
-    except Exception:
+            logger.debug(f"Prev day close: {prev_close}")
+    except Exception as e:
+        prev_close = None
+        logger.warning(f"Lỗi khi lấy prev_close: {e}")
         pass
     day_range = None
     day_range_pct = None
@@ -656,6 +756,7 @@ def build_context(
         if daily.get("high") and daily.get("low"):
             day_range = float(daily["high"]) - float(daily["low"])  # type: ignore[index]
             day_range_pct = (day_range / float(adr["d20"])) * 100.0  # type: ignore[index]
+            logger.debug(f"Day range: {day_range}, Day range % of ADR20: {day_range_pct}")
 
     pos_in_day = None
     try:
@@ -664,8 +765,11 @@ def build_context(
             hi = float(daily.get("high", 0.0))
             if hi > lo:
                 pos_in_day = (cp - lo) / (hi - lo)
-    except Exception:
+        logger.debug(f"Position in day range: {pos_in_day}")
+    except Exception as e:
         pos_in_day = None
+        logger.warning(f"Lỗi khi tính position in day range: {e}")
+        pass
 
     # Killzone detection using DST-aware VN schedule
     kills = _killzone_ranges_vn()
@@ -702,7 +806,9 @@ def build_context(
                 if now_hhmm < start_time:
                     mins_to_next = _mins(now_hhmm, start_time)
                     break
-    except Exception:
+        logger.debug(f"Killzone active: {kill_active}, Mins to next killzone: {mins_to_next}")
+    except Exception as e:
+        logger.error(f"Lỗi khi phát hiện killzone: {e}")
         pass
 
     # Round levels around current price (25/50/75 pip) – optional simple set
@@ -729,8 +835,10 @@ def build_context(
                         "distance_pips": round(dist_pips, 2),
                     }
                 )
-    except Exception:
+        logger.debug(f"Round levels: {round_levels}")
+    except Exception as e:
         round_levels = []
+        logger.error(f"Lỗi khi tính toán round levels: {e}")
 
     # Normalize spread relative to ATR M5
     spread_points = None
@@ -747,6 +855,7 @@ def build_context(
         atr_norm["spread_as_pct_of_atr_m5"] = (
             spread_points / (atr_m5_now / (getattr(info, "point", 0.01) or 0.01))
         ) * 100.0
+    logger.debug(f"ATR normalized spread: {atr_norm}")
 
     # Risk block from plan (optional, minimal)
     risk_model = None
@@ -762,7 +871,9 @@ def build_context(
                 rr2 = abs(tp2 - entry) / abs(entry - sl) if entry != sl else None
                 rr_projection = {"tp1_rr": rr1, "tp2_rr": rr2}
             risk_model = {"value_per_point": val, "points_per_pip": ppp}
-        except Exception:
+            logger.debug(f"Risk model: {risk_model}, RR projection: {rr_projection}")
+        except Exception as e:
+            logger.error(f"Lỗi khi xây dựng risk model/RR projection từ plan: {e}")
             pass
 
     # ICT Patterns
@@ -774,12 +885,14 @@ def build_context(
         for tf_key, tf_name in timeframes_to_analyze.items():
             tf_series = series.get(tf_name, [])
             if not tf_series:
+                logger.debug(f"Không có series cho timeframe {tf_name}, bỏ qua ICT analysis.")
                 continue
 
             # 1. Find Liquidity Levels (needed for MSS)
             liquidity = ict_analysis.find_liquidity_levels(tf_series) or {}
             liquidity_levels[tf_key] = liquidity
             ict_patterns[f"liquidity_{tf_key}"] = liquidity
+            logger.debug(f"Liquidity levels cho {tf_name}: {liquidity}")
 
             # 2. Find other ICT patterns
             ict_patterns[f"fvgs_{tf_key}"] = ict_analysis.find_fvgs(tf_series, cp) or []
@@ -792,6 +905,7 @@ def build_context(
             ict_patterns[f"liquidity_voids_{tf_key}"] = (
                 ict_analysis.find_liquidity_voids(tf_series) or []
             )
+            logger.debug(f"FVGs, OBs, Premium/Discount, Liquidity Voids cho {tf_name} đã được tính.")
 
             # 3. Find MSS/BOS (which depends on liquidity levels)
             swing_highs = liquidity.get("swing_highs_BSL", [])
@@ -799,8 +913,10 @@ def build_context(
             ict_patterns[f"mss_{tf_key}"] = ict_analysis.find_market_structure_shift(
                 tf_series, swing_highs, swing_lows
             )
+            logger.debug(f"MSS cho {tf_name} đã được tính.")
 
-    except Exception:
+    except Exception as e:
+        logger.error(f"Lỗi trong ICT analysis: {e}")
         # If any ICT analysis fails, ensure ict_patterns is an empty dict
         ict_patterns = {}
 
@@ -861,17 +977,23 @@ def build_context(
             "rr_projection": rr_projection or {},
         }
     }
+    logger.debug("Đã xây dựng payload MT5_DATA.")
 
     # Always wrap in SafeMT5Data. The caller can decide to get the raw dict or json.
     safe_data_obj = SafeMT5Data(payload.get("MT5_DATA"))
+    logger.debug("Đã tạo SafeMT5Data object.")
 
     if return_json:
         try:
             # This path is now less common, but supported for compatibility.
-            return json.dumps(payload, ensure_ascii=False)
-        except Exception:
+            result = json.dumps(payload, ensure_ascii=False)
+            logger.debug("Trả về JSON string của payload.")
+            return result
+        except Exception as e:
+            logger.error(f"Lỗi khi chuyển payload thành JSON string: {e}")
             return str(payload)
 
+    logger.debug("Kết thúc build_context.")
     return safe_data_obj
 
 
@@ -885,19 +1007,19 @@ def build_context_from_app(
     (giá nến, thông tin tài khoản, các lệnh đang mở...).
     Hàm này là wrapper cho build_context, lấy thông tin từ đối tượng app.
     """
-    logging.debug("Bắt đầu build_context_from_app.")
+    logger.debug("Bắt đầu build_context_from_app.")
     sym = cfg.mt5_symbol if cfg else (app.mt5_symbol_var.get() or "").strip()
     if (
         not ((cfg.mt5_enabled if cfg else app.mt5_enabled_var.get()) and sym)
         or mt5 is None
     ):
-        logging.warning("MT5 không được bật, không có symbol, hoặc module MT5 không cài đặt. Bỏ qua xây dựng ngữ cảnh MT5.")
+        logger.warning("MT5 không được bật, không có symbol, hoặc module MT5 không cài đặt. Bỏ qua xây dựng ngữ cảnh MT5.")
         return None
     if not app.mt5_initialized:
-        logging.info("MT5 chưa được khởi tạo, đang cố gắng kết nối.")
-        ok, _ = app._mt5_connect(app)  # Gọi _mt5_connect từ app_logic
+        logger.info("MT5 chưa được khởi tạo, đang cố gắng kết nối.")
+        ok, _ = app.app_logic._mt5_connect(app)  # Gọi _mt5_connect từ app_logic
         if not ok:
-            logging.error("Kết nối MT5 thất bại trong build_context_from_app.")
+            logger.error("Kết nối MT5 thất bại trong build_context_from_app.")
             return None
 
     # Ủy quyền cho mt5_utils.build_context để xây dựng đối tượng ngữ cảnh MT5
@@ -911,10 +1033,10 @@ def build_context_from_app(
             plan=plan,
             return_json=False,  # Đảm bảo chúng ta nhận được đối tượng Python, không phải chuỗi JSON
         )
-        logging.debug("Kết thúc build_context_from_app.")
+        logger.debug("Kết thúc build_context_from_app.")
         return result
     except Exception as e:
-        logging.exception(f"Lỗi khi gọi build_context từ build_context_from_app: {e}")
+        logger.exception(f"Lỗi khi gọi build_context từ build_context_from_app: {e}")
         return None
 
 

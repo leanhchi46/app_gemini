@@ -28,6 +28,7 @@ from src.services import news
 from src.core import context_builder
 from src.utils import report_parser as report_utils_parser
 from src.utils import mt5_utils
+from src.core.worker_modules import no_run_trade_conditions # Import module mới
 import tkinter as tk
 from tkinter import filedialog
 from tkinter.scrolledtext import ScrolledText
@@ -51,12 +52,18 @@ except ImportError:
 class AppLogic:
     """
     Lớp chứa toàn bộ logic nghiệp vụ cốt lõi của ứng dụng, tách biệt khỏi giao diện người dùng.
+    Nó quản lý các tác vụ như cấu hình API, phân tích dữ liệu, tương tác với MT5,
+    và xử lý các sự kiện tự động.
     """
 
     def __init__(self, app_ui: Optional["TradingToolApp"] = None):
         """
         Khởi tạo lớp logic nghiệp vụ, nhận tham chiếu đến đối tượng UI.
+
+        Args:
+            app_ui: Tham chiếu đến đối tượng giao diện người dùng (TradingToolApp), có thể là None.
         """
+        logger.debug("Bắt đầu hàm __init__.")
         logger.debug("Khởi tạo AppLogic.")
         self.app_ui = app_ui
         # Khóa thread để đảm bảo an toàn khi truy cập tài nguyên dùng chung từ nhiều luồng
@@ -96,8 +103,11 @@ class AppLogic:
     def set_ui_references(self, app_ui: "TradingToolApp"):
         """
         Thiết lập tham chiếu đến đối tượng UI và hàng đợi UI sau khi đối tượng UI được tạo.
+
+        Args:
+            app_ui: Đối tượng giao diện người dùng (TradingToolApp).
         """
-        logger.debug("Bắt đầu set_ui_references.")
+        logger.debug("Bắt đầu hàm set_ui_references.")
         self.app_ui = app_ui
         self.ui_queue = app_ui.ui_queue
         logger.debug("Thiết lập tham chiếu UI cho AppLogic.")
@@ -106,7 +116,11 @@ class AppLogic:
     def _configure_gemini_api_and_update_ui(self, app: "TradingToolApp"):
         """
         Cấu hình Gemini API với API key hiện tại và cập nhật danh sách mô hình AI trên UI.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
+        logger.debug("Bắt đầu hàm _configure_gemini_api_and_update_ui.")
         api_key = app.api_key_var.get().strip() or os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             ui_utils._enqueue(app, lambda: app.ui_status("Thiếu API key để cấu hình Gemini."))
@@ -114,6 +128,10 @@ class AppLogic:
             return
 
         def _do_configure():
+            """
+            Thực hiện cấu hình Gemini API trong một luồng nền.
+            """
+            logger.debug("Bắt đầu hàm _do_configure.")
             try:
                 genai.configure(api_key=api_key)
                 ui_utils._enqueue(app, lambda: app.ui_status("Đã cấu hình Gemini API."))
@@ -134,7 +152,15 @@ class AppLogic:
         """
         Hợp nhất các thành phần ngữ cảnh (dữ liệu MT5, báo cáo cũ, tin tức) để tạo chuỗi ngữ cảnh hoàn chỉnh
         cung cấp cho mô hình AI.
+
+        Args:
+            cfg: Đối tượng cấu hình RunConfig.
+            budget_chars: Ngân sách ký tự tối đa cho chuỗi ngữ cảnh.
+
+        Returns:
+            Chuỗi JSON của ngữ cảnh đã được tạo.
         """
+        logger.debug("Bắt đầu hàm compose_context.")
         logger.debug(f"Bắt đầu compose_context với budget_chars: {budget_chars}.")
         
         # Chạy việc xây dựng ngữ cảnh trong một luồng nền để tránh chặn UI
@@ -142,6 +168,10 @@ class AppLogic:
         context_data = {"context": "", "exception": None}
 
         def _do_compose():
+            """
+            Thực hiện việc xây dựng ngữ cảnh trong một luồng nền.
+            """
+            logger.debug("Bắt đầu hàm _do_compose.")
             try:
                 context_data["context"] = context_builder.compose_context(self.app_ui, cfg, budget_chars)
             except Exception as e:
@@ -172,7 +202,14 @@ class AppLogic:
         Gửi thông báo qua Telegram nếu tính năng Telegram được bật và báo cáo phân tích
         chứa tín hiệu giao dịch có xác suất cao ("HIGH PROBABILITY").
         Tránh gửi trùng lặp bằng cách sử dụng chữ ký báo cáo.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
+            report_text: Nội dung báo cáo phân tích.
+            report_path: Đường dẫn đến file báo cáo (có thể là None).
+            cfg: Đối tượng cấu hình RunConfig.
         """
+        logger.debug("Bắt đầu hàm _maybe_notify_telegram.")
         logger.debug(f"Bắt đầu _maybe_notify_telegram. Telegram enabled: {cfg.telegram_enabled}, Report text length: {len(report_text) if report_text else 0}.")
         if not cfg.telegram_enabled or not report_text:
             logger.debug("Telegram không được bật hoặc không có báo cáo, bỏ qua gửi Telegram.")
@@ -204,8 +241,14 @@ class AppLogic:
         Chụp lại toàn bộ trạng thái cấu hình hiện tại từ giao diện người dùng và trả về một đối tượng RunConfig.
         Điều này đảm bảo rằng luồng worker chạy với một cấu hình nhất quán,
         ngay cả khi người dùng thay đổi cài đặt trên giao diện trong lúc đang chạy.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
+
+        Returns:
+            Một đối tượng RunConfig chứa cấu hình hiện tại.
         """
-        logger.debug("Bắt đầu _snapshot_config.")
+        logger.debug("Bắt đầu hàm _snapshot_config.")
         config = RunConfig(
             folder=app.folder_path.get().strip(),
             delete_after=bool(app.delete_after_var.get()),
@@ -269,6 +312,9 @@ class AppLogic:
         """
         Mở hộp thoại cho người dùng chọn tệp .env và tải biến môi trường từ đó.
         Ưu tiên nạp GOOGLE_API_KEY.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug("Bắt đầu _load_env.")
         path = filedialog.askopenfilename(
@@ -306,6 +352,9 @@ class AppLogic:
     def _save_api_safe(self, app: "TradingToolApp"):
         """
         Mã hóa và lưu API key vào tệp để sử dụng trong các lần chạy sau.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug("Bắt đầu _save_api_safe.")
         try:
@@ -324,6 +373,9 @@ class AppLogic:
     def _delete_api_safe(self, app: "TradingToolApp"):
         """
         Xóa tệp chứa API key đã mã hóa khỏi hệ thống.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug("Bắt đầu _delete_api_safe.")
         try:
@@ -343,6 +395,9 @@ class AppLogic:
         Bắt đầu một phiên phân tích mới.
         Kiểm tra các điều kiện cần thiết, cấu hình Gemini API, và khởi chạy luồng worker
         để thực hiện phân tích ảnh.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug(f"Bắt đầu start_analysis. App đang chạy: {app.is_running}")
         if app.is_running:
@@ -436,6 +491,9 @@ class AppLogic:
         """
         Gửi tín hiệu dừng cho luồng worker đang chạy và hủy các tác vụ upload đang chờ
         trong executor để dừng quá trình phân tích.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug(f"Bắt đầu stop_analysis. App đang chạy: {app.is_running}")
         if not app.is_running:
@@ -477,6 +535,9 @@ class AppLogic:
         """
         Hoàn tất quá trình phân tích khi người dùng yêu cầu dừng.
         Cập nhật trạng thái giao diện và lên lịch cho lần chạy tự động tiếp theo (nếu bật).
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug("Bắt đầu _finalize_stopped.")
         app.is_running = False
@@ -492,6 +553,9 @@ class AppLogic:
         """
         Bật hoặc tắt chế độ tự động chạy phân tích.
         Nếu bật, lên lịch cho lần chạy tiếp theo. Nếu tắt, hủy lịch chạy hiện tại.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug(f"Bắt đầu _toggle_autorun. Autorun enabled: {app.autorun_var.get()}")
         if app.autorun_var.get():
@@ -509,6 +573,9 @@ class AppLogic:
         """
         Xử lý khi khoảng thời gian tự động chạy thay đổi.
         Nếu chế độ tự động chạy đang bật, lên lịch lại cho lần chạy tiếp theo.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug(f"Bắt đầu _autorun_interval_changed. Autorun enabled: {app.autorun_var.get()}")
         if app.autorun_var.get():
@@ -519,6 +586,9 @@ class AppLogic:
     def _schedule_next_autorun(self, app: "TradingToolApp"):
         """
         Lên lịch cho lần chạy tự động tiếp theo sau một khoảng thời gian nhất định.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug("Bắt đầu _schedule_next_autorun.")
         if not app.autorun_var.get():
@@ -538,6 +608,9 @@ class AppLogic:
         Hàm được gọi khi đến thời gian tự động chạy.
         Nếu không có phân tích nào đang chạy, bắt đầu một phân tích mới.
         Nếu đang chạy, thực hiện các tác vụ nền như quản lý BE/Trailing.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug("Bắt đầu _autorun_tick.")
         app._autorun_job = None
@@ -581,6 +654,9 @@ class AppLogic:
     def _pick_mt5_terminal(self, app: "TradingToolApp"):
         """
         Mở hộp thoại cho người dùng chọn đường dẫn đến file thực thi của MetaTrader 5 (terminal64.exe hoặc terminal.exe).
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug("Bắt đầu _pick_mt5_terminal.")
         p = filedialog.askopenfilename(
@@ -598,6 +674,9 @@ class AppLogic:
         """
         Cố gắng đoán biểu tượng (symbol) giao dịch từ tên các file ảnh đã nạp.
         Ví dụ: "EURUSD_H1.png" sẽ đoán là "EURUSD".
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug("Bắt đầu _mt5_guess_symbol.")
         try:
@@ -661,10 +740,16 @@ class AppLogic:
             self._schedule_mt5_reconnect(app)  # Kích hoạt tái kết nối
             return False, msg
 
-    def _schedule_mt5_reconnect(self, app: "TradingToolApp"):
+    def _mt5_connect(self, app: "TradingToolApp") -> Tuple[bool, str]:
         """
-        Lên lịch để thử tái kết nối MT5 sau một khoảng thời gian.
-        Sử dụng exponential backoff và giới hạn số lần thử.
+        Khởi tạo kết nối đến MetaTrader 5.
+        Trả về trạng thái kết nối (True/False) và thông báo.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
+
+        Returns:
+            Tuple[bool, str]: Trạng thái kết nối (True nếu thành công, False nếu thất bại) và thông báo kết quả.
         """
         logger.debug("Bắt đầu _schedule_mt5_reconnect.")
         if self._mt5_reconnect_job:
@@ -705,6 +790,9 @@ class AppLogic:
     def _attempt_mt5_reconnect(self, app: "TradingToolApp"):
         """
         Thực hiện một lần thử tái kết nối MT5.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logging.info("MT5 Reconnect: Đang thực hiện tái kết nối...")
         ok, msg = self._mt5_connect(app)
@@ -743,6 +831,9 @@ class AppLogic:
         """
         Thực hiện kiểm tra trạng thái kết nối MT5.
         Nếu kết nối bị mất, kích hoạt cơ chế tái kết nối.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
         logger.debug("Bắt đầu _check_mt5_connection.")
         if not app.mt5_enabled_var.get():
@@ -836,6 +927,13 @@ class AppLogic:
         """
         Làm mới bộ đệm tin tức từ Forex Factory nếu dữ liệu đã cũ (quá thời gian `ttl`).
         Có thể chạy đồng bộ hoặc không đồng bộ.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
+            ttl: Thời gian sống (Time-To-Live) của cache tin tức bằng giây. Mặc định là 300 giây.
+            async_fetch: Nếu True, việc làm mới tin tức sẽ chạy không đồng bộ trong một luồng riêng.
+                         Nếu False, nó sẽ chạy đồng bộ. Mặc định là True.
+            cfg: Đối tượng RunConfig tùy chọn để sử dụng. Nếu None, cấu hình sẽ được chụp từ UI.
         """
         logger.debug(f"Bắt đầu _refresh_news_cache. Async: {async_fetch}, TTL: {ttl}")
         try:

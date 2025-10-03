@@ -1,553 +1,357 @@
-# -*- coding: utf-8 -*-
-import re
+from __future__ import annotations
 import json
-import math
-import hashlib
-
-def find_balanced_json_after(text: str, start_idx: int):
-    depth, i = 0, start_idx
-    if text[i] != '{':
-        return None, None
-        
-    while i < len(text):
-        ch = text[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start_idx:i+1], i+1
-        i += 1
-    return None, None
-
-def extract_json_block_prefer(text: str):
-    fence = re.findall(r"```json\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
-    for blob in fence:
-        try:
-            return json.loads(blob)
-        except Exception:
-            pass
-
-    keywords = ["CHECKLIST_JSON", "EXTRACT_JSON", "setup", "trade", "signal"]
-    lowered = text.lower()
-    for kw in keywords:
-        idx = lowered.find(kw.lower())
-        if idx >= 0:
-            brace = text.find("{", idx)
-            if brace >= 0:
-                js, _ = find_balanced_json_after(text, brace)
-                if js:
-                    try:
-                        return json.loads(js)
-                    except Exception:
-                        pass
-
-    first_brace = text.find("{")
-    while first_brace >= 0:
-        js, nxt = find_balanced_json_after(text, first_brace)
-        if js:
-            try:
-                import json as _json
-                return _json.loads(js)
-            except Exception:
-                pass
-            first_brace = text.find("{", nxt if nxt else first_brace + 1)
-        else:
-            break
-    return None
-
-def coerce_setup_from_json(obj):
-    if obj is None:
-        return None
-
-    candidates = []
-    if isinstance(obj, dict):
-        candidates.append(obj)
-        for k in ("CHECKLIST_JSON", "EXTRACT_JSON", "setup", "trade", "signal"):
-            v = obj.get(k)
-            if isinstance(v, dict):
-                candidates.append(v)
-
-    def _num(x):
-        if x is None:
-            return None
-        if isinstance(x, (int, float)) and math.isfinite(x):
-            return float(x)
-        if isinstance(x, str):
-            xs = x.strip().replace(",", "")
-            try:
-                return float(xs)
-            except Exception:
-                return None
-        return None
-
-    def _dir(x):
-        if not x:
-            return None
-        s = str(x).strip().lower()
-
-        if s in ("long", "buy", "mua", "bull", "bullish"):
-            return "long"
-        if s in ("short", "sell", "bán", "ban", "bear", "bearish"):
-            return "short"
-        return None
-
-    for c in candidates:
-        d = {
-            "direction": _dir(c.get("direction") or c.get("dir") or c.get("side")),
-            "entry": _num(c.get("entry") or c.get("price") or c.get("ep")),
-            "sl":    _num(c.get("sl")    or c.get("stop")  or c.get("stop_loss")),
-            "tp1":   _num(c.get("tp1")   or c.get("tp_1")  or c.get("take_profit_1") or c.get("tp")),
-            "tp2":   _num(c.get("tp2")   or c.get("tp_2")  or c.get("take_profit_2")),
-        }
-
-        if d["tp1"] is None and d["tp2"] is not None:
-            d["tp1"] = d["tp2"]
-        if d["tp1"] is not None and d["sl"] is not None and d["entry"] is not None and d["direction"] in ("long","short"):
-            return d
-    return None
-
-def parse_float(s: str):
-    try:
-        return float(s.strip().replace(",", ""))
-    except (ValueError, TypeError):
-        return None
-
-def parse_direction_from_line1(line1: str):
-    s = line1.strip().lower()
-    if "long" in s or "buy" in s or "bull" in s:
-        return "long"
-    if "short" in s or "sell" in s or "bear" in s:
-        return "short"
-    return None
-
-def create_report_signature(text: str) -> str:
-    """Creates a signature for a report to avoid duplicates."""
-    if not text:
-        return ""
-    # Normalize whitespace and case to make it more robust
-    normalized_text = " ".join(text.strip().lower().split())
 import re
-import json
-import math
-import hashlib
-import logging
+import logging # Thêm import logging
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # Khởi tạo logger
 
-def find_balanced_json_after(text: str, start_idx: int):
-    logger.debug(f"Bắt đầu find_balanced_json_after từ index: {start_idx}")
-    depth, i = 0, start_idx
-    if text[i] != '{':
-        logger.debug("Không tìm thấy dấu '{' ở vị trí bắt đầu.")
-        return None, None
-        
-    while i < len(text):
-        ch = text[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                logger.debug(f"Tìm thấy khối JSON cân bằng, kết thúc ở index: {i+1}")
-                return text[start_idx:i+1], i+1
-        i += 1
-    logger.debug("Không tìm thấy khối JSON cân bằng.")
-    return None, None
+if TYPE_CHECKING:
+    from src.utils.safe_data import SafeMT5Data
 
-def extract_json_block_prefer(text: str):
-    logger.debug("Bắt đầu extract_json_block_prefer.")
-    fence = re.findall(r"```json\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
-    for blob in fence:
-        try:
-            parsed_json = json.loads(blob)
-            logger.debug("Đã trích xuất và parse JSON từ khối fence.")
-            return parsed_json
-        except Exception as e:
-            logger.debug(f"Lỗi khi parse JSON từ khối fence: {e}")
-            pass
 
-    keywords = ["CHECKLIST_JSON", "EXTRACT_JSON", "setup", "trade", "signal"]
-    lowered = text.lower()
-    for kw in keywords:
-        idx = lowered.find(kw.lower())
-        if idx >= 0:
-            brace = text.find("{", idx)
-            if brace >= 0:
-                js, _ = find_balanced_json_after(text, brace)
-                if js:
-                    try:
-                        parsed_json = json.loads(js)
-                        logger.debug(f"Đã trích xuất và parse JSON từ keyword '{kw}'.")
-                        return parsed_json
-                    except Exception as e:
-                        logger.debug(f"Lỗi khi parse JSON từ keyword '{kw}': {e}")
-                        pass
+def parse_float(s: str) -> Optional[float]:
+    """
+    Phân tích một chuỗi thành số thực (float).
+    Hỗ trợ các định dạng số có dấu phẩy hoặc dấu chấm thập phân.
 
-    first_brace = text.find("{")
-    while first_brace >= 0:
-        js, nxt = find_balanced_json_after(text, first_brace)
-        if js:
-            try:
-                import json as _json
-                parsed_json = _json.loads(js)
-                logger.debug("Đã trích xuất và parse JSON từ dấu '{' đầu tiên.")
-                return parsed_json
-            except Exception as e:
-                logger.debug(f"Lỗi khi parse JSON từ dấu '{{' đầu tiên: {e}")
-                pass
-            first_brace = text.find("{", nxt if nxt else first_brace + 1)
-        else:
-            break
-    logger.debug("Không tìm thấy khối JSON hợp lệ nào.")
-    return None
+    Args:
+        s: Chuỗi cần phân tích.
 
-def coerce_setup_from_json(obj):
-    logger.debug(f"Bắt đầu coerce_setup_from_json với obj: {obj}")
-    if obj is None:
-        return None
-
-    candidates = []
-    if isinstance(obj, dict):
-        candidates.append(obj)
-        for k in ("CHECKLIST_JSON", "EXTRACT_JSON", "setup", "trade", "signal"):
-            v = obj.get(k)
-            if isinstance(v, dict):
-                candidates.append(v)
-
-    def _num(x):
-        if x is None:
-            return None
-        if isinstance(x, (int, float)) and math.isfinite(x):
-            return float(x)
-        if isinstance(x, str):
-            xs = x.strip().replace(",", "")
-            try:
-                return float(xs)
-            except Exception:
-                return None
-        return None
-
-    def _dir(x):
-        if not x:
-            return None
-        s = str(x).strip().lower()
-
-        if s in ("long", "buy", "mua", "bull", "bullish"):
-            return "long"
-        if s in ("short", "sell", "bán", "ban", "bear", "bearish"):
-            return "short"
-        return None
-
-    for c in candidates:
-        d = {
-            "direction": _dir(c.get("direction") or c.get("dir") or c.get("side")),
-            "entry": _num(c.get("entry") or c.get("price") or c.get("ep")),
-            "sl":    _num(c.get("sl")    or c.get("stop")  or c.get("stop_loss")),
-            "tp1":   _num(c.get("tp1")   or c.get("tp_1")  or c.get("take_profit_1") or c.get("tp")),
-            "tp2":   _num(c.get("tp2")   or c.get("tp_2")  or c.get("take_profit_2")),
-        }
-
-        if d["tp1"] is None and d["tp2"] is not None:
-            d["tp1"] = d["tp2"]
-        if d["tp1"] is not None and d["sl"] is not None and d["entry"] is not None and d["direction"] in ("long","short"):
-            logger.debug(f"Đã coerce setup thành công: {d}")
-            return d
-    logger.debug("Không thể coerce setup từ JSON.")
-    return None
-
-def parse_float(s: str):
+    Returns:
+        Giá trị float hoặc None nếu không thể phân tích.
+    """
     logger.debug(f"Bắt đầu parse_float cho chuỗi: '{s}'")
+    if not isinstance(s, str):
+        logger.debug("Input không phải chuỗi, trả về None.")
+        return None
+    s = s.strip().replace(",", "") # Loại bỏ dấu phẩy
     try:
-        result = float(s.strip().replace(",", ""))
+        result = float(s)
         logger.debug(f"Đã parse float thành công: {result}")
         return result
-    except (ValueError, TypeError) as e:
-        logger.debug(f"Lỗi khi parse float cho '{s}': {e}")
+    except ValueError:
+        logger.warning(f"Không thể parse '{s}' thành float.")
         return None
 
-def parse_direction_from_line1(line1: str):
+
+def parse_direction_from_line1(line1: str) -> Optional[str]:
+    """
+    Phân tích hướng giao dịch (Buy/Sell) từ dòng đầu tiên của báo cáo.
+
+    Args:
+        line1: Dòng đầu tiên của báo cáo.
+
+    Returns:
+        "long" hoặc "short" hoặc None nếu không xác định được.
+    """
     logger.debug(f"Bắt đầu parse_direction_from_line1 cho dòng: '{line1}'")
-    s = line1.strip().lower()
-    if "long" in s or "buy" in s or "bull" in s:
-        logger.debug("Hướng lệnh: long")
+    line1_lower = line1.lower()
+    if "buy" in line1_lower or "long" in line1_lower:
+        logger.debug("Hướng lệnh là 'long'.")
         return "long"
-    if "short" in s or "sell" in s or "bear" in s:
-        logger.debug("Hướng lệnh: short")
+    if "sell" in line1_lower or "short" in line1_lower:
+        logger.debug("Hướng lệnh là 'short'.")
         return "short"
-    logger.debug("Không xác định được hướng lệnh.")
+    logger.debug("Không xác định được hướng lệnh, trả về None.")
     return None
 
-def create_report_signature(text: str) -> str:
-    """Creates a signature for a report to avoid duplicates."""
-    logger.debug("Bắt đầu create_report_signature.")
-    if not text:
-        return ""
-    # Normalize whitespace and case to make it more robust
-    normalized_text = " ".join(text.strip().lower().split())
-    sig = hashlib.sha1(normalized_text.encode("utf-8")).hexdigest()
-    logger.debug(f"Đã tạo signature: {sig}")
-    return sig
 
-def extract_summary_lines(text: str) -> tuple[list[str], str, bool]:
-    """Extracts summary lines, a signature, and high probability flag from report text."""
-    logger.debug("Bắt đầu extract_summary_lines.")
-    lines = text.strip().split('\n')
-    summary = []
-    # A simple heuristic: find the first block of bullet points
-    in_summary = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith(("- ", "* ")):
-            summary.append(stripped)
-            in_summary = True
-        elif in_summary and stripped: # block ended
-            break
-        elif in_summary and not stripped: # allow empty lines within summary
-            pass
+def parse_setup_from_report(text: str) -> Dict[str, Any]:
+    """
+    Phân tích báo cáo để trích xuất các thông số setup giao dịch (entry, SL, TP).
 
-    if not summary:  # Fallback: take first 5 non-empty lines
-        summary = [l.strip() for l in lines if l.strip()][:5]
+    Args:
+        text: Nội dung báo cáo.
 
-    high_prob = "HIGH PROBABILITY" in text.upper()
-    
-    summary_text = "\n".join(summary)
-    sig = create_report_signature(summary_text)
-    logger.debug("Kết thúc extract_summary_lines.")
-    return summary, sig, high_prob
-
-def parse_setup_from_report(text: str):
-    """Extracts a trade setup from a report by finding and parsing a JSON block."""
+    Returns:
+        Một từ điển chứa các thông số setup.
+    """
     logger.debug("Bắt đầu parse_setup_from_report.")
-    json_block = extract_json_block_prefer(text)
-    setup = coerce_setup_from_json(json_block)
+    setup: Dict[str, Any] = {}
+    
+    # Cố gắng trích xuất từ JSON trước
+    try:
+        json_block = extract_json_block_prefer(text)
+        if json_block and not json_block.get("error"):
+            plan = json_block.get("proposed_plan")
+            if plan:
+                setup = plan
+                logger.debug("Đã trích xuất setup từ JSON block.")
+                return setup
+    except Exception as e:
+        logger.warning(f"Lỗi khi trích xuất setup từ JSON: {e}. Fallback sang regex.")
+        pass
+
+    # Fallback sang regex nếu JSON không có hoặc lỗi
+    lines = text.split("\n")
+    for line in lines:
+        line_lower = line.lower()
+        if "entry:" in line_lower:
+            match = re.search(r"entry:\s*([\d\.,]+)", line_lower)
+            if match:
+                setup["entry"] = parse_float(match.group(1))
+        elif "sl:" in line_lower:
+            match = re.search(r"sl:\s*([\d\.,]+)", line_lower)
+            if match:
+                setup["sl"] = parse_float(match.group(1))
+        elif "tp1:" in line_lower:
+            match = re.search(r"tp1:\s*([\d\.,]+)", line_lower)
+            if match:
+                setup["tp1"] = parse_float(match.group(1))
+        elif "tp2:" in line_lower:
+            match = re.search(r"tp2:\s*([\d\.,]+)", line_lower)
+            if match:
+                setup["tp2"] = parse_float(match.group(1))
+        elif "direction:" in line_lower:
+            setup["direction"] = parse_direction_from_line1(line)
+    
+    # Nếu vẫn thiếu direction, thử từ dòng đầu tiên của toàn bộ text
+    if not setup.get("direction") and lines:
+        setup["direction"] = parse_direction_from_line1(lines[0])
+
     logger.debug(f"Kết thúc parse_setup_from_report. Setup: {setup}")
     return setup
 
-def _generate_extract_json(mt5_data: dict) -> dict:
+
+def extract_summary_lines(text: str) -> Tuple[List[str], Optional[str], bool]:
     """
-    Tạo một dictionary chứa các thông tin trích xuất quan trọng từ dữ liệu MT5.
+    Trích xuất các dòng tóm tắt (Task 2) và chữ ký (Task 3) từ báo cáo.
+    Cũng xác định xem có phải là "HIGH PROBABILITY" hay không.
+
+    Args:
+        text: Nội dung báo cáo.
+
+    Returns:
+        Một tuple chứa:
+        - Danh sách các dòng tóm tắt.
+        - Chữ ký (nếu có).
+        - Giá trị boolean cho biết có phải là "HIGH PROBABILITY" hay không.
     """
-    logger.debug("Bắt đầu _generate_extract_json.")
-    extract_dict = {
-        "symbol": mt5_data.get("symbol"),
-        "broker_time": mt5_data.get("broker_time"),
-        "account_balance": mt5_data.get("account", {}).get("balance"),
-        "account_equity": mt5_data.get("account", {}).get("equity"),
-        "current_bid": mt5_data.get("tick", {}).get("bid"),
-        "current_ask": mt5_data.get("tick", {}).get("ask"),
-        "current_spread": mt5_data.get("info", {}).get("spread_current"),
-        "day_open": mt5_data.get("day_open"),
-        "day_high": mt5_data.get("levels", {}).get("daily", {}).get("high"),
-        "day_low": mt5_data.get("levels", {}).get("daily", {}).get("low"),
-        "day_range": mt5_data.get("day_range"),
-        "position_in_day_range": mt5_data.get("position_in_day_range"),
-        "killzone_active": mt5_data.get("killzone_active"),
-        "is_silver_bullet_window": mt5_data.get("is_silver_bullet_window"),
-        "volatility_regime": mt5_data.get("volatility_regime"),
-        "premium_discount_h1_status": mt5_data.get("ict_patterns", {}).get("premium_discount_h1", {}).get("status"),
-        "premium_discount_m15_status": mt5_data.get("ict_patterns", {}).get("premium_discount_m15", {}).get("status"),
-        "news_in_window": mt5_data.get("news_analysis", {}).get("is_in_news_window"),
-        "news_reason": mt5_data.get("news_analysis", {}).get("reason"),
-    }
+    logger.debug("Bắt đầu extract_summary_lines.")
+    summary_lines: List[str] = []
+    signature: Optional[str] = None
+    high_prob: bool = False
 
-    # Thêm các mức ATR
-    atr_data = mt5_data.get("volatility", {}).get("ATR", {})
-    for tf, value in atr_data.items():
-        extract_dict[f"atr_{tf.lower()}"] = value
+    # Tìm phần NHIỆM VỤ 2
+    task2_match = re.search(r"###\s*NHIỆM VỤ 2\s*(.*?)(?=\n###|\Z)", text, re.DOTALL | re.IGNORECASE)
+    if task2_match:
+        task2_content = task2_match.group(1).strip()
+        # Tách các dòng và loại bỏ các dòng trống
+        lines = [line.strip() for line in task2_content.split('\n') if line.strip()]
+        # Giới hạn 7 dòng đầu tiên
+        summary_lines = lines[:7]
+        logger.debug(f"Đã trích xuất {len(summary_lines)} dòng tóm tắt.")
 
-    # Thêm các key levels
-    key_levels = mt5_data.get("key_levels_nearby", [])
-    for level in key_levels:
-        name = level.get("name")
-        price = level.get("price")
-        relation = level.get("relation")
-        if name and price:
-            extract_dict[f"key_level_{name.lower()}_price"] = price
-            extract_dict[f"key_level_{name.lower()}_relation"] = relation
+    # Tìm phần NHIỆM VỤ 3 (chữ ký)
+    task3_match = re.search(r"###\s*NHIỆM VỤ 3\s*(.*?)(?=\n###|\Z)", text, re.DOTALL | re.IGNORECASE)
+    if task3_match:
+        signature = task3_match.group(1).strip()
+        logger.debug(f"Đã trích xuất chữ ký: {signature}")
+        if "HIGH PROBABILITY" in signature.upper():
+            high_prob = True
+            logger.debug("Tìm thấy 'HIGH PROBABILITY'.")
 
-    # Thêm các mẫu hình ICT
-    ict_patterns = mt5_data.get("ict_patterns")
-    if ict_patterns:
-        for tf_key in ["m15", "h1"]:
-            # FVG
-            fvgs = ict_patterns.get(f"fvgs_{tf_key}")
-            if isinstance(fvgs, dict): # Thêm kiểm tra kiểu dữ liệu
-                if fvgs.get("nearest_bullish"):
-                    extract_dict[f"fvg_{tf_key}_bullish_top"] = fvgs["nearest_bullish"].get("top")
-                    extract_dict[f"fvg_{tf_key}_bullish_bottom"] = fvgs["nearest_bullish"].get("bottom")
-                if fvgs.get("nearest_bearish"):
-                    extract_dict[f"fvg_{tf_key}_bearish_top"] = fvgs["nearest_bearish"].get("top")
-                    extract_dict[f"fvg_{tf_key}_bearish_bottom"] = fvgs["nearest_bearish"].get("bottom")
+    logger.debug(f"Kết thúc extract_summary_lines. High Prob: {high_prob}")
+    return summary_lines, signature, high_prob
 
-            # Liquidity
-            liquidity_data = ict_patterns.get(f"liquidity_{tf_key}")
-            if isinstance(liquidity_data, dict): # Thêm kiểm tra kiểu dữ liệu
-                if liquidity_data.get("swing_highs_BSL"):
-                    extract_dict[f"liquidity_{tf_key}_bsl_count"] = len(liquidity_data["swing_highs_BSL"])
-                    extract_dict[f"liquidity_{tf_key}_bsl_highest"] = liquidity_data["swing_highs_BSL"][0].get("price")
-                if liquidity_data.get("swing_lows_SSL"):
-                    extract_dict[f"liquidity_{tf_key}_ssl_count"] = len(liquidity_data["swing_lows_SSL"])
-                    extract_dict[f"liquidity_{tf_key}_ssl_lowest"] = liquidity_data["swing_lows_SSL"][0].get("price")
 
-            # Order Blocks
-            obs = ict_patterns.get(f"order_blocks_{tf_key}")
-            if isinstance(obs, dict): # Thêm kiểm tra kiểu dữ liệu
-                if obs.get("nearest_bullish_ob"):
-                    extract_dict[f"ob_{tf_key}_bullish_top"] = obs["nearest_bullish_ob"].get("top")
-                    extract_dict[f"ob_{tf_key}_bullish_bottom"] = obs["nearest_bullish_ob"].get("bottom")
-                if obs.get("nearest_bearish_ob"):
-                    extract_dict[f"ob_{tf_key}_bearish_top"] = obs["nearest_bearish_ob"].get("top")
-                    extract_dict[f"ob_{tf_key}_bearish_bottom"] = obs["nearest_bearish_ob"].get("bottom")
+def repair_json_string(s: str) -> str:
+    """
+    Cố gắng sửa chữa một chuỗi JSON bị lỗi để nó có thể được parse.
+    Xử lý các trường hợp phổ biến như thiếu dấu ngoặc, dấu phẩy thừa.
 
-            # Liquidity Voids
-            lvs = ict_patterns.get(f"liquidity_voids_{tf_key}", [])
-            if lvs:
-                extract_dict[f"liquidity_voids_{tf_key}_count"] = len(lvs)
-                # Có thể thêm chi tiết hơn nếu cần, ví dụ: gần nhất, cao nhất/thấp nhất
+    Args:
+        s: Chuỗi JSON có thể bị lỗi.
 
-    logger.debug("Kết thúc _generate_extract_json.")
-    return extract_dict
+    Returns:
+        Chuỗi JSON đã được sửa chữa hoặc chuỗi gốc nếu không thể sửa chữa.
+    """
+    logger.debug(f"Bắt đầu repair_json_string. Độ dài chuỗi gốc: {len(s)}")
+    # Loại bỏ các ký tự không phải JSON ở đầu và cuối
+    s = s.strip()
+    if not s.startswith("{"):
+        s = "{" + s
+    if not s.endswith("}"):
+        s = s + "}"
 
-def parse_mt5_data_to_report(safe_mt5_data) -> str:
-    """Converts MT5 data into a structured report."""
+    # Loại bỏ các dấu phẩy thừa trước dấu đóng ngoặc
+    s = re.sub(r",\s*}", "}", s)
+    s = re.sub(r",\s*]", "]", s)
+
+    # Thêm dấu ngoặc kép cho các key không có dấu ngoặc kép (nếu có thể)
+    s = re.sub(r"([{,])\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', s)
+
+    # Thử parse và trả về nếu thành công
+    try:
+        json.loads(s)
+        logger.debug("Đã sửa chữa JSON thành công.")
+        return s
+    except json.JSONDecodeError:
+        logger.warning("Không thể sửa chữa JSON hoàn toàn, trả về chuỗi gốc.")
+        return s # Trả về chuỗi gốc nếu không thể sửa chữa
+
+
+def find_balanced_json_after(text: str, start_idx: int) -> Tuple[Optional[str], Optional[int]]:
+    """
+    Tìm và trích xuất một khối JSON cân bằng (balanced JSON block) từ một chuỗi văn bản,
+    bắt đầu từ một chỉ mục cụ thể.
+
+    Args:
+        text: Chuỗi văn bản để tìm kiếm.
+        start_idx: Chỉ mục bắt đầu tìm kiếm.
+
+    Returns:
+        Một tuple chứa chuỗi JSON tìm được và chỉ mục kết thúc của nó, hoặc (None, None) nếu không tìm thấy.
+    """
+    logger.debug(f"Bắt đầu find_balanced_json_after. Start index: {start_idx}.")
+    brace_count = 0
+    in_string = False
+    escape_char = False
+    json_start = -1
+
+    for i in range(start_idx, len(text)):
+        char = text[i]
+
+        if char == '\\':
+            escape_char = not escape_char
+            continue
+
+        if char == '"' and not escape_char:
+            in_string = not in_string
+
+        if not in_string:
+            if char == '{':
+                if json_start == -1:
+                    json_start = i
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+
+        escape_char = False # Reset escape char
+
+        if json_start != -1 and brace_count == 0:
+            json_str = text[json_start : i + 1]
+            logger.debug(f"Tìm thấy JSON block cân bằng. Độ dài: {len(json_str)}.")
+            return json_str, i + 1
+    
+    logger.debug("Không tìm thấy JSON block cân bằng.")
+    return None, None
+
+
+def extract_json_block_prefer(text: str) -> Dict[str, Any]:
+    """
+    Trích xuất khối JSON từ một chuỗi văn bản, ưu tiên các khối JSON hoàn chỉnh và hợp lệ.
+
+    Args:
+        text: Chuỗi văn bản chứa JSON.
+
+    Returns:
+        Một từ điển Python từ JSON hoặc một từ điển lỗi nếu không tìm thấy JSON hợp lệ.
+    """
+    logger.debug("Bắt đầu extract_json_block_prefer.")
+    # Tìm tất cả các khối JSON có thể có
+    all_json_blocks = []
+    start_search_idx = 0
+    while start_search_idx < len(text):
+        brace_idx = text.find("{", start_search_idx)
+        if brace_idx == -1:
+            break
+        
+        json_str, next_idx = find_balanced_json_after(text, brace_idx)
+        if json_str:
+            all_json_blocks.append((json_str, brace_idx))
+            start_search_idx = next_idx if next_idx else brace_idx + 1
+        else:
+            start_search_idx = brace_idx + 1
+    
+    # Ưu tiên các khối JSON lớn hơn và gần cuối văn bản hơn
+    all_json_blocks.sort(key=lambda x: (len(x[0]), x[1]), reverse=True)
+
+    for json_str, _ in all_json_blocks:
+        try:
+            repaired_str = repair_json_string(json_str)
+            obj = json.loads(repaired_str)
+            if isinstance(obj, dict):
+                logger.debug("Đã trích xuất và parse JSON block ưu tiên.")
+                return obj
+        except Exception as e:
+            logger.debug(f"Lỗi khi parse hoặc sửa chữa JSON block: {e}. Thử block tiếp theo.")
+            continue
+    
+    logger.debug("Không tìm thấy JSON block hợp lệ nào.")
+    return {"error": "No valid JSON block found"}
+
+
+def parse_mt5_data_to_report(safe_mt5_data: SafeMT5Data) -> str:
+    """
+    Chuyển đổi dữ liệu MT5 từ SafeMT5Data thành một chuỗi báo cáo có cấu trúc
+    để đưa vào prompt của AI.
+
+    Args:
+        safe_mt5_data: Đối tượng SafeMT5Data chứa dữ liệu MT5.
+
+    Returns:
+        Chuỗi báo cáo MT5 đã định dạng.
+    """
     logger.debug("Bắt đầu parse_mt5_data_to_report.")
     if not safe_mt5_data or not safe_mt5_data.raw:
-        logger.warning("Không có dữ liệu MT5 để tạo báo cáo.")
+        logger.warning("SafeMT5Data trống, không thể tạo báo cáo MT5.")
         return "Không có dữ liệu MT5."
 
     mt5_data = safe_mt5_data.raw
     report_lines = []
 
-    # Phần 1: Thông tin chung
-    report_lines.append(f"## Báo cáo Phân tích Thị trường MT5 - {mt5_data.get('symbol')}")
-    report_lines.append(f"Thời gian Broker: {mt5_data.get('broker_time')}")
-    report_lines.append(f"Cân bằng tài khoản: {mt5_data.get('account', {}).get('balance'):.2f} {mt5_data.get('account', {}).get('currency')}")
-    report_lines.append(f"Equity: {mt5_data.get('account', {}).get('equity'):.2f} {mt5_data.get('account', {}).get('currency')}")
-    report_lines.append(f"Giá Bid/Ask: {mt5_data.get('tick', {}).get('bid')}/{mt5_data.get('tick', {}).get('ask')} (Spread: {mt5_data.get('info', {}).get('spread_current')})")
-    report_lines.append(f"Killzone hiện tại: {mt5_data.get('killzone_active', 'N/A')}")
-    report_lines.append(f"Silver Bullet Window: {'Có' if mt5_data.get('is_silver_bullet_window') else 'Không'}")
-    report_lines.append(f"Chế độ biến động: {mt5_data.get('volatility_regime', 'N/A')}")
-    report_lines.append("")
+    report_lines.append("--- DỮ LIỆU MT5 HIỆN TẠI ---")
+    report_lines.append(f"Symbol: {mt5_data.get('symbol', 'N/A')}")
+    report_lines.append(f"Thời gian Broker: {mt5_data.get('broker_time', 'N/A')}")
+    report_lines.append(f"Giá hiện tại (Bid): {safe_mt5_data.get_tick_value('bid', 'N/A')}")
+    report_lines.append(f"Spread (points): {safe_mt5_data.get_info_value('spread_current', 'N/A')}")
+    report_lines.append(f"ATR M5 (pips): {safe_mt5_data.get_atr_pips('M5', 0.0):.2f}")
+    report_lines.append(f"Ticks/phút (5m): {safe_mt5_data.get_tick_value('ticks_per_min_5m', 'N/A')}")
+    report_lines.append(f"Vị trí trong Daily Range: {safe_mt5_data.get('position_in_day_range', 'N/A'):.2f}")
+    report_lines.append(f"Phiên giao dịch đang hoạt động: {safe_mt5_data.get_active_session() or 'N/A'}")
+    report_lines.append(f"Phân tích tin tức: {mt5_data.get('news_analysis', {}).get('reason', 'N/A')}")
+    
+    # Thông tin tài khoản
+    account = mt5_data.get("account", {})
+    if account:
+        report_lines.append("\n--- THÔNG TIN TÀI KHOẢN ---")
+        report_lines.append(f"Balance: {account.get('balance', 'N/A'):.2f} {account.get('currency', '')}")
+        report_lines.append(f"Equity: {account.get('equity', 'N/A'):.2f} {account.get('currency', '')}")
+        report_lines.append(f"Free Margin: {account.get('free_margin', 'N/A'):.2f} {account.get('currency', '')}")
+        report_lines.append(f"Leverage: {account.get('leverage', 'N/A')}")
 
-    # Phần 2: Key Levels
-    report_lines.append("### Các Mức Giá Quan trọng (Key Levels)")
-    key_levels = mt5_data.get("key_levels_nearby", [])
-    if key_levels:
-        for level in key_levels:
-            report_lines.append(f"- {level.get('name')}: {level.get('price')} ({level.get('relation')})")
-    else:
-        report_lines.append("- Không có key levels đáng chú ý gần đây.")
-    report_lines.append("")
+    # Lệnh đang mở
+    positions = mt5_data.get("positions", [])
+    if positions:
+        report_lines.append("\n--- LỆNH ĐANG MỞ ---")
+        for pos in positions:
+            report_lines.append(f"- {pos.get('type')} {pos.get('volume')} @ {pos.get('price_open')} SL:{pos.get('sl')} TP:{pos.get('tp')} PnL:{pos.get('profit'):.2f}")
 
-    # Phần 3: Thông tin ICT Patterns
-    report_lines.append("### Các Mẫu hình ICT")
+    # Các mức giá quan trọng
+    report_lines.append("\n--- CÁC MỨC GIÁ QUAN TRỌNG ---")
+    daily_levels = mt5_data.get("levels", {}).get("daily", {})
+    if daily_levels:
+        report_lines.append(f"Daily Open: {daily_levels.get('open', 'N/A')}")
+        report_lines.append(f"Daily High: {daily_levels.get('high', 'N/A')}")
+        report_lines.append(f"Daily Low: {daily_levels.get('low', 'N/A')}")
+        report_lines.append(f"Daily EQ50: {daily_levels.get('eq50', 'N/A')}")
+    
+    key_levels_nearby = mt5_data.get("key_levels_nearby", [])
+    if key_levels_nearby:
+        report_lines.append("Key Levels Gần đây:")
+        for kl in key_levels_nearby:
+            report_lines.append(f"- {kl.get('name')}: {kl.get('price')} ({kl.get('relation')}, {kl.get('distance_pips'):.2f} pips)")
+
+    # Các mẫu ICT
     ict_patterns = mt5_data.get("ict_patterns", {})
     if ict_patterns:
-        for tf_key in ["h1", "m15"]: # Ưu tiên H1 trước
-            report_lines.append(f"#### Khung thời gian {tf_key.upper()}")
+        report_lines.append("\n--- CÁC MẪU ICT ---")
+        for k, v in ict_patterns.items():
+            if v:
+                report_lines.append(f"{k}: {v}")
 
-            # Premium/Discount
-            pd_data = ict_patterns.get(f"premium_discount_{tf_key}", {})
-            if pd_data:
-                report_lines.append(f"- Premium/Discount: {pd_data.get('status')} (Range: {pd_data.get('range_low')} - {pd_data.get('range_high')}, EQ: {pd_data.get('equilibrium')})")
-
-            # FVG
-            fvgs = ict_patterns.get(f"fvgs_{tf_key}")
-            if isinstance(fvgs, dict):
-                if fvgs.get("nearest_bullish"):
-                    fvg = fvgs["nearest_bullish"]
-                    report_lines.append(f"- FVG Bullish gần nhất: {fvg.get('bottom')} - {fvg.get('top')}")
-                if fvgs.get("nearest_bearish"):
-                    fvg = fvgs["nearest_bearish"]
-                    report_lines.append(f"- FVG Bearish gần nhất: {fvg.get('bottom')} - {fvg.get('top')}")
-
-            # Order Blocks
-            obs = ict_patterns.get(f"order_blocks_{tf_key}")
-            if isinstance(obs, dict):
-                if obs.get("nearest_bullish_ob"):
-                    ob = obs["nearest_bullish_ob"]
-                    report_lines.append(f"- OB Bullish gần nhất: {ob.get('bottom')} - {ob.get('top')}")
-                if obs.get("nearest_bearish_ob"):
-                    ob = obs["nearest_bearish_ob"]
-                    report_lines.append(f"- OB Bearish gần nhất: {ob.get('bottom')} - {ob.get('top')}")
-
-            # Liquidity
-            liquidity_data = ict_patterns.get(f"liquidity_{tf_key}")
-            if isinstance(liquidity_data, dict):
-                if liquidity_data.get("swing_highs_BSL"):
-                    report_lines.append(f"- BSL (Swing Highs): {len(liquidity_data['swing_highs_BSL'])} điểm, cao nhất {liquidity_data['swing_highs_BSL'][0].get('price')}")
-                if liquidity_data.get("swing_lows_SSL"):
-                    report_lines.append(f"- SSL (Swing Lows): {len(liquidity_data['swing_lows_SSL'])} điểm, thấp nhất {liquidity_data['swing_lows_SSL'][0].get('price')}")
-            
-            # Liquidity Voids
-            lvs = ict_patterns.get(f"liquidity_voids_{tf_key}", [])
-            if lvs:
-                report_lines.append(f"- Liquidity Voids: {len(lvs)} vùng")
-            report_lines.append("")
-    else:
-        report_lines.append("- Không có mẫu hình ICT nào được phát hiện.")
-    report_lines.append("")
-
-    # Phần 4: News Analysis
-    report_lines.append("### Phân tích Tin tức")
-    news_analysis = mt5_data.get("news_analysis", {})
-    report_lines.append(f"- Trong cửa sổ tin tức: {'Có' if news_analysis.get('is_in_news_window') else 'Không'}")
-    report_lines.append(f"- Lý do: {news_analysis.get('reason', 'N/A')}")
-    if news_analysis.get("upcoming_events"):
-        report_lines.append("- Các sự kiện sắp tới:")
-        for event in news_analysis["upcoming_events"]:
-            report_lines.append(f"  - {event.get('time')} {event.get('currency')} {event.get('impact')} {event.get('event')}")
-    report_lines.append("")
-
-    # Phần 5: JSON trích xuất (để AI dễ đọc)
-    report_lines.append("### [EXTRACT_JSON]")
-    extract_dict = _generate_extract_json(mt5_data)
-    report_lines.append(json.dumps(extract_dict, indent=2, ensure_ascii=False))
-    logger.debug("Kết thúc parse_mt5_data_to_report.")
-    return "\n".join(report_lines)
-
-def repair_json_string(s: str) -> str:
-    """
-    Attempts to repair a malformed JSON string by removing common issues.
-    This is a heuristic approach and may not fix all cases.
-    """
-    logger.debug("Bắt đầu repair_json_string.")
-    # Remove any leading/trailing non-JSON characters
-    s = s.strip()
-
-    # Remove comments (single-line // and multi-line /* */)
-    s = re.sub(r"//.*?\n", "", s)
-    s = re.sub(r"/\*[\s\S]*?\*/", "", s)
-
-    # Replace single quotes with double quotes for keys and string values
-    # This is a bit tricky and might break valid JSON if single quotes are part of a string
-    # A more robust solution would involve a proper JSON parser with error recovery
-    s = re.sub(r"(\s*['\"]?\w+['\"]?\s*:\s*)'([^']*)'", r'\1"\2"', s)
-    s = re.sub(r"'([^']*)'", r'"\1"', s)
-
-    # Ensure keys are double-quoted
-    s = re.sub(r"([{,]\s*)(\w+)(\s*:)", r'\1"\2"\3', s)
-
-    # Add missing commas between key-value pairs if they are on separate lines
-    # This is a heuristic and might introduce extra commas in some cases,
-    # but it's a common issue with LLM-generated JSON.
-    s = re.sub(r'(":\s*[^}\]]+)\s*\n\s*(")', r'\1,\n\2', s)
-
-    # Remove trailing commas before } or ]
-    s = re.sub(r",\s*([}\]])", r'\1', s)
-
-    # Attempt to balance brackets and braces
-    # This is a very basic attempt and might not work for complex cases
-    open_braces = s.count('{')
-    close_braces = s.count('}')
-    open_brackets = s.count('[')
-    close_brackets = s.count(']')
-
-    s += '}' * (open_braces - close_braces)
-    s += ']' * (open_brackets - close_brackets)
-    
-    # Remove any non-printable characters or control characters
-    s = ''.join(ch for ch in s if ch.isprintable() or ch in ('\n', '\t', '\r'))
-    logger.debug("Kết thúc repair_json_string.")
-    return s
+    result = "\n".join(report_lines)
+    logger.debug(f"Kết thúc parse_mt5_data_to_report. Độ dài báo cáo: {len(result)}.")
+    return result

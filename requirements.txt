@@ -6,3 +6,4 @@ matplotlib
 Pillow
 certifi
 python-dotenv
+scikit-learn

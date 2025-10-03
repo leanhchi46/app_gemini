@@ -15,6 +15,7 @@ from src.core.worker_modules import context_coordinator
 from src.core.worker_modules import image_processor
 from src.core.worker_modules import prompt_manager
 from src.core.worker_modules import trade_conditions
+from src.core.worker_modules import no_run_trade_conditions # Thêm import no_run_trade_conditions
 
 # Import các tiện ích và cấu hình cần thiết
 from src.utils import ui_utils
@@ -69,8 +70,11 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
         # --- GIAI ĐOẠN 2: KIỂM TRA ĐIỀU KIỆN NO-RUN ---
         logger.debug("GIAI ĐOẠN 2: Kiểm tra điều kiện NO-RUN.")
         # Chốt chặn đầu tiên: kiểm tra các điều kiện không nên chạy (cuối tuần, ngoài giờ, v.v.)
-        if trade_conditions.handle_no_run_check(app, cfg):
-            logger.info("Điều kiện No-Run được kích hoạt, thoát sớm.")
+        should_proceed, reason = no_run_trade_conditions.check_all_preconditions(
+            app, cfg, safe_mt5_data=None, mt5_dict={}, context_block="", mt5_json_full=""
+        )
+        if not should_proceed:
+            logger.info(f"Điều kiện No-Run được kích hoạt: {reason}, thoát sớm.")
             early_exit = True
             raise SystemExit("Điều kiện No-Run được kích hoạt.")
         logger.debug("Không có điều kiện No-Run nào được kích hoạt.")
@@ -82,6 +86,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
         prepared_map = {}
         to_upload = []
         file_slots = [None] * len(paths)
+        uploaded_files = [] # Khởi tạo đúng cách
 
         for i, (p, n) in enumerate(zip(paths, names)):
             cached_remote = image_processor.UploadCache.lookup(cache, p) if cache else ""
@@ -119,13 +124,14 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
         for i, f in enumerate(file_slots_from_upload):
             if f:
                 file_slots[i] = f
-        
+                uploaded_files.append((f, paths[i])) # Cập nhật uploaded_files
+
         if to_upload:
             app.ui_status(f"Upload xong {len(to_upload)} ảnh trong {(_tnow()-t_up0):.2f}s")
             logger.debug(f"Upload xong {len(to_upload)} ảnh trong {(_tnow()-t_up0):.2f}s.")
 
         if cfg.cache_enabled:
-            for (f, p) in uploaded_files: # uploaded_files ở đây có vẻ không được dùng đúng cách, cần xem lại
+            for (f, p) in uploaded_files:
                 image_processor.UploadCache.put(cache, p, f.name)
             image_processor.UploadCache.save(cache)
             logger.debug("Cache upload đã được cập nhật và lưu.")
@@ -142,8 +148,11 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
         logger.debug(f"Context+MT5 xong trong {(_tnow()-t_ctx0):.2f}s.")
 
         # Chốt chặn thứ hai: kiểm tra các điều kiện không nên giao dịch (tin tức, rủi ro, v.v.)
-        if trade_conditions.handle_no_trade_check(app, cfg, safe_mt5_data, mt5_dict, context_block, mt5_json_full):
-            logger.info("Điều kiện No-Trade được kích hoạt, thoát sớm.")
+        should_proceed_trade, no_trade_reason = no_run_trade_conditions.check_all_preconditions(
+            app, cfg, safe_mt5_data, mt5_dict, context_block, mt5_json_full
+        )
+        if not should_proceed_trade:
+            logger.info(f"Điều kiện No-Trade được kích hoạt: {no_trade_reason}, thoát sớm.")
             early_exit = True
             raise SystemExit("Điều kiện No-Trade được kích hoạt.")
         logger.debug("Không có điều kiện No-Trade nào được kích hoạt.")
@@ -226,7 +235,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
         # Dọn dẹp file đã upload nếu được cấu hình
         if not cfg.cache_enabled and cfg.delete_after:
             for uf, _ in uploaded_files: # uploaded_files ở đây có vẻ không được dùng đúng cách, cần xem lại
-                app._maybe_delete(uf)
+                image_processor.delete_uploaded_file(uf)
             logger.debug("Đã dọn dẹp các file đã upload (nếu được cấu hình).")
         
         # Báo cho luồng chính biết worker đã hoàn thành và reset thanh tiến trình

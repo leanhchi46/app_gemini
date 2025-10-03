@@ -29,12 +29,13 @@ from src.utils.utils import (
 )
 from src.utils import ui_utils
 from src.utils import ui_builder
-from src.utils import report_parser # Giữ lại vì một số hàm vẫn dùng trực tiếp
+from src.utils import report_parser
 from src.utils import mt5_utils # Cần cho _mt5_build_context
 from src.ui import history_manager
 from src.ui import prompt_manager
 from src.ui import timeframe_detector
 from src.config import workspace_manager
+from src.core.worker_modules import image_processor # Thêm import image_processor
 
 
 class TradingToolApp:
@@ -240,7 +241,7 @@ class TradingToolApp:
         Làm mới bộ đệm tin tức từ Forex Factory nếu dữ liệu đã cũ (quá thời gian `ttl`).
         Có thể chạy đồng bộ hoặc không đồng bộ.
         """
-        logging.debug(f"Gọi app_logic._refresh_news_cache từ UI. Async: {async_fetch}, TTL: {ttl}")
+        logging.debug(f"Gọi app_logic._refresh_news_cache từ UI. Async: {async_fetch}, TTL: {ttl}.")
         self.app_logic._refresh_news_cache(self, ttl, async_fetch=async_fetch, cfg=cfg)
 
     def _toggle_api_visibility(self):
@@ -255,7 +256,7 @@ class TradingToolApp:
         Ghi lại các quyết định hoặc sự kiện quan trọng vào file log JSONL.
         Sử dụng khóa (lock) để đảm bảo an toàn khi ghi file từ nhiều luồng.
         """
-        logging.debug(f"Gọi app_logic._log_trade_decision từ UI. Data keys: {data.keys()}")
+        logging.debug(f"Gọi app_logic._log_trade_decision từ UI. Data keys: {data.keys()}.")
         self.app_logic._log_trade_decision(self, data, folder_override)
 
     def _maybe_notify_telegram(self, report_text: str, report_path: Path | None, cfg: "RunConfig"):
@@ -328,6 +329,7 @@ class TradingToolApp:
         để tìm các tệp ảnh hợp lệ (có phần mở rộng được hỗ trợ).
         Cập nhật danh sách tệp trên giao diện.
         """
+        logging.debug(f"Đang tải file từ thư mục: {folder}.")
         self.results.clear()
         self.combined_report_text = ""
         if hasattr(self, "tree"):
@@ -351,6 +353,7 @@ class TradingToolApp:
         ui_utils.ui_progress(self, 0)
         if hasattr(self, "detail_text"):
             ui_utils.ui_detail_replace(self, "Báo cáo tổng hợp sẽ hiển thị tại đây sau khi phân tích.")
+        logging.debug(f"Đã tải {count} file từ thư mục {folder}.")
 
     def start_analysis(self):
         """
@@ -374,38 +377,43 @@ class TradingToolApp:
         Tìm và trích xuất một khối JSON cân bằng (balanced JSON block) từ một chuỗi văn bản,
         bắt đầu từ một chỉ mục cụ thể.
         """
+        logging.debug(f"Gọi report_parser.find_balanced_json_after từ UI. Start index: {start_idx}.")
         return report_parser.find_balanced_json_after(text, start_idx)
 
     def _extract_json_block_prefer(self, text: str):
         """
         Trích xuất khối JSON từ một chuỗi văn bản, ưu tiên các khối JSON hoàn chỉnh và hợp lệ.
         """
+        logging.debug("Gọi report_parser.extract_json_block_prefer từ UI.")
         return report_parser.extract_json_block_prefer(text)
 
     def _coerce_setup_from_json(self, obj):
         """
         Chuyển đổi một đối tượng Python (thường là từ JSON) thành đối tượng TradeSetup.
         """
+        logging.debug("Gọi report_parser.coerce_setup_from_json từ UI.")
         return report_parser.coerce_setup_from_json(obj)
 
     def _parse_float(self, s: str):
         """
         Phân tích một chuỗi thành số thực (float).
         """
+        logging.debug(f"Gọi report_parser.parse_float từ UI. Chuỗi: '{s}'.")
         return report_parser.parse_float(s)
 
     def _parse_direction_from_line1(self, line1: str):
         """
         Phân tích hướng giao dịch (Buy/Sell) từ dòng đầu tiên của báo cáo.
         """
+        logging.debug(f"Gọi report_parser.parse_direction_from_line1 từ UI. Dòng: '{line1}'.")
         return report_parser.parse_direction_from_line1(line1)
 
     def _maybe_delete(self, uploaded_file):
         """
         Thực hiện xóa file đã upload lên Gemini nếu cấu hình cho phép.
         """
-        logging.debug(f"Gọi app_logic._maybe_delete từ UI. Uploaded file: {uploaded_file}")
-        self.app_logic._maybe_delete(uploaded_file)
+        logging.debug(f"Gọi image_processor.delete_uploaded_file từ UI. Uploaded file: {uploaded_file}.")
+        image_processor.delete_uploaded_file(uploaded_file)
 
     def _update_progress(self, done_steps, total_steps):
         """
@@ -419,6 +427,7 @@ class TradingToolApp:
         """
         Cập nhật trạng thái của một hàng (file) trong bảng hiển thị trên giao diện.
         """
+        logging.debug(f"Cập nhật trạng thái tree row {idx}: {status}.")
         def action():
             iid = str(idx)
             if self.tree.exists(iid):
@@ -432,6 +441,7 @@ class TradingToolApp:
         Hoàn tất quá trình phân tích khi tất cả các file đã được xử lý.
         Ghi log kết thúc, cập nhật trạng thái giao diện và lên lịch cho lần chạy tự động tiếp theo (nếu bật).
         """
+        logging.debug("Gọi app_logic._finalize_stopped từ UI (finalize_done).")
         self.app_logic._finalize_stopped(self)
 
     def _finalize_stopped(self):
@@ -453,12 +463,14 @@ class TradingToolApp:
             self.detail_text.insert("1.0", self.combined_report_text)
         else:
             self.detail_text.insert("1.0", "Chưa có báo cáo. Hãy bấm 'Bắt đầu'.")
+        logging.debug("Đã cập nhật detail_text sau khi chọn hàng.")
 
     def export_markdown(self):
         """
         Xuất báo cáo phân tích tổng hợp ra file Markdown.
         Mở hộp thoại lưu file để người dùng chọn vị trí và tên file.
         """
+        logging.debug("Đang xuất báo cáo Markdown.")
         report_text = self.combined_report_text or ""
         folder = self.folder_path.get()
         files = [r["name"] for r in self.results if r.get("path")]
@@ -481,17 +493,21 @@ class TradingToolApp:
             initialfile="bao_cao_gemini_folder.md",
         )
         if not out_path:
+            logging.debug("Người dùng đã hủy lưu báo cáo Markdown.")
             return
         try:
             Path(out_path).write_text("\n".join(md), encoding="utf-8")
             ui_utils.ui_message(self, "info", "Thành công", f"Đã lưu: {out_path}")
+            logging.info(f"Đã lưu báo cáo Markdown thành công tại: {out_path}.")
         except Exception as e:
             ui_utils.ui_message(self, "error", "Lỗi ghi file", str(e))
+            logging.error(f"Lỗi khi ghi báo cáo Markdown: {e}.")
 
     def clear_results(self):
         """
         Xóa tất cả các kết quả phân tích hiện có khỏi giao diện và bộ nhớ.
         """
+        logging.debug("Đang xóa tất cả kết quả phân tích.")
         self.results.clear()
         self.combined_report_text = ""
         if hasattr(self, "tree"):
@@ -500,24 +516,28 @@ class TradingToolApp:
             ui_utils.ui_detail_replace(self, "Báo cáo tổng hợp sẽ hiển thị tại đây sau khi phân tích.")
         ui_utils.ui_progress(self, 0)
         ui_utils.ui_status(self, "Đã xoá kết quả khỏi giao diện.")
+        logging.debug("Đã xóa kết quả phân tích khỏi giao diện và bộ nhớ.")
 
     def _refresh_history_list(self):
         """
         Làm mới danh sách các báo cáo lịch sử (file report_*.md) trong thư mục "Reports"
         và hiển thị chúng trên giao diện.
         """
+        logging.debug("Gọi history_manager._refresh_history_list từ UI.")
         history_manager._refresh_history_list(self)
 
     def _preview_history_selected(self):
         """
         Hiển thị nội dung của báo cáo lịch sử được chọn trong khu vực chi tiết trên giao diện.
         """
+        logging.debug("Gọi history_manager._preview_history_selected từ UI.")
         history_manager._preview_history_selected(self)
 
     def _open_history_selected(self):
         """
         Mở báo cáo lịch sử được chọn bằng ứng dụng mặc định của hệ điều hành.
         """
+        logging.debug("Gọi history_manager._open_history_selected từ UI.")
         history_manager._open_history_selected(self)
 
     def _open_path(self, path: Path):
@@ -525,18 +545,21 @@ class TradingToolApp:
         Mở một tệp hoặc thư mục bằng ứng dụng mặc định của hệ điều hành.
         Hỗ trợ các hệ điều hành Windows, macOS và Linux.
         """
+        logging.debug(f"Gọi ui_utils._open_path từ UI. Path: {path}.")
         ui_utils._open_path(self, path)
 
     def _delete_history_selected(self):
         """
         Xóa báo cáo lịch sử được chọn khỏi hệ thống và làm mới danh sách trên giao diện.
         """
+        logging.debug("Gọi history_manager._delete_history_selected từ UI.")
         history_manager._delete_history_selected(self)
 
     def _open_reports_folder(self):
         """
         Mở thư mục "Reports" bằng ứng dụng mặc định của hệ điều hành.
         """
+        logging.debug("Gọi history_manager._open_reports_folder từ UI.")
         history_manager._open_reports_folder(self)
 
     def _refresh_json_list(self):
@@ -544,30 +567,35 @@ class TradingToolApp:
         Làm mới danh sách các file JSON ngữ cảnh (ctx_*.json) trong thư mục "Reports"
         và hiển thị chúng trên giao diện.
         """
+        logging.debug("Gọi history_manager._refresh_json_list từ UI.")
         history_manager._refresh_json_list(self)
 
     def _preview_json_selected(self):
         """
         Hiển thị nội dung của file JSON ngữ cảnh được chọn trong khu vực chi tiết trên giao diện.
         """
+        logging.debug("Gọi history_manager._preview_json_selected từ UI.")
         history_manager._preview_json_selected(self)
 
     def _load_json_selected(self):
         """
         Mở file JSON ngữ cảnh được chọn bằng ứng dụng mặc định của hệ điều hành.
         """
+        logging.debug("Gọi history_manager._load_json_selected từ UI.")
         history_manager._load_json_selected(self)
 
     def _delete_json_selected(self):
         """
         Xóa file JSON ngữ cảnh được chọn khỏi hệ thống và làm mới danh sách trên giao diện.
         """
+        logging.debug("Gọi history_manager._delete_json_selected từ UI.")
         history_manager._delete_json_selected(self)
 
     def _open_json_folder(self):
         """
         Mở thư mục chứa các file JSON ngữ cảnh bằng ứng dụng mặc định của hệ điều hành.
         """
+        logging.debug("Gọi history_manager._open_json_folder từ UI.")
         history_manager._open_json_folder(self)
 
     def _detect_timeframe_from_name(self, name: str) -> str:
@@ -575,12 +603,14 @@ class TradingToolApp:
         Phát hiện khung thời gian (timeframe) từ tên file ảnh bằng cách sử dụng các mẫu regex.
         Ví dụ: "EURUSD_M5.png" sẽ trả về "M5".
         """
+        logging.debug(f"Gọi timeframe_detector._detect_timeframe_from_name từ UI. Tên file: {name}.")
         return timeframe_detector._detect_timeframe_from_name(name)
 
     def _build_timeframe_section(self, names):
         """
         Xây dựng một chuỗi văn bản liệt kê các file ảnh và khung thời gian tương ứng của chúng.
         """
+        logging.debug(f"Gọi timeframe_detector._build_timeframe_section từ UI. Số tên file: {len(names)}.")
         return timeframe_detector._build_timeframe_section(names)
 
     def _toggle_autorun(self):
@@ -603,6 +633,7 @@ class TradingToolApp:
         """
         Lên lịch cho lần chạy tự động tiếp theo sau một khoảng thời gian nhất định.
         """
+        logging.debug("Gọi app_logic._schedule_next_autorun từ UI.")
         self.app_logic._schedule_next_autorun(self)
 
     def _autorun_tick(self):
@@ -611,6 +642,7 @@ class TradingToolApp:
         Nếu không có phân tích nào đang chạy, bắt đầu một phân tích mới.
         Nếu đang chạy, thực hiện các tác vụ nền như quản lý BE/Trailing.
         """
+        logging.debug("Gọi app_logic._autorun_tick từ UI.")
         self.app_logic._autorun_tick(self)
 
     def _pick_mt5_terminal(self):
@@ -649,6 +681,7 @@ class TradingToolApp:
         Xây dựng đối tượng ngữ cảnh MetaTrader 5 (SafeMT5Data) chứa dữ liệu thị trường hiện tại
         (giá nến, thông tin tài khoản, các lệnh đang mở...).
         """
+        logging.debug("Gọi mt5_utils.build_context_from_app từ UI.")
         return mt5_utils.build_context_from_app(self, plan, cfg)
 
     def _mt5_snapshot_popup(self):
@@ -687,7 +720,7 @@ class TradingToolApp:
         Tải nội dung các file prompt từ đĩa (`prompt_no_entry.txt` và `prompt_entry_run.txt`)
         và hiển thị chúng trên các tab prompt tương ứng.
         """
-        logging.debug(f"Gọi prompt_manager._load_prompts_from_disk từ UI. Silent: {silent}")
+        logging.debug(f"Gọi prompt_manager._load_prompts_from_disk từ UI. Silent: {silent}.")
         prompt_manager._load_prompts_from_disk(self, silent)
 
     def _save_current_prompt_to_disk(self):
@@ -710,6 +743,7 @@ class TradingToolApp:
         Tải cấu hình và trạng thái ứng dụng từ file `workspace.json` khi khởi động.
         Giải mã các thông tin nhạy cảm đã được mã hóa.
         """
+        logging.debug("Gọi workspace_manager._load_workspace từ UI.")
         workspace_manager._load_workspace(self)
 
     def _delete_workspace(self):

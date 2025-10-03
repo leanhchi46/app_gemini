@@ -4,6 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 import re
 from typing import TYPE_CHECKING
+import logging # Thêm import logging
+
+logger = logging.getLogger(__name__) # Khởi tạo logger
 
 
 def _detect_timeframe_from_name(name: str) -> str:
@@ -11,6 +14,7 @@ def _detect_timeframe_from_name(name: str) -> str:
     Phát hiện khung thời gian (timeframe) từ tên file ảnh bằng cách sử dụng các mẫu regex.
     Ví dụ: "EURUSD_M5.png" sẽ trả về "M5".
     """
+    logger.debug(f"Bắt đầu _detect_timeframe_from_name cho tên file: {name}")
     s = Path(name).stem.lower()
 
     # Các mẫu regex để nhận dạng khung thời gian từ tên tệp.
@@ -30,21 +34,30 @@ def _detect_timeframe_from_name(name: str) -> str:
 
     for tf, pat in patterns:
         if re.search(pat, s):
+            logger.debug(f"Đã phát hiện timeframe '{tf}' cho '{name}' bằng pattern '{pat}'.")
             return tf
+    logger.debug(f"Không phát hiện được timeframe cho '{name}', trả về '?'.")
     return "?"
 
 def _build_timeframe_section(names: list[str]) -> str:
     """
     Xây dựng một chuỗi văn bản liệt kê các file ảnh và khung thời gian tương ứng của chúng.
     """
+    logger.debug(f"Bắt đầu _build_timeframe_section với {len(names)} tên file.")
     lines = []
     for n in names:
         tf = _detect_timeframe_from_name(n)
         lines.append(f"- {n} ⇒ {tf}")
-    return "\n".join(lines)
+        logger.debug(f"Đã thêm '{n} ⇒ {tf}' vào section.")
+    result = "\n".join(lines)
+    logger.debug("Kết thúc _build_timeframe_section.")
+    return result
 
 def images_tf_map(names: list[str], detect_timeframe_func) -> dict[str, str]:
     """
     Tạo một bản đồ (dictionary) từ tên file ảnh sang khung thời gian (timeframe) tương ứng.
     """
-    return {name: detect_timeframe_func(name) for name in names}
+    logger.debug(f"Bắt đầu images_tf_map với {len(names)} tên file.")
+    result = {name: detect_timeframe_func(name) for name in names}
+    logger.debug(f"Kết thúc images_tf_map. Map: {result}")
+    return result

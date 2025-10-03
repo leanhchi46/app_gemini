@@ -1,4 +1,7 @@
 from dataclasses import dataclass
+import logging # Thêm import logging
+
+logger = logging.getLogger(__name__) # Khởi tạo logger
 
 
 @dataclass(frozen=True)

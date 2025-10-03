@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import logging
+import logging # Thêm import logging
 import os
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__) # Khởi tạo logger
 
 from src.config.constants import WORKSPACE_JSON, API_KEY_ENC, DEFAULT_MODEL
 from src.utils.utils import obfuscate_text, deobfuscate_text
@@ -21,6 +23,7 @@ def _save_workspace(app: "TradingToolApp"):
     Lưu toàn bộ cấu hình và trạng thái hiện tại của ứng dụng vào file `workspace.json`.
     Các thông tin nhạy cảm như Telegram token được mã hóa trước khi lưu.
     """
+    logger.debug("Bắt đầu _save_workspace.")
     data = {
         "prompt_file_path": app.prompt_file_path_var.get().strip(),
         "auto_load_prompt_txt": bool(app.auto_load_prompt_txt_var.get()),
@@ -89,8 +92,8 @@ def _save_workspace(app: "TradingToolApp"):
         "news_block_before_min": int(app.trade_news_block_before_min_var.get()),
         "news_block_after_min": int(app.trade_news_block_after_min_var.get()),
 
-        "norun_weekend": bool(app.norun_weekend_var.get()),
-        "norun_killzone": bool(app.norun_killzone_var.get()),
+        "no_run_weekend_enabled": bool(app.norun_weekend_var.get()), # Cập nhật tên biến
+        "no_run_killzone_enabled": bool(app.norun_killzone_var.get()), # Cập nhật tên biến
         # Thêm các biến trạng thái MT5 reconnect/check
         "mt5_reconnect_attempts": app.app_logic._mt5_reconnect_attempts,
         "mt5_max_reconnect_attempts": app.app_logic._mt5_max_reconnect_attempts,
@@ -100,30 +103,31 @@ def _save_workspace(app: "TradingToolApp"):
     try:
         WORKSPACE_JSON.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         ui_utils.ui_message(app, "info", "Workspace", "Đã lưu workspace.")
-        logging.info("Workspace: Đã lưu workspace thành công.")
+        logger.info("Workspace: Đã lưu workspace thành công.")
     except Exception as e:
         ui_utils.ui_message(app, "error", "Workspace", str(e))
-        logging.error(f"Workspace: Lỗi khi lưu workspace: {e}")
+        logger.error(f"Workspace: Lỗi khi lưu workspace: {e}")
 
 def _load_workspace(app: "TradingToolApp"):
     """
     Tải cấu hình và trạng thái ứng dụng từ file `workspace.json` khi khởi động.
     Giải mã các thông tin nhạy cảm đã được mã hóa.
     """
+    logger.debug("Bắt đầu _load_workspace.")
     if not WORKSPACE_JSON.exists():
-        logging.info("Workspace: File workspace.json không tồn tại, bỏ qua tải.")
+        logger.info("Workspace: File workspace.json không tồn tại, bỏ qua tải.")
         return
     try:
         data = json.loads(WORKSPACE_JSON.read_text(encoding="utf-8"))
         ui_utils.ui_message(app, "info", "Workspace", "Đã khôi phục workspace.")
-        logging.info("Workspace: Đã tải workspace thành công.")
+        logger.info("Workspace: Đã tải workspace thành công.")
     except json.JSONDecodeError as e:
         ui_utils.ui_message(app, "error", "Workspace", f"Lỗi đọc file workspace.json: {e}")
-        logging.error(f"Workspace: Lỗi JSON khi tải workspace: {e}")
+        logger.error(f"Workspace: Lỗi JSON khi tải workspace: {e}")
         return
     except Exception as e:
         ui_utils.ui_message(app, "error", "Workspace", f"Lỗi không xác định khi tải workspace: {e}")
-        logging.error(f"Workspace: Lỗi không xác định khi tải workspace: {e}")
+        logger.error(f"Workspace: Lỗi không xác định khi tải workspace: {e}")
         return
 
     app.prompt_file_path_var.set(data.get("prompt_file_path", ""))
@@ -201,8 +205,8 @@ def _load_workspace(app: "TradingToolApp"):
     app.trade_news_block_before_min_var.set(int(data.get("news_block_before_min", 15)))
     app.trade_news_block_after_min_var.set(int(data.get("news_block_after_min", 15)))
 
-    app.norun_weekend_var.set(bool(data.get("norun_weekend", True)))
-    app.norun_killzone_var.set(bool(data.get("norun_killzone", True)))
+    app.norun_weekend_var.set(bool(data.get("no_run_weekend_enabled", True))) # Cập nhật tên biến
+    app.norun_killzone_var.set(bool(data.get("no_run_killzone_enabled", True))) # Cập nhật tên biến
 
     # Tải các biến trạng thái MT5 reconnect/check
     app.app_logic._mt5_reconnect_attempts = int(data.get("mt5_reconnect_attempts", 0))
