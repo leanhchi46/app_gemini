@@ -2,83 +2,76 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Generator, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 import google.generativeai as genai
 from google.api_core import exceptions
 
+from APP.core.trading import actions as trade_actions
+from APP.ui.utils import ui_builder
+
 if TYPE_CHECKING:
+    from APP.configs.app_config import RunConfig
     from APP.ui.app_ui import AppUI
 
 logger = logging.getLogger(__name__)
 
 
-def _call_gemini_with_retry(
-    model: genai.GenerativeModel,
-    parts: List[Any],
-    stream: bool,
-    tries: int = 5,
-    base_delay: float = 2.0,
-) -> Any:
+def _gen_stream_with_retry(_model: genai.GenerativeModel, _parts: List[Any], tries: int = 5, base_delay: float = 2.0) -> Any:
     """
-    Gọi API Gemini với cơ chế thử lại (retry) và exponential backoff.
-    Hỗ trợ cả chế độ streaming và non-streaming.
+    Tạo một generator để gọi API Gemini streaming với cơ chế thử lại.
     """
+    logger.debug(f"Bắt đầu hàm _gen_stream_with_retry với {tries} lần thử.")
     last_exception = None
     for i in range(tries):
         try:
-            # API call with a generous timeout
-            return model.generate_content(
-                parts, stream=stream, request_options={"timeout": 1200}
-            )
+            response_stream = _model.generate_content(_parts, stream=True, request_options={"timeout": 1200})
+            for chunk in response_stream:
+                yield chunk
+            return
         except exceptions.ResourceExhausted as e:
             last_exception = e
-            wait_time = base_delay * (2**i)
-            logger.warning(
-                f"Lần thử {i + 1}: Lỗi ResourceExhausted. Thử lại sau {wait_time:.2f}s. Chi tiết: {e}"
-            )
+            wait_time = base_delay * (2 ** i)
+            logger.warning(f"Lần thử {i+1}: Lỗi ResourceExhausted. Thử lại sau {wait_time:.2f} giây.")
             time.sleep(wait_time)
         except Exception as e:
             last_exception = e
-            wait_time = base_delay * (i + 1)
-            logger.error(
-                f"Lần thử {i + 1}: Lỗi không xác định. Thử lại sau {wait_time:.2f}s. Chi tiết: {e}"
-            )
-            time.sleep(wait_time)
+            logger.error(f"Lần thử {i+1}: Lỗi không xác định. Thử lại sau {base_delay:.2f} giây.")
+            time.sleep(base_delay)
+            base_delay *= 1.7
+        
+        if i == tries - 1:
+            logger.error(f"Tất cả {tries} lần thử đều thất bại.")
+            raise last_exception
 
-    logger.error(f"Tất cả {tries} lần thử đều thất bại.")
-    raise last_exception
 
-
-def gemini_api_call(model: genai.GenerativeModel, parts: List[Any]) -> str:
+def stream_gemini_response(app: "AppUI", cfg: "RunConfig", model: genai.GenerativeModel, parts: List[Any], mt5_dict: Dict) -> str:
     """
-    Thực hiện một lệnh gọi non-streaming đến API Gemini để lấy kết quả hoàn chỉnh.
+    Thực hiện gọi API streaming và xử lý các chunk trả về.
+    Tách biệt logic gọi API khỏi logic xử lý nghiệp vụ (auto-trade).
     """
-    logger.debug("Thực hiện lệnh gọi non-streaming đến Gemini API.")
-    response = _call_gemini_with_retry(model, parts, stream=False)
-    return getattr(response, "text", "[Không có nội dung trả về]")
+    logger.debug("Bắt đầu hàm stream_gemini_response.")
+    combined_text = ""
+    
+    ui_builder.ui_detail_replace(app, "Đang nhận dữ liệu từ AI...")
+    stream_generator = _gen_stream_with_retry(model, parts)
+    
+    for chunk in stream_generator:
+        if app.stop_flag:
+            logger.info("Người dùng đã dừng quá trình nhận dữ liệu AI.")
+            if hasattr(stream_generator, 'close'):
+                stream_generator.close()
+            raise SystemExit("Dừng bởi người dùng.")
 
+        chunk_text = getattr(chunk, "text", "")
+        if chunk_text:
+            combined_text += chunk_text
+            ui_builder.enqueue(app, lambda: ui_builder.ui_detail_replace(app, combined_text))
+            
+            # Logic auto-trade sẽ được gọi từ analysis_worker sau khi stream hoàn tất
+            # hoặc theo một logic khác, không nằm trong service này.
 
-def stream_gemini_response(
-    app: AppUI, model: genai.GenerativeModel, parts: List[Any]
-) -> Generator[str, None, None]:
-    """
-    Tạo một generator để stream dữ liệu từ API Gemini.
-    Hàm này yield từng chunk text nhận được.
-    """
-    logger.debug("Bắt đầu stream dữ liệu từ Gemini API.")
-    try:
-        stream_generator = _call_gemini_with_retry(model, parts, stream=True)
-        for chunk in stream_generator:
-            if app.stop_flag:
-                logger.info("Người dùng đã dừng quá trình nhận dữ liệu AI.")
-                if hasattr(stream_generator, "close"):
-                    stream_generator.close()
-                break
+    logger.debug(f"Kết thúc stream_gemini_response. Tổng độ dài: {len(combined_text)}.")
+    return combined_text or "[Không có nội dung trả về]"
 
-            chunk_text = getattr(chunk, "text", "")
-            if chunk_text:
-                yield chunk_text
-    except Exception as e:
-        logger.error(f"Lỗi nghiêm trọng trong quá trình stream: {e}", exc_info=True)
-        yield f"\n\n[LỖI STREAM] Đã xảy ra lỗi khi giao tiếp với API: {e}"
+__all__ = ["stream_gemini_response"]

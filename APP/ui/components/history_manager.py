@@ -19,7 +19,8 @@ class HistoryManager:
 
     def refresh_history_list(self):
         """Làm mới danh sách các báo cáo lịch sử (report_*.md)."""
-        if not hasattr(self.app, "history_list"): return
+        if not hasattr(self.app, "history_list"):
+            return
         self.app.history_list.delete(0, "end")
         reports_dir = self.app.get_reports_dir()
         if reports_dir:
@@ -31,7 +32,8 @@ class HistoryManager:
     def preview_history_selected(self):
         """Hiển thị nội dung của báo cáo lịch sử được chọn."""
         sel = self.app.history_list.curselection()
-        if not sel: return
+        if not sel:
+            return
         p = self.app._history_files[sel[0]]
         try:
             txt = p.read_text(encoding="utf-8", errors="ignore")
@@ -43,14 +45,16 @@ class HistoryManager:
     def open_history_selected(self):
         """Mở báo cáo lịch sử được chọn."""
         sel = self.app.history_list.curselection()
-        if not sel: return
+        if not sel:
+            return
         p = self.app._history_files[sel[0]]
         ui_builder.open_path(self.app, p)
 
     def delete_history_selected(self):
         """Xóa báo cáo lịch sử được chọn."""
         sel = self.app.history_list.curselection()
-        if not sel: return
+        if not sel:
+            return
         p = self.app._history_files[sel[0]]
         try:
             p.unlink()
@@ -68,7 +72,8 @@ class HistoryManager:
 
     def refresh_json_list(self):
         """Làm mới danh sách các tệp ngữ cảnh JSON (ctx_*.json)."""
-        if not hasattr(self.app, "json_list"): return
+        if not hasattr(self.app, "json_list"):
+            return
         self.app.json_list.delete(0, "end")
         reports_dir = self.app.get_reports_dir()
         if reports_dir:
@@ -80,7 +85,8 @@ class HistoryManager:
     def preview_json_selected(self):
         """Hiển thị nội dung của tệp JSON được chọn."""
         sel = self.app.json_list.curselection()
-        if not sel: return
+        if not sel:
+            return
         p = self.app.json_files[sel[0]]
         try:
             txt = p.read_text(encoding="utf-8", errors="ignore")
@@ -92,7 +98,8 @@ class HistoryManager:
     def delete_json_selected(self):
         """Xóa tệp JSON được chọn."""
         sel = self.app.json_list.curselection()
-        if not sel: return
+        if not sel:
+            return
         p = self.app.json_files[sel[0]]
         try:
             p.unlink()

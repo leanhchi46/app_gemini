@@ -3,7 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 import logging
-from typing import Any, Tuple, Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from APP.ui.app_ui import AppUI
@@ -28,6 +28,7 @@ class ChartTab:
         self.root = app.root
         self.tab = ttk.Frame(notebook, padding=8)
         notebook.add(self.tab, text="Chart")
+        self.chart_enabled = all((Figure, FigureCanvasTkAgg, candlestick_ohlc, NavigationToolbar2Tk))
 
         self._init_vars()
         self._setup_layout()
@@ -83,7 +84,7 @@ class ChartTab:
         chart_wrap.rowconfigure(1, weight=1)
         chart_wrap.columnconfigure(0, weight=1)
 
-        if not all((Figure, FigureCanvasTkAgg, candlestick_ohlc, NavigationToolbar2Tk)):
+        if not self.chart_enabled:
             ttk.Label(chart_wrap, text="Matplotlib/mplfinance chưa được cài đặt.").grid(row=0, column=0)
             return
 
@@ -108,7 +109,8 @@ class ChartTab:
         # ... (Positions and History treeviews setup from original file)
 
     def start(self):
-        if self._running: return
+        if self._running:
+            return
         self._running = True
         self._tick()
 
@@ -119,12 +121,15 @@ class ChartTab:
             self._after_job = None
 
     def _tick(self):
-        if not self._running: return
+        if not self._running:
+            return
         self._redraw_safe()
         secs = max(1, self.refresh_secs_var.get())
         self._after_job = self.root.after(secs * 1000, self._tick)
 
     def _redraw_safe(self):
+        if not self.chart_enabled:
+            return
         try:
             self._draw_chart()
             # ... (update other panels)

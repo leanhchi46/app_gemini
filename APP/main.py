@@ -1,51 +1,90 @@
 # -*- coding: utf-8 -*-
 """
-ỨNG DỤNG: PHÂN TÍCH ẢNH HÀNG LOẠT VÀ GIAO DỊCH TỰ ĐỘNG
-================================================================
-Mục tiêu:
-- Tự động nạp và phân tích ảnh từ một thư mục.
-- Tích hợp dữ liệu từ MetaTrader 5 để làm giàu ngữ cảnh.
-- Sử dụng Google Gemini để tạo báo cáo phân tích theo mẫu.
-- Hỗ trợ các tính năng nâng cao: cache ảnh, gửi thông báo Telegram, và tự động giao dịch.
+Điểm khởi đầu của ứng dụng.
+
+Khởi tạo và chạy giao diện người dùng chính của ứng dụng giao dịch.
 """
 
 from __future__ import annotations
 
+import argparse
+import logging
 import sys
 import tkinter as tk
 from pathlib import Path
-import logging
+from typing import Optional
 
-# Thêm thư mục gốc của dự án vào sys.path để có thể import các module từ `APP`
-# Điều này đảm bảo script có thể chạy từ bất kỳ đâu và vẫn tìm thấy module APP.
-project_root = Path(__file__).resolve().parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
+# Thêm thư mục gốc của dự án vào sys.path
+try:
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+except (NameError, IndexError):
+    project_root = Path.cwd()
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 
+from APP.configs import workspace_config
 from APP.persistence.log_handler import setup_logging
 from APP.ui.app_ui import AppUI
 
 logger = logging.getLogger(__name__)
 
-def main():
+
+def parse_arguments() -> argparse.Namespace:
+    """
+    Phân tích các đối số dòng lệnh được truyền vào khi chạy ứng dụng.
+    """
+    parser = argparse.ArgumentParser(description="Ứng dụng Giao dịch và Phân tích Tự động.")
+    parser.add_argument(
+        "--workspace",
+        type=str,
+        default=None,
+        help="Đường dẫn đến file workspace.json cần tải khi khởi động.",
+    )
+    return parser.parse_args()
+
+
+def main(workspace_path: Optional[str] = None) -> None:
     """
     Hàm chính để khởi tạo và chạy ứng dụng.
-    Thiết lập cấu hình ghi log và khởi tạo giao diện người dùng.
+
+    Thực hiện các bước:
+    1. Thiết lập logging.
+    2. Tải cấu hình ban đầu từ file workspace.
+    3. Khởi tạo cửa sổ chính Tkinter.
+    4. Tạo instance của AppUI, truyền cấu hình vào.
+    5. Thiết lập xử lý tắt ứng dụng an toàn (graceful shutdown).
+    6. Bắt đầu vòng lặp sự kiện chính.
     """
     try:
         setup_logging()
-        logger.debug("Đã thiết lập logging trong main.")
-        logging.info("Ứng dụng đang khởi động.")
+        
+        # Đảm bảo thư mục làm việc tồn tại trước khi thực hiện bất kỳ thao tác nào khác
+        workspace_config.setup_workspace()
+        
+        logger.info("Ứng dụng đang khởi động...")
+
+        # Tải cấu hình ban đầu một cách tường minh
+        initial_config = workspace_config.load_config_from_file(workspace_path)
 
         root = tk.Tk()
-        # Giả định AppUI sẽ được tái cấu trúc để không cần app_logic
-        # Lớp logic sẽ được tích hợp vào các thành phần phù hợp khác.
-        app = AppUI(root)
+        app = AppUI(root, initial_config=initial_config)
+
+        # Cải tiến 3: Thêm xử lý tắt ứng dụng (Graceful Shutdown)
+        # Gán phương thức shutdown của app cho sự kiện đóng cửa sổ.
+        root.protocol("WM_DELETE_WINDOW", app.shutdown)
+
         root.mainloop()
+
+        logger.info("Ứng dụng đã đóng thành công.")
     except Exception:
-        logging.exception("Đã xảy ra một ngoại lệ chưa được xử lý trong main.")
+        logger.exception("Đã xảy ra lỗi nghiêm trọng trong hàm main.")
         raise
 
+
 if __name__ == "__main__":
-    logger.debug("Bắt đầu thực thi main() từ APP/main.py")
-    main()
+    # Cải tiến 1: Thêm cơ chế xử lý đối số dòng lệnh
+    args = parse_arguments()
+    # Cải tiến 2: Cấu hình một cách tường minh hơn
+    main(workspace_path=args.workspace)

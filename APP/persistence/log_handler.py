@@ -5,7 +5,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def setup_logging():
         level=logging.DEBUG,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
+            logging.FileHandler(log_file, mode='w', encoding="utf-8"),
             logging.StreamHandler(os.sys.stdout)
         ]
     )

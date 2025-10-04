@@ -1,9 +1,11 @@
+# Core
 python-dotenv
 MetaTrader5
 numpy
 pandas
-matplotlib
 Pillow
 certifi
-python-dotenv
 scikit-learn
+
+# UI
+matplotlib

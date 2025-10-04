@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import ssl
 import urllib.parse
 import urllib.request
@@ -57,10 +56,10 @@ class TelegramClient:
     def from_config(cls, cfg: RunConfig, timeout: int = 15) -> "TelegramClient":
         """Tạo một instance của TelegramClient từ đối tượng cấu hình."""
         return cls(
-            token=cfg.telegram_token,
-            chat_id=cfg.telegram_chat_id or None,
-            ca_path=cfg.telegram_ca_path or None,
-            skip_verify=bool(getattr(cfg, "telegram_skip_verify", False)),
+            token=cfg.telegram.token,
+            chat_id=cfg.telegram.chat_id or None,
+            ca_path=cfg.telegram.ca_path or None,
+            skip_verify=bool(getattr(cfg.telegram, "skip_verify", False)),
             timeout=timeout,
         )
 

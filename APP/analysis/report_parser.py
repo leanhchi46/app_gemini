@@ -5,7 +5,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from APP.utils.safe_data import SafeMT5Data
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +92,10 @@ def extract_summary_lines(text: str) -> Tuple[List[str], Optional[str], bool]:
 def _repair_json_string(s: str) -> str:
     """Cố gắng sửa một chuỗi JSON không hợp lệ."""
     s = s.strip()
-    if not s.startswith("{"): s = "{" + s
-    if not s.endswith("}"): s = s + "}"
+    if not s.startswith("{"):
+        s = "{" + s
+    if not s.endswith("}"):
+        s = s + "}"
     s = re.sub(r",\s*}", "}", s)
     s = re.sub(r",\s*]", "]", s)
     return s
@@ -108,10 +110,13 @@ def extract_json_block(text: str) -> Dict[str, Any]:
         in_string = False
         for i in range(brace_idx, len(text)):
             char = text[i]
-            if char == '"': in_string = not in_string
+            if char == '"':
+                in_string = not in_string
             elif not in_string:
-                if char == '{': brace_count += 1
-                elif char == '}': brace_count -= 1
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
             if brace_count == 0:
                 json_blocks.append(text[brace_idx : i + 1])
                 break
@@ -126,3 +131,47 @@ def extract_json_block(text: str) -> Dict[str, Any]:
             continue
             
     return {"error": "No valid JSON block found"}
+
+
+def parse_management_from_report(report: str) -> Dict:
+    """
+    Phân tích báo cáo để trích xuất các chỉ thị quản lý lệnh.
+    Ví dụ: [MANAGE] {"ticket": 12345, "action": "CLOSE"}
+    Ví dụ: [MANAGE] {"ticket": "ALL", "sl": 1.2345}
+    """
+    logger.debug("Bắt đầu phân tích chỉ thị quản lý từ báo cáo.")
+    management_actions = {}
+    
+    # Sử dụng regex để tìm tất cả các khối [MANAGE]
+    manage_blocks = re.findall(r"\[MANAGE\]\s*({.*?})", report, re.DOTALL)
+    
+    for block_str in manage_blocks:
+        try:
+            action = json.loads(block_str)
+            ticket = action.get("ticket")
+            if not ticket:
+                continue
+                
+            # Chuẩn hóa ticket thành chuỗi để dùng làm key
+            ticket_key = str(ticket)
+            management_actions[ticket_key] = {
+                "action": action.get("action"),
+                "sl": parse_float(str(action.get("sl"))) if action.get("sl") is not None else None,
+                "tp": parse_float(str(action.get("tp"))) if action.get("tp") is not None else None
+            }
+            logger.info(f"Đã tìm thấy chỉ thị quản lý cho ticket {ticket_key}: {management_actions[ticket_key]}")
+
+        except json.JSONDecodeError:
+            logger.warning(f"Lỗi giải mã JSON trong khối quản lý: {block_str}")
+        except Exception as e:
+            logger.error(f"Lỗi không xác định khi phân tích khối quản lý: {e}")
+            
+    return management_actions
+
+
+__all__ = [
+    "parse_trade_setup_from_report", 
+    "extract_summary_lines", 
+    "extract_json_block",
+    "parse_management_from_report"
+]
