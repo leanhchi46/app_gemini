@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 import logging # Thêm import logging
 from collections import defaultdict
@@ -13,7 +13,7 @@ except ImportError as e: # Thêm alias cho exception
     logger.warning(f"Không thể import MetaTrader5: {e}. Chức năng backtester sẽ bị hạn chế.")
 
 if TYPE_CHECKING:
-    from scripts.tool import TradingToolApp
+    pass
 
 def _calculate_stats(win_loss_dict: dict) -> dict:
     """
@@ -94,15 +94,25 @@ def evaluate_trade_outcomes(proposed_trades: list[dict], symbol: str) -> dict:
                 
                 if triggered:
                     if direction == "long":
-                        if low <= sl_price: outcome = "loss"; break
-                        if high >= tp_price: outcome = "win"; break
+                        if low <= sl_price:
+                            outcome = "loss"
+                            break
+                        if high >= tp_price:
+                            outcome = "win"
+                            break
                     elif direction == "short":
-                        if high >= sl_price: outcome = "loss"; break
-                        if low <= tp_price: outcome = "win"; break
+                        if high >= sl_price:
+                            outcome = "loss"
+                            break
+                        if low <= tp_price:
+                            outcome = "win"
+                            break
             
             if outcome in ["win", "loss"]:
-                if outcome == "win": total_wins += 1
-                else: total_losses += 1
+                if outcome == "win":
+                    total_wins += 1
+                else:
+                    total_losses += 1
                 logger.debug(f"Trade outcome: {outcome}")
 
                 ctx = trade.get("context_snapshot", {})

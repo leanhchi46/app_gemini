@@ -1,45 +1,24 @@
 from __future__ import annotations
 
 import json
-import re
-import time
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple, List, Dict, Any, TYPE_CHECKING  # Thêm TYPE_CHECKING
-import urllib.request
-import threading  # Thêm threading
-
-if TYPE_CHECKING:  # Thêm TYPE_CHECKING
-    from scripts.tool import TradingToolApp
-    from src.config.config import RunConfig
-
-from src.config.config import RunConfig
-from src.services.telegram_client import build_ssl_context
-
-
-from __future__ import annotations
-
-import json
 import re
 import time
-import logging # Thêm import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple, List, Dict, Any, TYPE_CHECKING  # Thêm TYPE_CHECKING
 import urllib.request
-import threading  # Thêm threading
-
-logger = logging.getLogger(__name__) # Khởi tạo logger
-
-if TYPE_CHECKING:  # Thêm TYPE_CHECKING
-    from scripts.tool import TradingToolApp
-    from src.config.config import RunConfig
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from src.config.config import RunConfig
 from src.services.telegram_client import build_ssl_context
 
+logger = logging.getLogger(__name__)
 
-FF_THISWEEK = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-FF_NEXTWEEK = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
+if TYPE_CHECKING:
+    from src.config.config import RunConfig
+
+
+FF_THISWEEK = "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"
+FF_NEXTWEEK = "https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.json"
 
 
 def _http_get(

@@ -1,11 +1,9 @@
 from __future__ import annotations
-import re
 import json
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from src.utils import utils, report_parser, ui_utils
-from src.config.constants import APP_DIR # Cần cho APP_DIR
 
 logger = logging.getLogger(__name__) # Khởi tạo logger
 

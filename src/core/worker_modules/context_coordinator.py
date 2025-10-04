@@ -3,11 +3,10 @@ import json
 import logging
 from typing import TYPE_CHECKING, Dict, Tuple
 
-logger = logging.getLogger(__name__) # Khởi tạo logger
-
-from src.core import context_builder # Cần cho compose_context
 from src.services import news # Cần cho phân tích tin tức
 from src.utils.safe_data import SafeMT5Data # Cần cho type hint
+
+logger = logging.getLogger(__name__) # Khởi tạo logger
 
 if TYPE_CHECKING:
     from scripts.tool import TradingToolApp

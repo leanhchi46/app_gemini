@@ -9,6 +9,8 @@ from typing import Optional, Tuple, List, TYPE_CHECKING  # Thêm TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging # Thêm import logging
 
+from src.config.constants import APP_DIR, UPLOAD_CACHE_JSON
+
 logger = logging.getLogger(__name__) # Khởi tạo logger
 
 try:
@@ -22,8 +24,6 @@ try:
 except Exception as _e:  # pragma: no cover - optional optimization
     Image = None  # type: ignore
     logger.warning(f"Không thể import PIL.Image: {_e}. Tối ưu hóa ảnh sẽ bị vô hiệu hóa.")
-
-from src.config.constants import APP_DIR, UPLOAD_CACHE_JSON
 
 if TYPE_CHECKING:
     from scripts.tool import TradingToolApp

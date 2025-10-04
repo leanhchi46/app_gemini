@@ -1,13 +1,12 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Dict, Any
+from typing import TYPE_CHECKING, List, Dict
 import logging # Thêm import logging
 
-logger = logging.getLogger(__name__) # Khởi tạo logger
-
 from src.config.constants import APP_DIR
-from src.utils import ui_utils
 from src.utils import report_parser # Cần cho parse_mt5_data_to_report
+
+logger = logging.getLogger(__name__) # Khởi tạo logger
 
 if TYPE_CHECKING:
     from scripts.tool import TradingToolApp

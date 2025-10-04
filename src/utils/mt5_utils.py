@@ -4,26 +4,22 @@ import json
 import logging
 import math
 import time
-from datetime import datetime, timezone, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
 from statistics import median
-from typing import Any, Iterable, Sequence, Optional, TYPE_CHECKING, Dict
+from typing import Any, Dict, Iterable, Optional, Sequence, TYPE_CHECKING
+from zoneinfo import ZoneInfo
+
+import MetaTrader5 as mt5
 
 from src.core import ict_analysis
 from .safe_data import SafeMT5Data
 
-logger = logging.getLogger(__name__) # Khởi tạo logger
+logger = logging.getLogger(__name__)
+logger.debug("Bắt đầu mt5_utils.py")
 
-if TYPE_CHECKING:  # Thêm TYPE_CHECKING
+if TYPE_CHECKING:
     from scripts.tool import TradingToolApp
     from src.config.config import RunConfig
-
-
-try:
-    import MetaTrader5 as mt5  # type: ignore
-except Exception as e:  # pragma: no cover - optional dependency
-    mt5 = None  # type: ignore
-    logger.warning(f"Không thể import MetaTrader5: {e}. Các chức năng MT5 sẽ bị vô hiệu hóa.")
 
 
 # ------------------------------
@@ -436,12 +432,17 @@ def _hl_from(symbol: str, tf_code: int, bars: int) -> dict | None:
     if data is None or len(data) == 0:
         logger.warning(f"Không lấy được dữ liệu HL từ MT5 cho {symbol} {tf_code}.")
         return None
-    hi = max([float(x["high"]) for x in data])
-    lo = min([float(x["low"]) for x in data])
-    op = float(data[0]["open"])  # first bar open
-    result = {"open": op, "high": hi, "low": lo}
-    logger.debug(f"Đã lấy HL từ MT5 cho {symbol} {tf_code}. Kết quả: {result}")
-    return result
+    
+    try:
+        hi = max([float(x["high"]) for x in data])
+        lo = min([float(x["low"]) for x in data])
+        op = float(data[0]["open"])  # first bar open
+        result = {"open": op, "high": hi, "low": lo}
+        logger.debug(f"Đã lấy HL từ MT5 cho {symbol} {tf_code}. Kết quả: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Lỗi khi xử lý dữ liệu HL từ MT5 cho {symbol} {tf_code}: {e}")
+        return None
 
 
 def _nearby_key_levels(

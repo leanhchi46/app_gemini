@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Iterable, Sequence
+from typing import Sequence
 from datetime import datetime
 import logging # Thêm import logging
 
@@ -307,7 +307,7 @@ def find_market_structure_shift(rates: Sequence[dict], swing_highs: list, swing_
     
     # Xác định hai đỉnh và hai đáy gần nhất từ bốn swing cuối cùng
     last_highs = [s for s in last_four_swings if s['price'] in [h['price'] for h in swing_highs]]
-    last_lows = [s for s in last_four_swings if s['price'] in [l['price'] for l in swing_lows]]
+    last_lows = [s for s in last_four_swings if s['price'] in [low_swing['price'] for low_swing in swing_lows]]
 
     if len(last_highs) < 2 or len(last_lows) < 2:
         logger.debug("Không đủ highs hoặc lows để xác định trend.")

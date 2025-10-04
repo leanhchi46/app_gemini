@@ -4,15 +4,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import logging # Thêm import logging
-import os
 from typing import TYPE_CHECKING
 
-logger = logging.getLogger(__name__) # Khởi tạo logger
-
-from src.config.constants import WORKSPACE_JSON, API_KEY_ENC, DEFAULT_MODEL
+from src.config.constants import WORKSPACE_JSON, DEFAULT_MODEL
 from src.utils.utils import obfuscate_text, deobfuscate_text
 from src.utils import ui_utils
-from src.ui import history_manager # Import module mới
+
+logger = logging.getLogger(__name__) # Khởi tạo logger
 
 if TYPE_CHECKING:
     from src.ui.app_ui import TradingToolApp
@@ -92,7 +90,7 @@ def _save_workspace(app: "TradingToolApp"):
         "news_block_before_min": int(app.trade_news_block_before_min_var.get()),
         "news_block_after_min": int(app.trade_news_block_after_min_var.get()),
 
-        "no_run_weekend_enabled": bool(app.norun_weekend_var.get()), # Cập nhật tên biến
+        "no_run_weekend_enabled": bool(app.no_run_weekend_enabled_var.get()), # Cập nhật tên biến
         "no_run_killzone_enabled": bool(app.norun_killzone_var.get()), # Cập nhật tên biến
         # Thêm các biến trạng thái MT5 reconnect/check
         "mt5_reconnect_attempts": app.app_logic._mt5_reconnect_attempts,
@@ -205,7 +203,7 @@ def _load_workspace(app: "TradingToolApp"):
     app.trade_news_block_before_min_var.set(int(data.get("news_block_before_min", 15)))
     app.trade_news_block_after_min_var.set(int(data.get("news_block_after_min", 15)))
 
-    app.norun_weekend_var.set(bool(data.get("no_run_weekend_enabled", True))) # Cập nhật tên biến
+    app.no_run_weekend_enabled_var.set(bool(data.get("no_run_weekend_enabled", True))) # Cập nhật tên biến
     app.norun_killzone_var.set(bool(data.get("no_run_killzone_enabled", True))) # Cập nhật tên biến
 
     # Tải các biến trạng thái MT5 reconnect/check
@@ -218,9 +216,15 @@ def _delete_workspace(app: "TradingToolApp"):
     """
     Xóa file `workspace.json` khỏi hệ thống.
     """
+    logger.debug("Bắt đầu _delete_workspace.")
     try:
         if WORKSPACE_JSON.exists():
             WORKSPACE_JSON.unlink()
+            logger.info("Workspace: Đã xoá workspace thành công.")
+        else:
+            logger.info("Workspace: File workspace.json không tồn tại, không cần xoá.")
         ui_utils.ui_message(app, "info", "Workspace", "Đã xoá workspace.")
     except Exception as e:
         ui_utils.ui_message(app, "error", "Workspace", str(e))
+        logger.error(f"Workspace: Lỗi khi xoá workspace: {e}")
+    logger.debug("Kết thúc _delete_workspace.")

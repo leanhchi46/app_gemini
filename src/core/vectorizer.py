@@ -156,7 +156,7 @@ def find_similar_vectors(current_vector: list[float], historical_vectors: list[d
     for i in top_indices:
         # Skip if similarity is perfect (it's the same vector)
         if np.isclose(similarities[i], 1.0):
-            logger.debug(f"Bỏ qua vector có similarity 1.0 (chính nó).")
+            logger.debug("Bỏ qua vector có similarity 1.0 (chính nó).")
             continue
         
         results.append({

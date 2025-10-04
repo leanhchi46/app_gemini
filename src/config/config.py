@@ -1,7 +1,7 @@
 from dataclasses import dataclass
-import logging # Thêm import logging
+import logging
 
-logger = logging.getLogger(__name__) # Khởi tạo logger
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -9,6 +9,7 @@ class RunConfig:
     """
     Snapshot cấu hình cho một lần chạy phân tích (worker thread sử dụng).
     """
+    logger.debug("Khởi tạo RunConfig.")
 
     # Folder & basic options
     folder: str
@@ -76,3 +77,11 @@ class RunConfig:
     # News controls
     trade_news_block_enabled: bool
     news_cache_ttl_sec: int
+    no_run_weekend_enabled: bool
+    no_run_killzone_enabled: bool
+
+    def __post_init__(self):
+        """
+        Ghi log debug sau khi một đối tượng RunConfig được khởi tạo.
+        """
+        logger.debug(f"RunConfig được khởi tạo: {self}")

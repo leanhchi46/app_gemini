@@ -1,16 +1,15 @@
 # src/ui/history_manager.py
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
-import logging # Thêm import logging
-
-logger = logging.getLogger(__name__) # Khởi tạo logger
 
 from src.utils import ui_utils
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
-    import tkinter as tk
     from src.ui.app_ui import TradingToolApp
 
 
@@ -40,11 +39,15 @@ def _refresh_history_list(app: "TradingToolApp"):
         return
     app.history_list.delete(0, "end")
     d = _get_reports_dir(app)
-    files = sorted(d.glob("report_*.md"), reverse=True) if d else []
-    app._history_files = list(files)
-    for p in files:
-        app.history_list.insert("end", p.name)
-    logger.debug(f"Đã làm mới history list với {len(files)} file.")
+    if d: # Thêm kiểm tra d
+        files = sorted(d.glob("report_*.md"), reverse=True)
+        app._history_files = list(files)
+        for p in files:
+            app.history_list.insert("end", p.name)
+        logger.debug(f"Đã làm mới history list với {len(files)} file.")
+    else:
+        app._history_files = []
+        logger.warning("Không thể làm mới history list vì không có thư mục reports hợp lệ.")
 
 def _preview_history_selected(app: "TradingToolApp"):
     """
@@ -134,11 +137,15 @@ def _refresh_json_list(app: "TradingToolApp"):
         return
     app.json_list.delete(0, "end")
     d = _get_reports_dir(app)
-    files = sorted(d.glob("ctx_*.json"), reverse=True) if d else []
-    app.json_files = list(files)
-    for p in files:
-        app.json_list.insert("end", p.name)
-    logger.debug(f"Đã làm mới JSON list với {len(files)} file.")
+    if d: # Thêm kiểm tra d
+        files = sorted(d.glob("ctx_*.json"), reverse=True)
+        app.json_files = list(files)
+        for p in files:
+            app.json_list.insert("end", p.name)
+        logger.debug(f"Đã làm mới JSON list với {len(files)} file.")
+    else:
+        app.json_files = []
+        logger.warning("Không thể làm mới JSON list vì không có thư mục reports hợp lệ.")
 
 def _preview_json_selected(app: "TradingToolApp"):
     """

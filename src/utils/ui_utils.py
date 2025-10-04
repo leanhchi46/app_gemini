@@ -1,9 +1,7 @@
 from __future__ import annotations
-import tkinter as tk
 from tkinter import messagebox
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 import queue
-import json
 import os
 from datetime import datetime
 import logging # Thêm import logging

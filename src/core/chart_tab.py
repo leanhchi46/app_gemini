@@ -3,6 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 import logging # Thêm import logging
+from typing import Any, Tuple, Optional
 
 logger = logging.getLogger(__name__) # Khởi tạo logger
 

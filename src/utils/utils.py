@@ -3,9 +3,6 @@ import hashlib
 import os
 from pathlib import Path
 import platform
-import ssl
-from datetime import datetime
-import re
 import logging # Thêm import logging
 
 logger = logging.getLogger(__name__) # Khởi tạo logger

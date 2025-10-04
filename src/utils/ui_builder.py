@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Module này chịu trách nhiệm xây dựng toàn bộ giao diện người dùng (GUI) cho ứng dụng
 sử dụng thư viện tkinter.
@@ -6,32 +5,25 @@ sử dụng thư viện tkinter.
 Cấu trúc được chia thành các hàm con để tăng tính module hóa và dễ bảo trì.
 Hàm chính `build_ui` sẽ điều phối việc gọi các hàm xây dựng từng phần.
 """
-# -*- coding: utf-8 -*-
-"""
-Module này chịu trách nhiệm xây dựng toàn bộ giao diện người dùng (GUI) cho ứng dụng
-sử dụng thư viện tkinter.
-
-Cấu trúc được chia thành các hàm con để tăng tính module hóa và dễ bảo trì.
-Hàm chính `build_ui` sẽ điều phối việc gọi các hàm xây dựng từng phần.
-"""
+import importlib.util
+import logging
 import tkinter as tk
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
-import logging # Thêm import logging
+from typing import Any  # Thêm import Any
 
-logger = logging.getLogger(__name__) # Khởi tạo logger
+from src.core.chart_tab import ChartTabTV
+
+logger = logging.getLogger(__name__)
 
 # Kiểm tra xem thư viện matplotlib có tồn tại không để quyết định hiển thị tab Chart.
 # Đây là một dạng "lazy import" hoặc kiểm tra phụ thuộc (dependency check) lúc runtime.
-try:
-    import matplotlib
+if importlib.util.find_spec("matplotlib"):
     HAS_MPL = True
     logger.debug("Matplotlib có sẵn.")
-except ImportError as e:
+else:
     HAS_MPL = False
-    logger.warning(f"Không thể import matplotlib: {e}. Tab Chart sẽ bị vô hiệu hóa.")
-
-from src.core.chart_tab import ChartTabTV
+    logger.warning("Không thể import matplotlib. Tab Chart sẽ bị vô hiệu hóa.")
 
 # =====================================================================================
 # HÀM XÂY DỰNG CÁC THÀNH PHẦN UI
@@ -200,7 +192,8 @@ def _build_report_tab(app: Any):
     hist_scr = ttk.Scrollbar(hist_col, orient="vertical", command=app.history_list.yview)
     app.history_list.configure(yscrollcommand=hist_scr.set)
     hist_scr.grid(row=1, column=1, sticky="ns")
-    hist_btns = ttk.Frame(hist_col); hist_btns.grid(row=2, column=0, sticky="ew", pady=(6,0))
+    hist_btns = ttk.Frame(hist_col)
+    hist_btns.grid(row=2, column=0, sticky="ew", pady=(6,0))
     ttk.Button(hist_btns, text="Mở", command=app._open_history_selected).pack(side="left")
     ttk.Button(hist_btns, text="Xoá", command=app._delete_history_selected).pack(side="left", padx=(6,0))
     ttk.Button(hist_btns, text="Thư mục", command=app._open_reports_folder).pack(side="left", padx=(6,0))
@@ -219,7 +212,8 @@ def _build_report_tab(app: Any):
     json_scr = ttk.Scrollbar(json_col, orient="vertical", command=app.json_list.yview)
     app.json_list.configure(yscrollcommand=json_scr.set)
     json_scr.grid(row=1, column=1, sticky="ns")
-    json_btns = ttk.Frame(json_col); json_btns.grid(row=2, column=0, sticky="ew", pady=(6,0))
+    json_btns = ttk.Frame(json_col)
+    json_btns.grid(row=2, column=0, sticky="ew", pady=(6,0))
     ttk.Button(json_btns, text="Mở", command=app._load_json_selected).pack(side="left")
     ttk.Button(json_btns, text="Xoá", command=app._delete_json_selected).pack(side="left", padx=(6,0))
     ttk.Button(json_btns, text="Thư mục", command=app._open_json_folder).pack(side="left", padx=(6,0))
@@ -382,13 +376,16 @@ def _build_opts_run(app: Any, parent_notebook: ttk.Notebook):
     card_nt = ttk.LabelFrame(run_tab, text="NO-TRADE cứng (chặn gọi model nếu điều kiện xấu)", padding=8)
     card_nt.grid(row=3, column=0, sticky="ew", pady=(8, 0))
     ttk.Checkbutton(card_nt, text="Bật NO-TRADE cứng", variable=app.no_trade_enabled_var).grid(row=0, column=0, columnspan=3, sticky="w")
-    r1 = ttk.Frame(card_nt); r1.grid(row=1, column=0, sticky="w", pady=(4, 0))
+    r1 = ttk.Frame(card_nt)
+    r1.grid(row=1, column=0, sticky="w", pady=(4, 0))
     ttk.Label(r1, text="Ngưỡng spread > p90 ×").pack(side="left")
     ttk.Spinbox(r1, from_=1.0, to=3.0, increment=0.1, textvariable=app.nt_spread_factor_var, width=6).pack(side="left", padx=(6, 12))
-    r2 = ttk.Frame(card_nt); r2.grid(row=2, column=0, sticky="w", pady=(4, 0))
+    r2 = ttk.Frame(card_nt)
+    r2.grid(row=2, column=0, sticky="w", pady=(4, 0))
     ttk.Label(r2, text="ATR M5 tối thiểu (pips):").pack(side="left")
     ttk.Spinbox(r2, from_=0.5, to=50.0, increment=0.5, textvariable=app.nt_min_atr_m5_pips_var, width=6).pack(side="left", padx=(6, 12))
-    r3 = ttk.Frame(card_nt); r3.grid(row=3, column=0, sticky="w", pady=(4, 0))
+    r3 = ttk.Frame(card_nt)
+    r3.grid(row=3, column=0, sticky="w", pady=(4, 0))
     ttk.Label(r3, text="Ticks mỗi phút tối thiểu (5m):").pack(side="left")
     ttk.Spinbox(r3, from_=0, to=200, textvariable=app.nt_min_ticks_per_min_var, width=6).pack(side="left", padx=(6, 12))
     logger.debug("Đã xây dựng card 'NO-TRADE cứng'.")
@@ -520,19 +517,22 @@ def _build_opts_autotrade(app: Any, parent_tab: ttk.Frame):
     auto_card.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 0))
 
     # Các dòng cài đặt (r0, r1, ...)
-    r0 = ttk.Frame(auto_card); r0.grid(row=0, column=0, columnspan=3, sticky="w")
+    r0 = ttk.Frame(auto_card)
+    r0.grid(row=0, column=0, columnspan=3, sticky="w")
     ttk.Checkbutton(r0, text="Bật Auto-Trade", variable=app.auto_trade_enabled_var).pack(side="left")
     ttk.Checkbutton(r0, text="KHÔNG trade nếu NGƯỢC bias H1", variable=app.trade_strict_bias_var).pack(side="left", padx=(12,0))
     logger.debug("Đã xây dựng Auto-Trade r0.")
 
-    r1 = ttk.Frame(auto_card); r1.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6,0))
+    r1 = ttk.Frame(auto_card)
+    r1.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6,0))
     ttk.Label(r1, text="Khối lượng:").pack(side="left")
     ttk.Radiobutton(r1, text="Lots cố định", value="lots", variable=app.trade_size_mode_var).pack(side="left", padx=(6,0))
     ttk.Radiobutton(r1, text="% Equity", value="percent", variable=app.trade_size_mode_var).pack(side="left", padx=(6,0))
     ttk.Radiobutton(r1, text="Tiền rủi ro", value="money", variable=app.trade_size_mode_var).pack(side="left", padx=(6,0))
     logger.debug("Đã xây dựng Auto-Trade r1.")
 
-    r2 = ttk.Frame(auto_card); r2.grid(row=2, column=0, columnspan=3, sticky="w", pady=(4,0))
+    r2 = ttk.Frame(auto_card)
+    r2.grid(row=2, column=0, columnspan=3, sticky="w", pady=(4,0))
     ttk.Label(r2, text="Lots:").pack(side="left")
     ttk.Spinbox(r2, from_=0.01, to=100.0, increment=0.01, textvariable=app.trade_lots_total_var, width=8).pack(side="left", padx=(6,12))
     ttk.Label(r2, text="% Equity rủi ro:").pack(side="left")
@@ -541,7 +541,8 @@ def _build_opts_autotrade(app: Any, parent_tab: ttk.Frame):
     ttk.Spinbox(r2, from_=1.0, to=1_000_000.0, increment=1.0, textvariable=app.trade_money_risk_var, width=10).pack(side="left", padx=(6,12))
     logger.debug("Đã xây dựng Auto-Trade r2.")
 
-    r3 = ttk.Frame(auto_card); r3.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4,0))
+    r3 = ttk.Frame(auto_card)
+    r3.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4,0))
     ttk.Label(r3, text="Chia TP1 (%):").pack(side="left")
     ttk.Spinbox(r3, from_=1, to=99, textvariable=app.trade_split_tp1_pct_var, width=6).pack(side="left", padx=(6,12))
     ttk.Label(r3, text="Deviation (points):").pack(side="left")
@@ -550,20 +551,23 @@ def _build_opts_autotrade(app: Any, parent_tab: ttk.Frame):
     ttk.Spinbox(r3, from_=5, to=2000, textvariable=app.trade_pending_threshold_points_var, width=8).pack(side="left", padx=(6,12))
     logger.debug("Đã xây dựng Auto-Trade r3.")
 
-    r4 = ttk.Frame(auto_card); r4.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4,0))
+    r4 = ttk.Frame(auto_card)
+    r4.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4,0))
     ttk.Label(r4, text="Magic:").pack(side="left")
     ttk.Spinbox(r4, from_=1, to=2_147_000_000, textvariable=app.trade_magic_var, width=12).pack(side="left", padx=(6,12))
     ttk.Label(r4, text="Comment:").pack(side="left")
     tk.Entry(r4, textvariable=app.trade_comment_prefix_var, width=18).pack(side="left", padx=(6,0))
     logger.debug("Đã xây dựng Auto-Trade r4.")
 
-    r5 = ttk.Frame(auto_card); r5.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4,0))
+    r5 = ttk.Frame(auto_card)
+    r5.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4,0))
     ttk.Checkbutton(r5, text="Dry-run (không gửi lệnh)", variable=app.auto_trade_dry_run_var).pack(side="left")
     ttk.Checkbutton(r5, text="Pending theo ATR", variable=app.trade_dynamic_pending_var).pack(side="left", padx=(12,0))
     ttk.Checkbutton(r5, text="BE sau TP1", variable=app.trade_move_to_be_after_tp1_var).pack(side="left", padx=(12,0))
     logger.debug("Đã xây dựng Auto-Trade r5.")
 
-    r6 = ttk.Frame(auto_card); r6.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4,0))
+    r6 = ttk.Frame(auto_card)
+    r6.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4,0))
     ttk.Label(r6, text="TTL pending (phút):").pack(side="left")
     ttk.Spinbox(r6, from_=1, to=1440, textvariable=app.trade_pending_ttl_min_var, width=6).pack(side="left", padx=(6,12))
     ttk.Label(r6, text="RR tối thiểu TP2:").pack(side="left")
@@ -574,19 +578,22 @@ def _build_opts_autotrade(app: Any, parent_tab: ttk.Frame):
     ttk.Spinbox(r6, from_=0, to=360, textvariable=app.trade_cooldown_min_var, width=6).pack(side="left", padx=(6,12))
     logger.debug("Đã xây dựng Auto-Trade r6.")
 
-    r7 = ttk.Frame(auto_card); r7.grid(row=7, column=0, columnspan=3, sticky="w", pady=(4,0))
+    r7 = ttk.Frame(auto_card)
+    r7.grid(row=7, column=0, columnspan=3, sticky="w", pady=(4,0))
     ttk.Label(r7, text="Trailing ATR ×").pack(side="left")
     ttk.Spinbox(r7, from_=0.1, to=3.0, increment=0.1, textvariable=app.trade_trailing_atr_mult_var, width=6).pack(side="left", padx=(6,12))
     logger.debug("Đã xây dựng Auto-Trade r7.")
 
-    r8 = ttk.Frame(auto_card); r8.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4,0))
+    r8 = ttk.Frame(auto_card)
+    r8.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4,0))
     ttk.Label(r8, text="Phiên cho phép:").pack(side="left")
     ttk.Checkbutton(r8, text="Asia", variable=app.trade_allow_session_asia_var).pack(side="left", padx=(6,0))
     ttk.Checkbutton(r8, text="London", variable=app.trade_allow_session_london_var).pack(side="left", padx=(6,0))
     ttk.Checkbutton(r8, text="New York", variable=app.trade_allow_session_ny_var).pack(side="left", padx=(6,0))
     logger.debug("Đã xây dựng Auto-Trade r8.")
 
-    r9 = ttk.Frame(auto_card); r9.grid(row=9, column=0, columnspan=3, sticky="w", pady=(4,0))
+    r9 = ttk.Frame(auto_card)
+    r9.grid(row=9, column=0, columnspan=3, sticky="w", pady=(4,0))
     ttk.Label(r9, text="Chặn quanh news:").pack(side="left")
     ttk.Label(r9, text="Trước (phút):").pack(side="left", padx=(8,2))
     ttk.Spinbox(r9, from_=0, to=180, textvariable=app.trade_news_block_before_min_var, width=6).pack(side="left")
@@ -610,7 +617,7 @@ def _build_opts_norun(app: Any, parent_notebook: ttk.Notebook):
     norun_tab.columnconfigure(0, weight=1)
     card_norun = ttk.LabelFrame(norun_tab, text="Điều kiện không chạy phân tích tự động", padding=8)
     card_norun.grid(row=0, column=0, sticky="ew")
-    ttk.Checkbutton(card_norun, text="Không chạy vào Thứ 7 và Chủ Nhật", variable=app.norun_weekend_var).grid(row=0, column=0, sticky="w")
+    ttk.Checkbutton(card_norun, text="Không chạy vào Thứ 7 và Chủ Nhật", variable=app.no_run_weekend_enabled_var).grid(row=0, column=0, sticky="w")
     ttk.Checkbutton(card_norun, text="Chỉ chạy trong thời gian Kill Zone", variable=app.norun_killzone_var).grid(row=1, column=0, sticky="w", pady=(4, 0))
     logger.debug("Đã xây dựng card 'No Run'.")
     logger.debug("Kết thúc _build_opts_norun.")

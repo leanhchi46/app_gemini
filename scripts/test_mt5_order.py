@@ -1,6 +1,4 @@
 import MetaTrader5 as mt5
-import time
-from datetime import datetime, timedelta
 
 def main():
     # Kết nối với MetaTrader 5

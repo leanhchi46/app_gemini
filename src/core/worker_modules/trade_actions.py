@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
+import os
 import time
 from datetime import datetime, timedelta
-import json
-import os
-from pathlib import Path
-from typing import TYPE_CHECKING, List, Dict, Any, Optional, Tuple
-import logging # Thêm import logging
+from typing import TYPE_CHECKING, Dict, List, Optional
+
+import MetaTrader5 as mt5
+
+from src.config.constants import APP_DIR
+from src.core.worker_modules import no_run_trade_conditions
+from src.utils import logging_utils, mt5_utils, report_parser, ui_utils
 
 logger = logging.getLogger(__name__) # Khởi tạo logger
 
@@ -17,15 +22,9 @@ except Exception as e:  # pragma: no cover - optional dependency
     mt5 = None  # type: ignore
     logger.warning(f"Không thể import MetaTrader5: {e}. Các chức năng MT5 sẽ bị vô hiệu hóa.")
 
-from src.config.constants import APP_DIR
-from src.utils import mt5_utils
-from src.core.worker_modules import no_run_trade_conditions # Cập nhật import
-from src.utils import report_parser, ui_utils
-
 if TYPE_CHECKING:
     from scripts.tool import TradingToolApp
     from src.config.config import RunConfig
-    from src.utils.safe_data import SafeMT5Data
 
 
 def _calc_rr(entry: Optional[float], sl: Optional[float], tp: Optional[float]) -> Optional[float]:
@@ -57,48 +56,8 @@ def _near_key_levels_too_close(mt5_ctx: Dict, min_pips: float, cp: float) -> boo
     logger.debug("Giá không quá gần bất kỳ key level nào.")
     return False
 
-def _log_trade_decision(app: "TradingToolApp", data: Dict, folder_override: Optional[str] = None):
-    """Ghi lại các quyết định giao dịch vào file log JSONL."""
-    logger.debug(f"Bắt đầu _log_trade_decision. Stage: {data.get('stage')}, Folder override: {folder_override}")
-    try:
-        # Sử dụng phương thức _get_reports_dir từ app_logic
-        d = app._get_reports_dir(folder_override=folder_override)
-        if not d:
-            logger.warning("Không thể xác định thư mục Reports để ghi log giao dịch.")
-            return
-
-        p = d / f"trade_log_{datetime.now().strftime('%Y%m%d')}.jsonl"
-        line = (json.dumps(data, ensure_ascii=False, separators=(',', ':')) + "\n").encode("utf-8")
-
-        p.parent.mkdir(parents=True, exist_ok=True)
-
-        with app._trade_log_lock: # Sử dụng lock từ app_logic
-            need_leading_newline = False
-            if p.exists():
-                try:
-                    sz = p.stat().st_size
-                    if sz > 0:
-                        with open(p, "rb") as fr:
-                            fr.seek(-1, os.SEEK_END)
-                            need_leading_newline = (fr.read(1) != b"\n")
-                except Exception as e:
-                    logger.warning(f"Lỗi khi kiểm tra file log {p}: {e}")
-                    need_leading_newline = False
-
-            with open(p, "ab") as f:
-                if need_leading_newline:
-                    f.write(b"\n")
-                f.write(line)
-                f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except Exception as e:
-                    logger.warning(f"Lỗi khi fsync file log {p}: {e}")
-                    pass
-        logger.debug(f"Đã ghi log giao dịch vào {p.name}.")
-    except Exception as e:
-        logger.error(f"Lỗi khi ghi log giao dịch: {e}")
-        pass
+# Hàm _log_trade_decision đã được di chuyển sang src/utils/logging_utils.py
+# và được gọi thông qua app._log_trade_decision hoặc trực tiếp logging_utils.log_trade_decision
 
 def _load_last_trade_state() -> Dict:
     """Tải trạng thái giao dịch cuối cùng từ file."""
@@ -138,13 +97,14 @@ def _order_send_safe(app: "TradingToolApp", req: Dict, retry: int = 2):
                 "equity": acc_info.equity,
                 "profit": acc_info.profit,
             }
-            _log_trade_decision(app, {"stage": "send-account-check", "account_info": acc_dict}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            # Gọi hàm _log_trade_decision của app_logic
+            app._log_trade_decision({"stage": "send-account-check", "account_info": acc_dict}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             logger.debug(f"Đã log account info trước khi gửi lệnh: {acc_dict}")
         else:
-            _log_trade_decision(app, {"stage": "send-account-check", "account_info": None, "error": "mt5.account_info() returned None"}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            app._log_trade_decision({"stage": "send-account-check", "account_info": None, "error": "mt5.account_info() returned None"}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             logger.warning("Không lấy được account info từ MT5.")
     except Exception as e:
-        _log_trade_decision(app, {"stage": "send-account-check", "error": f"Exception getting account_info: {e}"}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+        app._log_trade_decision({"stage": "send-account-check", "error": f"Exception getting account_info: {e}"}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         logger.error(f"Lỗi khi lấy account info trước khi gửi lệnh: {e}")
     
     if mt5.account_info() is None:
@@ -154,13 +114,13 @@ def _order_send_safe(app: "TradingToolApp", req: Dict, retry: int = 2):
             ok, msg = app._mt5_connect(app)
             if not ok:
                 ui_utils.ui_status(app, f"MT5 Re-init failed: {msg}")
-                _log_trade_decision(app, {"stage": "send-error", "reason": "mt5_reinit_failed", "error": msg}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+                app._log_trade_decision({"stage": "send-error", "reason": "mt5_reinit_failed", "error": msg}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
                 logger.error(f"Tái kết nối MT5 thất bại: {msg}")
                 return None
             logger.info("Tái kết nối MT5 thành công.")
         except Exception as e:
             ui_utils.ui_status(app, f"MT5 Re-init exception: {e}")
-            _log_trade_decision(app, {"stage": "send-error", "reason": "mt5_reinit_exception", "error": str(e)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            app._log_trade_decision({"stage": "send-error", "reason": "mt5_reinit_exception", "error": str(e)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             logger.error(f"Lỗi ngoại lệ khi tái kết nối MT5: {e}")
             return None
     
@@ -170,7 +130,7 @@ def _order_send_safe(app: "TradingToolApp", req: Dict, retry: int = 2):
             req_log = dict(req)
             if 'expiration' in req_log and hasattr(req_log['expiration'], 'timestamp'):
                 req_log['expiration'] = int(req_log['expiration'].timestamp())
-            _log_trade_decision(app, {"stage": "send-request-raw", "request": req_log}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            app._log_trade_decision({"stage": "send-request-raw", "request": req_log}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             logger.debug(f"Đã log raw request: {req_log}")
         except Exception as e:
             logger.warning(f"Lỗi khi log raw request: {e}")
@@ -195,7 +155,9 @@ def _fill_priority(prefer: str) -> List[int]:
         RET = mt5.ORDER_FILLING_RETURN
     except Exception as e:
         logger.warning(f"Không thể lấy ORDER_FILLING constants từ MT5: {e}. Dùng giá trị mặc định.")
-        IOC = 1; FOK = 0; RET = 2
+        IOC = 1
+        FOK = 0
+        RET = 2
     result = ([IOC, FOK, RET] if prefer == "market" else [FOK, IOC, RET])
     logger.debug(f"Kết thúc _fill_priority. Priority: {result}")
     return result
@@ -231,7 +193,7 @@ def _order_send_smart(app: "TradingToolApp", req: Dict, prefer: str = "market", 
                 "comment": getattr(res, "comment", None),
                 "request_id": getattr(res, "request_id", None),
             }
-            _log_trade_decision(app, log_data, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            app._log_trade_decision(log_data, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             logger.debug(f"Đã log send attempt: {log_data}")
         except Exception as e:
             logger.warning(f"Lỗi khi log send attempt: {e}")
@@ -297,7 +259,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
         if not ok_nt:
             app.ui_status("Auto-Trade: NO-TRADE filters blocked.\n- " + "\n- ".join(reasons_nt))
             try:
-                _log_trade_decision(app, {"stage": "precheck-fail", "reason": "no_trade_filters", "reasons_list": reasons_nt}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+                app._log_trade_decision({"stage": "precheck-fail", "reason": "no_trade_filters", "reasons_list": reasons_nt}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception as e:
                 logger.warning(f"Lỗi khi log NO-TRADE precheck-fail: {e}")
                 pass
@@ -422,7 +384,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
         if (bias == "bullish" and direction == "short") or (bias == "bearish" and direction == "long"):
             app.ui_status("Auto-Trade: opposite to H1 bias.")
             try:
-                _log_trade_decision(app, {"stage": "precheck-fail", "reason": "opposite_bias_h1", "bias_h1": bias, "dir": direction}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+                app._log_trade_decision({"stage": "precheck-fail", "reason": "opposite_bias_h1", "bias_h1": bias, "dir": direction}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception as e:
                 logger.warning(f"Lỗi khi log opposite_bias_h1 precheck-fail: {e}")
                 pass
@@ -433,7 +395,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
     if rr2 is not None and rr2 < float(cfg.trade_min_rr_tp2):
         app.ui_status(f"Auto-Trade: RR TP2 {rr2:.2f} < min.")
         try:
-            _log_trade_decision(app, {"stage": "precheck-fail", "reason": "rr_below_min", "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp2": tp2, "rr_tp2": rr2, "min_rr": float(cfg.trade_min_rr_tp2)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            app._log_trade_decision({"stage": "precheck-fail", "reason": "rr_below_min", "sym": sym, "dir": direction, "entry": entry, "sl": sl, "tp2": tp2, "rr_tp2": rr2, "min_rr": float(cfg.trade_min_rr_tp2)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception as e:
             logger.warning(f"Lỗi khi log rr_below_min precheck-fail: {e}")
             pass
@@ -449,7 +411,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
     if mt5_ctx and too_close:
         app.ui_status("Auto-Trade: too close to key level.")
         try:
-            _log_trade_decision(app, {"stage": "precheck-fail", "reason": "near_key_level", "sym": sym, "dir": direction, "cp": cp0, "min_dist_pips": float(cfg.trade_min_dist_keylvl_pips)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            app._log_trade_decision({"stage": "precheck-fail", "reason": "near_key_level", "sym": sym, "dir": direction, "cp": cp0, "min_dist_pips": float(cfg.trade_min_dist_keylvl_pips)}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception as e:
             logger.warning(f"Lỗi khi log near_key_level precheck-fail: {e}")
             pass
@@ -465,7 +427,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
     if last_sig == setup_sig and (now_ts - last_ts) < cool_s:
         app.ui_status("Auto-Trade: duplicate setup, cooldown active.")
         try:
-            _log_trade_decision(app, {"stage": "precheck-fail", "reason": "duplicate_setup", "sym": sym, "dir": direction, "setup_sig": setup_sig, "last_sig": last_sig, "elapsed_s": (now_ts - last_ts), "cooldown_s": cool_s}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            app._log_trade_decision({"stage": "precheck-fail", "reason": "duplicate_setup", "sym": sym, "dir": direction, "setup_sig": setup_sig, "last_sig": last_sig, "elapsed_s": (now_ts - last_ts), "cooldown_s": cool_s}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception as e:
             logger.warning(f"Lỗi khi log duplicate_setup precheck-fail: {e}")
             pass
@@ -494,7 +456,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
         if dist_points <= 0:
             app.ui_status("Auto-Trade: zero SL distance.")
             try:
-                _log_trade_decision(app, {"stage": "precheck-fail", "reason": "sl_zero", "sym": sym, "dir": direction, "entry": entry, "sl": sl, "point": point}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+                app._log_trade_decision({"stage": "precheck-fail", "reason": "sl_zero", "sym": sym, "dir": direction, "entry": entry, "sl": sl, "point": point}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception as e:
                 logger.warning(f"Lỗi khi log sl_zero precheck-fail: {e}")
                 pass
@@ -504,7 +466,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
         if value_per_point <= 0:
             app.ui_status("Auto-Trade: cannot determine value per point.")
             try:
-                _log_trade_decision(app, {"stage": "precheck-fail", "reason": "no_value_per_point", "sym": sym, "dir": direction}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+                app._log_trade_decision({"stage": "precheck-fail", "reason": "no_value_per_point", "sym": sym, "dir": direction}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception as e:
                 logger.warning(f"Lỗi khi log no_value_per_point precheck-fail: {e}")
                 pass
@@ -520,7 +482,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
         if not risk_money or risk_money <= 0:
             app.ui_status("Auto-Trade: invalid risk.")
             try:
-                _log_trade_decision(app, {"stage": "precheck-fail", "reason": "invalid_risk", "sym": sym, "dir": direction, "mode": mode, "equity": float(getattr(acc, "equity", 0.0))}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+                app._log_trade_decision({"stage": "precheck-fail", "reason": "invalid_risk", "sym": sym, "dir": direction, "mode": mode, "equity": float(getattr(acc, "equity", 0.0))}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
             except Exception as e:
                 logger.warning(f"Lỗi khi log invalid_risk precheck-fail: {e}")
                 pass
@@ -545,7 +507,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
     if vol1 < vol_min or vol2 < vol_min:
         app.ui_status("Auto-Trade: volume too small after split.")
         try:
-            _log_trade_decision(app, {"stage": "precheck-fail", "reason": "volume_too_small_after_split", "sym": sym, "dir": direction, "lots_total": lots_total, "vol1": vol1, "vol2": vol2, "vol_min": vol_min}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            app._log_trade_decision({"stage": "precheck-fail", "reason": "volume_too_small_after_split", "sym": sym, "dir": direction, "lots_total": lots_total, "vol1": vol1, "vol2": vol2, "vol_min": vol_min}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception as e:
             logger.warning(f"Lỗi khi log volume_too_small_after_split precheck-fail: {e}")
             pass
@@ -573,7 +535,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
         "dry_run": bool(cfg.auto_trade_dry_run),
     }
     try:
-        _log_trade_decision(app, {**log_base, "stage": "pre-check"}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+        app._log_trade_decision({**log_base, "stage": "pre-check"}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         logger.debug("Đã log pre-check decision.")
     except Exception as e:
         logger.warning(f"Lỗi khi log pre-check decision: {e}")
@@ -621,7 +583,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
     if errs:
         app.ui_status("Auto-Trade: order errors: " + "; ".join(errs))
         try:
-            _log_trade_decision(app, {**log_base, "stage": "send", "errors": errs}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            app._log_trade_decision({**log_base, "stage": "send", "errors": errs}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception as e:
             logger.warning(f"Lỗi khi log send errors: {e}")
             pass
@@ -630,7 +592,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
     else:
         _save_last_trade_state({"sig": setup_sig, "time": time.time()})
         try:
-            _log_trade_decision(app, {**log_base, "stage": "send", "ok": True}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
+            app._log_trade_decision({**log_base, "stage": "send", "ok": True}, folder_override=(app.mt5_symbol_var.get().strip() if hasattr(app, "mt5_symbol_var") else None))
         except Exception as e:
             logger.warning(f"Lỗi khi log successful send: {e}")
             pass

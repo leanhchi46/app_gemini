@@ -5,6 +5,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo # Thêm import ZoneInfo
 import time # Thêm import time
 
+from src.utils import md_saver, json_saver
+from src.utils.mt5_utils import _killzone_ranges_vn, info_get, pip_size_from_info, session_ranges_today
+from src.services import news
+
 logger = logging.getLogger(__name__) # Khởi tạo logger
 
 if TYPE_CHECKING:
@@ -12,14 +16,8 @@ if TYPE_CHECKING:
     from src.config.config import RunConfig
     from src.utils.safe_data import SafeMT5Data
 
-# Import các module cần thiết để lưu báo cáo
-from src.utils import md_saver, json_saver
-# Import hàm _killzone_ranges_vn, info_get, pip_size_from_info từ mt5_utils
-from src.utils.mt5_utils import _killzone_ranges_vn, info_get, pip_size_from_info, session_ranges_today
-from src.services import news # Cần cho phân tích tin tức
-
 def check_no_run_conditions(app: "TradingToolApp", cfg: "RunConfig") -> Tuple[bool, str]:
-    logger.debug(f"Bắt đầu hàm check_no_run_conditions.")
+    logger.debug("Bắt đầu hàm check_no_run_conditions.")
     """
     Kiểm tra các điều kiện NO-RUN.
     Trả về (True, "") nếu không có điều kiện NO-RUN nào được kích hoạt,
@@ -74,7 +72,7 @@ def evaluate_no_trade_conditions(
     cache_fetch_time: float,
     ttl_sec: int
 ) -> Tuple[bool, List[str], List[Dict[str, Any]], float, int]:
-    logger.debug(f"Bắt đầu hàm evaluate_no_trade_conditions.")
+    logger.debug("Bắt đầu hàm evaluate_no_trade_conditions.")
     """
     Đánh giá các điều kiện NO-TRADE.
     Trả về (True, [], ...) nếu không có điều kiện NO-TRADE nào được kích hoạt,
@@ -186,7 +184,7 @@ def check_all_preconditions(
     context_block: str,
     mt5_json_full: str
 ) -> Tuple[bool, str]:
-    logger.debug(f"Bắt đầu hàm check_all_preconditions.")
+    logger.debug("Bắt đầu hàm check_all_preconditions.")
     """
     Kiểm tra tổng hợp các điều kiện NO-RUN và NO-TRADE.
     Trả về (True, "") nếu tất cả các điều kiện đều thỏa,
@@ -220,8 +218,10 @@ def check_all_preconditions(
             }, folder_override=(app.mt5_symbol_var.get().strip() or None))
             
             note = "NO-TRADE: Điều kiện giao dịch không thỏa.\n- " + "\n- ".join(reasons_nt)
-            if context_block: note += f"\n\n{context_block}"
-            if mt5_json_full: note += f"\n\n[PHỤ LỤC_MT5_JSON]\n{mt5_json_full}"
+            if context_block:
+                note += f"\n\n{context_block}"
+            if mt5_json_full:
+                note += f"\n\n[PHỤ LỤC_MT5_JSON]\n{mt5_json_full}"
             
             app.combined_report_text = note
             app.ui_status(note) # Cập nhật UI status

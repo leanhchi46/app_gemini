@@ -8,8 +8,10 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 import logging # Thêm import logging
+
+from src.utils.utils import _tg_html_escape
 
 logger = logging.getLogger(__name__) # Khởi tạo logger
 
@@ -18,8 +20,6 @@ try:
 except Exception as e:  # pragma: no cover - optional dependency
     certifi = None  # type: ignore
     logger.warning(f"Không thể import certifi: {e}. Sẽ sử dụng CA mặc định của hệ thống.")
-
-from src.utils.utils import _tg_html_escape
 
 
 def build_ssl_context(cafile: Optional[str], skip_verify: bool) -> ssl.SSLContext:

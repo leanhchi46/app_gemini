@@ -12,9 +12,7 @@ Mục tiêu:
 from __future__ import annotations
 
 import sys
-import os
 from pathlib import Path
-import subprocess
 import logging
 
 logger = logging.getLogger(__name__)
@@ -24,15 +22,10 @@ logger.debug("Đã khởi tạo tool.py")
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-import tkinter as tk
-
-# Import các module nội bộ của dự án
-from src.config.constants import APP_DIR
-from src.utils.logging_utils import setup_logging
-
-# Import các module mới
-from src.ui.app_ui import TradingToolApp
-from src.core.app_logic import AppLogic
+import tkinter as tk  # noqa: E402
+from src.utils.logging_utils import setup_logging  # noqa: E402
+from src.ui.app_ui import TradingToolApp  # noqa: E402
+from src.core.app_logic import AppLogic  # noqa: E402
 
 
 def main():

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import json
 import ast
-from pathlib import Path
 from typing import TYPE_CHECKING
 import logging # Thêm import logging
 
-logger = logging.getLogger(__name__) # Khởi tạo logger
-
 from src.config.constants import APP_DIR
 from src.utils import ui_utils
+
+logger = logging.getLogger(__name__) # Khởi tạo logger
 
 if TYPE_CHECKING:
     from src.ui.app_ui import TradingToolApp

@@ -1,52 +1,37 @@
-# src/core/app_logic.py
 from __future__ import annotations
 
-import os  # Cần cho os.environ.get
-import sys  # Cần cho sys.exit
-from pathlib import Path
-import json  # Cần cho json.dumps, json.loads
+import json
+import logging
+import os
 import threading
 import time
-import logging
-from typing import Optional, TYPE_CHECKING, Tuple
-
-# Khởi tạo logger cho module này
-logger = logging.getLogger(__name__)
-
-# Để tránh lỗi import vòng tròn, sử dụng TYPE_CHECKING cho type hints
-if TYPE_CHECKING:
-    from src.ui.app_ui import TradingToolApp
-    import tkinter as tk
-
-from src.config.constants import API_KEY_ENC
-from src.utils.utils import obfuscate_text
-from src.config.config import RunConfig
-from src.core.worker_modules import main_worker as worker
-from src.utils import ui_utils
-from src.services import telegram_client
-from src.services import news
-from src.core import context_builder
-from src.utils import report_parser as report_utils_parser
-from src.utils import mt5_utils
-from src.core.worker_modules import no_run_trade_conditions # Import module mới
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog
 from tkinter.scrolledtext import ScrolledText
-import dotenv # Thêm import dotenv
-from dotenv import load_dotenv # Thêm import load_dotenv
+from typing import TYPE_CHECKING, Optional
 
-try:
-    import google.generativeai as genai
-except ImportError:
-    print(
-        "Lỗi: Cần cài đặt Google Gemini SDK. Chạy lệnh: pip install google-generativeai"
-    )
-    sys.exit(1)
+import MetaTrader5 as mt5
+import google.generativeai as genai
+from dotenv import load_dotenv
 
-try:
-    import MetaTrader5 as mt5
-except ImportError:
-    mt5 = None
+from src.config.config import RunConfig
+from src.config.constants import API_KEY_ENC
+from src.core import context_builder
+from src.core.worker_modules import main_worker as worker
+from src.services import news, telegram_client
+from src.utils import (
+    logging_utils,
+    mt5_utils,
+    report_parser as report_utils_parser,
+    ui_utils,
+    utils as obfuscate_text_utils,
+)
+
+logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from src.ui.app_ui import TradingToolApp
 
 
 class AppLogic:
@@ -67,7 +52,6 @@ class AppLogic:
         logger.debug("Khởi tạo AppLogic.")
         self.app_ui = app_ui
         # Khóa thread để đảm bảo an toàn khi truy cập tài nguyên dùng chung từ nhiều luồng
-        self._trade_log_lock = threading.Lock()
         self._proposed_trade_log_lock = threading.Lock()
         self._vector_db_lock = threading.Lock()
         self._ui_log_lock = threading.Lock()
@@ -99,6 +83,26 @@ class AppLogic:
         self._mt5_reconnect_delay_sec = 5  # Giây
         self._mt5_check_connection_job = None
         self._mt5_check_interval_sec = 30  # Giây
+        logger.debug("Kết thúc hàm __init__.")
+
+    def _log_trade_decision(
+        self, data: dict, folder_override: Optional[str] = None
+    ):
+        """
+        Ghi log quyết định giao dịch vào file JSON.
+
+        Args:
+            data: Dữ liệu quyết định giao dịch.
+            folder_override: Ghi đè thư mục log (tùy chọn).
+        """
+        logger.debug(
+            f"Bắt đầu _log_trade_decision với data keys: {data.keys()}, folder_override: {folder_override}."
+        )
+        # Không cần lock ở đây vì logging_utils.log_trade_decision đã có lock riêng
+        logging_utils.log_trade_decision(
+            data, folder_override=folder_override
+        )
+        logger.debug("Kết thúc _log_trade_decision.")
 
     def set_ui_references(self, app_ui: "TradingToolApp"):
         """
@@ -125,6 +129,7 @@ class AppLogic:
         if not api_key:
             ui_utils._enqueue(app, lambda: app.ui_status("Thiếu API key để cấu hình Gemini."))
             logger.warning("Thiếu API key để cấu hình Gemini API.")
+            logger.debug("Kết thúc _configure_gemini_api_and_update_ui (thiếu API key).")
             return
 
         def _do_configure():
@@ -145,8 +150,10 @@ class AppLogic:
                 error_message = f"Lỗi cấu hình Gemini API không xác định: {e}"
                 ui_utils._enqueue(app, lambda: app.ui_status(error_message))
                 logger.exception(error_message)
+            logger.debug("Kết thúc hàm _do_configure.")
         
         threading.Thread(target=_do_configure, daemon=True).start()
+        logger.debug("Kết thúc _configure_gemini_api_and_update_ui.")
 
     def compose_context(self, cfg: "RunConfig", budget_chars: int) -> str:
         """
@@ -179,6 +186,7 @@ class AppLogic:
                 logger.exception(f"Lỗi khi xây dựng ngữ cảnh trong luồng nền: {e}")
             finally:
                 context_result.set()
+            logger.debug("Kết thúc hàm _do_compose.")
 
         threading.Thread(target=_do_compose, daemon=True).start()
         
@@ -213,17 +221,20 @@ class AppLogic:
         logger.debug(f"Bắt đầu _maybe_notify_telegram. Telegram enabled: {cfg.telegram_enabled}, Report text length: {len(report_text) if report_text else 0}.")
         if not cfg.telegram_enabled or not report_text:
             logger.debug("Telegram không được bật hoặc không có báo cáo, bỏ qua gửi Telegram.")
+            logger.debug("Kết thúc _maybe_notify_telegram (Telegram không bật hoặc không có báo cáo).")
             return
 
         # Chỉ gửi nếu có tín hiệu "HIGH PROBABILITY" trong báo cáo
         if "HIGH PROBABILITY" not in report_text.upper():
             logger.debug("Báo cáo không chứa 'HIGH PROBABILITY', bỏ qua gửi Telegram.")
+            logger.debug("Kết thúc _maybe_notify_telegram (không có HIGH PROBABILITY).")
             return
 
         # Tạo một "chữ ký" cho báo cáo để tránh gửi trùng lặp
         signature = report_utils_parser.create_report_signature(report_text)
         if signature == app._last_telegram_signature:
             logger.info(f"Đã gửi báo cáo này trước đó (signature: {signature}), bỏ qua gửi trùng lặp.")
+            logger.debug("Kết thúc _maybe_notify_telegram (báo cáo trùng lặp).")
             return
         app._last_telegram_signature = signature
         logger.info(f"Đang gửi thông báo Telegram cho báo cáo (signature: {signature}).")
@@ -251,12 +262,13 @@ class AppLogic:
         logger.debug("Bắt đầu hàm _snapshot_config.")
         config = RunConfig(
             folder=app.folder_path.get().strip(),
+            only_generate_if_changed=bool(app.only_generate_if_changed_var.get()),
+            no_run_weekend_enabled=bool(app.no_run_weekend_enabled_var.get()),
             delete_after=bool(app.delete_after_var.get()),
             max_files=int(app.max_files_var.get()),
             upload_workers=int(app.upload_workers_var.get()),
             cache_enabled=bool(app.cache_enabled_var.get()),
             optimize_lossless=bool(app.optimize_lossless_var.get()),
-            only_generate_if_changed=bool(app.only_generate_if_changed_var.get()),
             ctx_limit=int(app.context_limit_chars_var.get()),
             create_ctx_json=bool(app.create_ctx_json_var.get()),
             prefer_ctx_json=bool(app.prefer_ctx_json_var.get()),
@@ -304,8 +316,10 @@ class AppLogic:
             trade_news_block_after_min=int(app.trade_news_block_after_min_var.get()),
             trade_news_block_enabled=True,
             news_cache_ttl_sec=300,
+            no_run_killzone_enabled=bool(app.no_run_killzone_enabled_var.get()),
         )
         logger.debug(f"Đã chụp snapshot cấu hình cho news fetch: {config}")
+        logger.debug("Kết thúc hàm _snapshot_config.")
         return config
 
     def _load_env(self, app: "TradingToolApp"):
@@ -322,6 +336,7 @@ class AppLogic:
         )
         if not path:
             logger.debug("Người dùng đã hủy chọn file .env.")
+            logger.debug("Kết thúc _load_env (người dùng hủy).")
             return
         # Nếu thư viện python-dotenv không được cài đặt, đọc tệp theo cách thủ công
         if load_dotenv is None:
@@ -359,7 +374,7 @@ class AppLogic:
         logger.debug("Bắt đầu _save_api_safe.")
         try:
             API_KEY_ENC.write_text(
-                obfuscate_text(app.api_key_var.get().strip()), encoding="utf-8"
+                obfuscate_text_utils.obfuscate_text(app.api_key_var.get().strip()), encoding="utf-8"
             )
             ui_utils.ui_message(
                 app, "info", "API", f"Đã lưu an toàn vào: {API_KEY_ENC}"
@@ -402,6 +417,7 @@ class AppLogic:
         logger.debug(f"Bắt đầu start_analysis. App đang chạy: {app.is_running}")
         if app.is_running:
             logger.info("Ứng dụng đã đang chạy, bỏ qua yêu cầu start_analysis.")
+            logger.debug("Kết thúc start_analysis (đã chạy).")
             return
         folder = app.folder_path.get().strip()
         if not folder:
@@ -409,6 +425,7 @@ class AppLogic:
             ui_utils.ui_message(
                 app, "warning", "Thiếu thư mục", "Vui lòng chọn thư mục ảnh trước."
             )
+            logger.debug("Kết thúc start_analysis (thiếu thư mục).")
             return
 
         if app.cache_enabled_var.get() and app.delete_after_var.get():
@@ -423,6 +440,7 @@ class AppLogic:
         app._load_files(folder)
         if len(app.results) == 0:
             logger.info("Không tìm thấy ảnh nào trong thư mục, không thể bắt đầu phân tích.")
+            logger.debug("Kết thúc start_analysis (không có ảnh).")
             return
 
         prompt_no_entry = app.prompt_no_entry_text.get("1.0", "end").strip()
@@ -436,31 +454,11 @@ class AppLogic:
                 "Thiếu prompt",
                 "Vui lòng nhập nội dung cho cả hai tab prompt trước khi chạy.",
             )
+            logger.debug("Kết thúc start_analysis (thiếu prompt).")
             return
 
         cfg = self._snapshot_config(app)
         logger.debug(f"Cấu hình snapshot cho worker: {cfg}")
-
-        # API key đã được cấu hình ở _configure_gemini_api_and_update_ui, không cần cấu hình lại ở đây
-        # api_key = app.api_key_var.get().strip() or os.environ.get("GOOGLE_API_KEY")
-        # if not api_key:
-        #     logger.warning("Thiếu API key, không thể cấu hình Gemini API.")
-        #     ui_utils.ui_message(
-        #         app,
-        #         "warning",
-        #         "Thiếu API key",
-        #         "Vui lòng nhập API key hoặc đặt biến môi trường GOOGLE_API_KEY.",
-        #     )
-        #     return
-        
-        # # Cấu hình API key cho thư viện Gemini
-        # try:
-        #     genai.configure(api_key=api_key)
-        #     logger.debug("Đã cấu hình Gemini API key.")
-        # except Exception as e:
-        #     logger.exception(f"Lỗi cấu hình API trong start_analysis: {e}")
-        #     ui_utils.ui_message(app, "error", "Gemini", f"Lỗi cấu hình API: {e}")
-        #     return
 
         # Đặt lại trạng thái của các kết quả trước khi bắt đầu
         for i, r in enumerate(app.results):
@@ -498,6 +496,7 @@ class AppLogic:
         logger.debug(f"Bắt đầu stop_analysis. App đang chạy: {app.is_running}")
         if not app.is_running:
             logger.info("Ứng dụng không chạy, bỏ qua yêu cầu stop_analysis.")
+            logger.debug("Kết thúc stop_analysis (không chạy).")
             return
 
         app.stop_flag = True
@@ -514,7 +513,7 @@ class AppLogic:
                 logger.info("Đã yêu cầu hủy các tác vụ upload đang chờ trong executor.")
             except Exception as e:
                 logger.exception(f"Lỗi khi shutdown executor: {e}")
-                logging.warning(f"Lỗi khi shutdown executor: {e}")
+                logger.warning(f"Lỗi khi shutdown executor: {e}")
         else:
             ui_utils.ui_status(
                 app, "Đang dừng... (Không có tác vụ upload nào đang hoạt động)"
@@ -593,6 +592,7 @@ class AppLogic:
         logger.debug("Bắt đầu _schedule_next_autorun.")
         if not app.autorun_var.get():
             logger.debug("Auto-run không được bật, bỏ qua lên lịch.")
+            logger.debug("Kết thúc _schedule_next_autorun (auto-run không bật).")
             return
         if app._autorun_job:
             app.root.after_cancel(app._autorun_job)
@@ -639,7 +639,7 @@ class AppLogic:
                             pass
                     except Exception as e:
                         logger.exception(f"Lỗi trong luồng _sweep của auto-trade: {e}")
-                        logging.warning(f"Lỗi trong luồng _sweep của auto-trade: {e}")
+                        logger.warning(f"Lỗi trong luồng _sweep của auto-trade: {e}")
                     logger.debug("Kết thúc luồng _sweep.")
 
                 threading.Thread(
@@ -707,17 +707,22 @@ class AppLogic:
                 logger.info("Không đoán được symbol MT5 từ tên file.")
         except Exception as e:
             logger.exception(f"Lỗi khi đoán symbol MT5: {e}")
-            logging.warning(f"Lỗi khi đoán symbol MT5: {e}")
+            logger.warning(f"Lỗi khi đoán symbol MT5: {e}")
         logger.debug("Kết thúc _mt5_guess_symbol.")
 
-    def _mt5_connect(self, app: "TradingToolApp") -> Tuple[bool, str]:
+    def _mt5_connect(self, app: "TradingToolApp"):
         """
         Khởi tạo kết nối đến MetaTrader 5.
         Trả về trạng thái kết nối (True/False) và thông báo.
+
+        Args:
+            app: Đối tượng giao diện người dùng (TradingToolApp).
         """
+        logger.debug("Bắt đầu _mt5_connect.")
         if mt5 is None:
             msg = "Chưa cài thư viện MetaTrader5.\nHãy chạy: pip install MetaTrader5"
-            logging.error(f"MT5 Connect Error: {msg}")
+            logger.error(f"MT5 Connect Error: {msg}")
+            logger.debug("Kết thúc _mt5_connect (thiếu thư viện MT5).")
             return False, msg
 
         term = app.mt5_term_path_var.get().strip() or None
@@ -727,29 +732,32 @@ class AppLogic:
             if not ok:
                 err_code = mt5.last_error()
                 msg = f"MT5: initialize() thất bại: {err_code}"
-                logging.error(f"MT5 Connect Error: {msg}")
+                logger.error(f"MT5 Connect Error: {msg}")
+                self._schedule_mt5_reconnect(app)  # Kích hoạt tái kết nối
+                logger.debug("Kết thúc _mt5_connect (initialize thất bại).")
                 return False, msg
             else:
                 v = mt5.version()
                 msg = f"MT5: đã kết nối (build {v[0]})"
-                logging.info(f"MT5 Connect Success: {msg}")
+                logger.info(f"MT5 Connect Success: {msg}")
+                self._mt5_reconnect_attempts = 0  # Reset số lần thử khi kết nối thành công
+                self._schedule_mt5_connection_check(app)  # Bắt đầu kiểm tra định kỳ
+                logger.debug("Kết thúc _mt5_connect (thành công).")
                 return True, msg
         except Exception as e:
             msg = f"MT5: lỗi kết nối: {e}"
-            logging.error(f"MT5 Connect Exception: {msg}")
+            logger.error(f"MT5 Connect Exception: {msg}")
             self._schedule_mt5_reconnect(app)  # Kích hoạt tái kết nối
+            logger.debug("Kết thúc _mt5_connect (có lỗi ngoại lệ).")
             return False, msg
 
-    def _mt5_connect(self, app: "TradingToolApp") -> Tuple[bool, str]:
+    def _schedule_mt5_reconnect(self, app: "TradingToolApp"):
         """
-        Khởi tạo kết nối đến MetaTrader 5.
-        Trả về trạng thái kết nối (True/False) và thông báo.
+        Lên lịch một lần thử tái kết nối MT5 sau một khoảng thời gian nhất định,
+        sử dụng chiến lược backoff theo cấp số nhân.
 
         Args:
             app: Đối tượng giao diện người dùng (TradingToolApp).
-
-        Returns:
-            Tuple[bool, str]: Trạng thái kết nối (True nếu thành công, False nếu thất bại) và thông báo kết quả.
         """
         logger.debug("Bắt đầu _schedule_mt5_reconnect.")
         if self._mt5_reconnect_job:
@@ -758,7 +766,7 @@ class AppLogic:
             logger.debug("Đã hủy tác vụ tái kết nối MT5 cũ.")
 
         if self._mt5_reconnect_attempts >= self._mt5_max_reconnect_attempts:
-            logging.warning(
+            logger.warning(
                 "MT5 Reconnect: Đã đạt số lần thử tối đa, dừng tái kết nối."
             )
             ui_utils._enqueue(
@@ -778,7 +786,7 @@ class AppLogic:
                 f"MT5: Đang thử tái kết nối ({self._mt5_reconnect_attempts}/{self._mt5_max_reconnect_attempts}) sau {delay}s..."
             ),
         )
-        logging.info(
+        logger.info(
             f"MT5 Reconnect: Lên lịch thử lại sau {delay}s (lần {self._mt5_reconnect_attempts})."
         )
 
@@ -794,15 +802,16 @@ class AppLogic:
         Args:
             app: Đối tượng giao diện người dùng (TradingToolApp).
         """
-        logging.info("MT5 Reconnect: Đang thực hiện tái kết nối...")
+        logger.info("MT5 Reconnect: Đang thực hiện tái kết nối...")
         ok, msg = self._mt5_connect(app)
         if ok:
-            logging.info("MT5 Reconnect: Tái kết nối thành công.")
+            logger.info("MT5 Reconnect: Tái kết nối thành công.")
             self._mt5_reconnect_attempts = 0  # Reset số lần thử
             self._schedule_mt5_connection_check(app)  # Bắt đầu kiểm tra định kỳ
         else:
-            logging.warning(f"MT5 Reconnect: Tái kết nối thất bại: {msg}")
+            logger.warning(f"MT5 Reconnect: Tái kết nối thất bại: {msg}")
             self._schedule_mt5_reconnect(app)  # Lên lịch thử lại
+        logger.debug("Kết thúc _attempt_mt5_reconnect.")
 
     def _schedule_mt5_connection_check(self, app: "TradingToolApp"):
         """
@@ -874,8 +883,8 @@ class AppLogic:
 
             logger.debug("MT5 Check: Kết nối vẫn hoạt động.")
             app.mt5_initialized = True  # Đảm bảo trạng thái được cập nhật
-            self._schedule_mt5_connection_check(app)  # Lên lịch kiểm tra tiếp theo
-            logger.debug("Kết thúc _check_mt5_connection (thành công).")
+            self._schedule_next_autorun(app)  # Lên lịch kiểm tra tiếp theo
+            logger.debug("Kết thúc _check_connection (thành công).")
         except Exception as e:
             logger.exception(f"MT5 Check Exception: {e}")
             app.mt5_initialized = False
@@ -932,7 +941,7 @@ class AppLogic:
             app: Đối tượng giao diện người dùng (TradingToolApp).
             ttl: Thời gian sống (Time-To-Live) của cache tin tức bằng giây. Mặc định là 300 giây.
             async_fetch: Nếu True, việc làm mới tin tức sẽ chạy không đồng bộ trong một luồng riêng.
-                         Nếu False, nó sẽ chạy đồng bộ. Mặc định là True.
+                         If False, nó sẽ chạy đồng bộ. Mặc định là True.
             cfg: Đối tượng RunConfig tùy chọn để sử dụng. Nếu None, cấu hình sẽ được chụp từ UI.
         """
         logger.debug(f"Bắt đầu _refresh_news_cache. Async: {async_fetch}, TTL: {ttl}")
@@ -966,7 +975,7 @@ class AppLogic:
                         logger.info(f"Đã làm mới tin tức không đồng bộ, tìm thấy {len(ev or [])} sự kiện.")
                     except Exception as e:
                         logger.exception(f"Lỗi khi làm mới tin tức (async): {e}")
-                        logging.warning(f"Lỗi khi làm mới tin tức (async): {e}")
+                        logger.warning(f"Lỗi khi làm mới tin tức (async): {e}")
                     finally:
                         with app._news_refresh_lock:
                             app._news_refresh_inflight = False
@@ -992,13 +1001,13 @@ class AppLogic:
                 app.ff_cache_fetch_time = time.time()
                 logger.info(f"Đã làm mới tin tức đồng bộ, tìm thấy {len(ev or [])} sự kiện.")
             except Exception as e:
-                logger.exception(f"Lỗi khi làm mới tin tức (sync): {e}")
-                logging.warning(f"Lỗi khi làm mới tin tức (sync): {e}")
+                        logger.exception(f"Lỗi khi làm mới tin tức (sync): {e}")
+                        logger.warning(f"Lỗi khi làm mới tin tức (sync): {e}")
             finally:
                 app._news_refresh_inflight = False
                 app._news_refresh_lock.release()
             logger.debug("Kết thúc _refresh_news_cache (sync).")
         except Exception as e:
             logger.exception(f"Lỗi không mong muốn trong refresh_news_cache: {e}")
-            logging.error(f"Lỗi không mong muốn trong refresh_news_cache: {e}")
+            logger.error(f"Lỗi không mong muốn trong refresh_news_cache: {e}")
         logger.debug("Kết thúc _refresh_news_cache (tổng thể).")

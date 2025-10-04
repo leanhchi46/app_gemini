@@ -6,21 +6,18 @@ from typing import TYPE_CHECKING
 
 import google.generativeai as genai # Thêm import genai
 
-# Khởi tạo logger cho module này
-logger = logging.getLogger(__name__)
-
-# Import các module con mới
 from src.core.worker_modules import api_handlers
 from src.core.worker_modules import context_coordinator
 from src.core.worker_modules import image_processor
 from src.core.worker_modules import prompt_manager
 from src.core.worker_modules import trade_conditions
 from src.core.worker_modules import no_run_trade_conditions # Thêm import no_run_trade_conditions
-
-# Import các tiện ích và cấu hình cần thiết
 from src.utils import ui_utils
 from src.utils import json_saver, md_saver
 from src.config.constants import APP_DIR
+
+# Khởi tạo logger cho module này
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from scripts.tool import TradingToolApp
@@ -218,7 +215,7 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
                 err_msg = f"Lỗi nghiêm trọng khi lưu ctx_*.json: {e}\n\n{tb_str}"
                 app.ui_status(err_msg)
                 ui_utils.ui_message(app, "error", "Lỗi Lưu JSON", err_msg)
-                logging.exception("CRITICAL: Lỗi lưu file JSON từ worker.")
+                logger.exception("CRITICAL: Lỗi lưu file JSON từ worker.")
             
             ui_utils.ui_refresh_history_list(app)
             ui_utils.ui_refresh_json_list(app)
