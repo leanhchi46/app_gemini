@@ -21,7 +21,7 @@ def _gen_stream_with_retry(_model: genai.GenerativeModel, _parts: List[Any], tri
     Cơ chế này giúp tăng độ ổn định khi gặp lỗi tạm thời từ API.
     Sử dụng chiến lược exponential backoff: thời gian chờ tăng gấp đôi sau mỗi lần thất bại.
     """
-    logger.debug(f"Bắt đầu _gen_stream_with_retry với {tries} lần thử, base_delay: {base_delay}.")
+    logger.debug(f"Bắt đầu hàm _gen_stream_with_retry với {tries} lần thử, base_delay: {base_delay}.")
     last_exception = None
     for i in range(tries):
         try:
@@ -45,13 +45,14 @@ def _gen_stream_with_retry(_model: genai.GenerativeModel, _parts: List[Any], tri
         
         if i == tries - 1:
             logger.error(f"Tất cả {tries} lần thử đều thất bại. Ném ra lỗi cuối cùng.")
+            logger.debug("Kết thúc hàm _gen_stream_with_retry (thất bại).")
             raise last_exception # Ném ra lỗi cuối cùng nếu tất cả các lần thử đều thất bại
 
 def stream_and_process_ai_response(app: "TradingToolApp", cfg: "RunConfig", model: genai.GenerativeModel, parts: List[Any], mt5_dict: Dict) -> str:
     """
     Thực hiện gọi API streaming, xử lý các chunk trả về, và kích hoạt auto-trade.
     """
-    logger.debug("Bắt đầu stream_and_process_ai_response.")
+    logger.debug("Bắt đầu hàm stream_and_process_ai_response.")
     combined_text = ""
     trade_action_taken = False
     
@@ -86,5 +87,5 @@ def stream_and_process_ai_response(app: "TradingToolApp", cfg: "RunConfig", mode
                     app.ui_status(f"Lỗi Auto-Trade stream: {e}")
                     logger.error(f"Lỗi Auto-Trade stream: {e}")
     
-    logger.debug(f"Kết thúc stream_and_process_ai_response. Tổng độ dài văn bản: {len(combined_text)}.")
+    logger.debug(f"Kết thúc hàm stream_and_process_ai_response. Tổng độ dài văn bản: {len(combined_text)}.")
     return combined_text or "[Không có nội dung trả về]"

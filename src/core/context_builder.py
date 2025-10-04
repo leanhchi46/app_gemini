@@ -33,9 +33,10 @@ def parse_proposed_trades_file(reports_dir: Path) -> list[dict]:
         Danh sách các từ điển, mỗi từ điển đại diện cho một giao dịch được đề xuất.
         Trả về danh sách rỗng nếu file không tồn tại hoặc có lỗi khi parse.
     """
-    logger.debug(f"Bắt đầu parse_proposed_trades_file từ thư mục: {reports_dir}")
+    logger.debug(f"Bắt đầu hàm parse_proposed_trades_file từ thư mục: {reports_dir}")
     if not reports_dir:
         logger.debug("reports_dir trống, trả về list rỗng.")
+        logger.debug("Kết thúc hàm parse_proposed_trades_file (thư mục trống).")
         return []
     log_file = reports_dir / "proposed_trades.jsonl"
     if not log_file.exists():
@@ -51,7 +52,9 @@ def parse_proposed_trades_file(reports_dir: Path) -> list[dict]:
         logger.debug(f"Đã parse {len(trades)} trades từ {log_file}.")
     except Exception as e:
         logger.error(f"Lỗi khi parse proposed_trades.jsonl: {e}")
+        logger.debug("Kết thúc hàm parse_proposed_trades_file (lỗi parse).")
         return [] # Trả về danh sách rỗng nếu có lỗi khi parse
+    logger.debug("Kết thúc hàm parse_proposed_trades_file.")
     return trades
 
 
@@ -66,9 +69,10 @@ def parse_vector_database_file(reports_dir: Path) -> list[dict]:
         Danh sách các từ điển, mỗi từ điển đại diện cho một vector trạng thái thị trường.
         Trả về danh sách rỗng nếu file không tồn tại hoặc có lỗi khi parse.
     """
-    logger.debug(f"Bắt đầu parse_vector_database_file từ thư mục: {reports_dir}")
+    logger.debug(f"Bắt đầu hàm parse_vector_database_file từ thư mục: {reports_dir}")
     if not reports_dir:
         logger.debug("reports_dir trống, trả về list rỗng.")
+        logger.debug("Kết thúc hàm parse_vector_database_file (thư mục trống).")
         return []
     log_file = reports_dir / "vector_database.jsonl"
     if not log_file.exists():
@@ -84,7 +88,9 @@ def parse_vector_database_file(reports_dir: Path) -> list[dict]:
         logger.debug(f"Đã parse {len(vectors)} vectors từ {log_file}.")
     except Exception as e:
         logger.error(f"Lỗi khi parse vector_database.jsonl: {e}")
+        logger.debug("Kết thúc hàm parse_vector_database_file (lỗi parse).")
         return []
+    logger.debug("Kết thúc hàm parse_vector_database_file.")
     return vectors
 
 
@@ -99,9 +105,10 @@ def parse_ctx_json_files(reports_dir: Path, max_n: int = 5) -> list[dict]:
     Returns:
         Danh sách các từ điển, mỗi từ điển đại diện cho một ngữ cảnh đã parse.
     """
-    logger.debug(f"Bắt đầu parse_ctx_json_files từ thư mục: {reports_dir}, max_n: {max_n}")
+    logger.debug(f"Bắt đầu hàm parse_ctx_json_files từ thư mục: {reports_dir}, max_n: {max_n}")
     if not reports_dir:
         logger.debug("reports_dir trống, trả về list rỗng.")
+        logger.debug("Kết thúc hàm parse_ctx_json_files (thư mục trống).")
         return []
     files = sorted(reports_dir.glob("ctx_*.json"), reverse=True)[: max(1, int(max_n))]
     out: list[dict] = []
@@ -113,6 +120,7 @@ def parse_ctx_json_files(reports_dir: Path, max_n: int = 5) -> list[dict]:
             logger.warning(f"Lỗi khi parse file context {p.name}: {e}")
             continue
     logger.debug(f"Đã parse {len(out)} file context.")
+    logger.debug("Kết thúc hàm parse_ctx_json_files.")
     return out
 
 
@@ -127,9 +135,10 @@ def summarize_checklist_trend(ctx_items: list[dict]) -> dict:
         Một từ điển chứa xu hướng ("improving", "deteriorating", "flat", "unknown")
         và tỷ lệ "enough" (D? hoặc DU).
     """
-    logger.debug(f"Bắt đầu summarize_checklist_trend với {len(ctx_items)} items.")
+    logger.debug(f"Bắt đầu hàm summarize_checklist_trend với {len(ctx_items)} items.")
     if not ctx_items:
         logger.debug("ctx_items trống, trả về trend unknown.")
+        logger.debug("Kết thúc hàm summarize_checklist_trend (không có items).")
         return {"trend": "unknown", "enough_ratio": None}
     order = ["A", "B", "C", "D", "E", "F"]
     scores = {"D?": 2, "CH?": 1, "SAI": 0}
@@ -158,10 +167,11 @@ def summarize_checklist_trend(ctx_items: list[dict]) -> dict:
         total += 1
     if len(seq) < 2:
         logger.debug("Chỉ có 1 hoặc 0 item trong sequence, trend là flat.")
+        logger.debug("Kết thúc hàm summarize_checklist_trend (sequence quá ngắn).")
         return {"trend": "flat", "enough_ratio": (enough_cnt / total if total else None)}
     delta = seq[-1] - seq[0]
     trend = "improving" if delta > 0 else ("deteriorating" if delta < 0 else "flat")
-    logger.debug(f"Kết thúc summarize_checklist_trend. Trend: {trend}, Enough Ratio: {enough_cnt / total if total else None}")
+    logger.debug(f"Kết thúc hàm summarize_checklist_trend. Trend: {trend}, Enough Ratio: {enough_cnt / total if total else None}")
     return {"trend": trend, "enough_ratio": (enough_cnt / total if total else None)}
 
 
@@ -176,7 +186,7 @@ def images_tf_map(names: list[str], detect_cb: Any) -> dict:
     Returns:
         Một từ điển ánh xạ tên tệp hình ảnh tới khung thời gian của nó.
     """
-    logger.debug(f"Bắt đầu images_tf_map với {len(names)} tên ảnh.")
+    logger.debug(f"Bắt đầu hàm images_tf_map với {len(names)} tên ảnh.")
     out = {}
     for n in names:
         try:
@@ -185,7 +195,7 @@ def images_tf_map(names: list[str], detect_cb: Any) -> dict:
         except Exception as e:
             out[n] = None
             logger.warning(f"Lỗi khi phát hiện timeframe cho ảnh '{n}': {e}")
-    logger.debug("Kết thúc images_tf_map.")
+    logger.debug("Kết thúc hàm images_tf_map.")
     return out
 
 
@@ -199,13 +209,15 @@ def folder_signature(names: list[str]) -> str:
     Returns:
         Chuỗi chữ ký SHA1.
     """
-    logger.debug(f"Bắt đầu folder_signature với {len(names)} tên ảnh.")
+    logger.debug(f"Bắt đầu hàm folder_signature với {len(names)} tên ảnh.")
     names = sorted(list(names or []))
     if not names:
         logger.debug("Không có tên ảnh, trả về signature rỗng.")
+        logger.debug("Kết thúc hàm folder_signature (không có tên).")
         return ""
     sig = hashlib.sha1("\n".join(names).encode("utf-8")).hexdigest()
     logger.debug(f"Đã tạo folder signature: sha1:{sig}")
+    logger.debug("Kết thúc hàm folder_signature.")
     return f"sha1:{sig}" if sig else ""
 
 
@@ -226,7 +238,7 @@ def compose_context(app: Any, cfg: Any, budget_chars: int = 1800) -> str:
     Returns:
         Chuỗi JSON ngữ cảnh đã được tạo và làm gọn.
     """
-    logger.debug(f"Bắt đầu compose_context với budget_chars: {budget_chars}.")
+    logger.debug(f"Bắt đầu hàm compose_context với budget_chars: {budget_chars}.")
     mt5_ctx_lite: dict | None = {}
     mt5_flags: dict | None = {}
     mt5full = None
@@ -559,5 +571,5 @@ def compose_context(app: Any, cfg: Any, budget_chars: int = 1800) -> str:
     except Exception as e:
         logger.exception(f"Error during context slimming: {e}")
         # Fallback to original text but DO NOT truncate to ensure valid JSON.
+        logger.debug("Kết thúc hàm compose_context (lỗi slimming).")
         return json.dumps(composed, ensure_ascii=False)
-

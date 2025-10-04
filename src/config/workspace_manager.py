@@ -105,6 +105,7 @@ def _save_workspace(app: "TradingToolApp"):
     except Exception as e:
         ui_utils.ui_message(app, "error", "Workspace", str(e))
         logger.error(f"Workspace: Lỗi khi lưu workspace: {e}")
+    logger.debug("Kết thúc _save_workspace.")
 
 def _load_workspace(app: "TradingToolApp"):
     """
@@ -211,6 +212,7 @@ def _load_workspace(app: "TradingToolApp"):
     app.app_logic._mt5_max_reconnect_attempts = int(data.get("mt5_max_reconnect_attempts", 5))
     app.app_logic._mt5_reconnect_delay_sec = int(data.get("mt5_reconnect_delay_sec", 5))
     app.app_logic._mt5_check_interval_sec = int(data.get("mt5_check_interval_sec", 30))
+    logger.debug("Kết thúc _load_workspace.")
 
 def _delete_workspace(app: "TradingToolApp"):
     """

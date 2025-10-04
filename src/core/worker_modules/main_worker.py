@@ -25,13 +25,17 @@ if TYPE_CHECKING:
 
 def _tnow() -> float:
     """Trả về thời gian hiện tại với độ chính xác cao."""
-    return time.perf_counter()
+    logger.debug("Bắt đầu hàm _tnow.")
+    result = time.perf_counter()
+    logger.debug(f"Kết thúc hàm _tnow. Thời gian: {result}")
+    return result
 
 def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entry_run: str, model_name: str, cfg: "RunConfig"):
     """
     Luồng phân tích chính, điều phối toàn bộ quy trình từ upload ảnh đến auto-trade.
     Hàm này được thiết kế để chạy trong một luồng riêng biệt (thread) để không làm treo giao diện.
     """
+    logger.debug("Bắt đầu hàm run_analysis_worker.")
     uploaded_files = []
     early_exit = False
     composed = ""
@@ -238,4 +242,4 @@ def run_analysis_worker(app: "TradingToolApp", prompt_no_entry: str, prompt_entr
         # Báo cho luồng chính biết worker đã hoàn thành và reset thanh tiến trình
         app._update_progress(0, 1)
         ui_utils._enqueue(app, app._finalize_done if not app.stop_flag else app._finalize_stopped)
-        logger.debug("run_analysis_worker đã hoàn thành.")
+        logger.debug("Kết thúc hàm run_analysis_worker.")

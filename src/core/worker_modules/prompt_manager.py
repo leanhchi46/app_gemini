@@ -17,7 +17,7 @@ def select_prompt_dynamically(app: "TradingToolApp", cfg: "RunConfig", safe_mt5_
     """
     Chọn prompt phù hợp dựa trên trạng thái giao dịch hiện tại (có lệnh đang mở hay không).
     """
-    logger.debug("Bắt đầu select_prompt_dynamically.")
+    logger.debug("Bắt đầu hàm select_prompt_dynamically.")
     prompt_to_use = ""
     has_positions = cfg.mt5_enabled and safe_mt5_data and safe_mt5_data.raw and safe_mt5_data.raw.get("positions")
     logger.debug(f"MT5 enabled: {cfg.mt5_enabled}, có lệnh đang mở: {bool(has_positions)}")
@@ -39,7 +39,7 @@ def select_prompt_dynamically(app: "TradingToolApp", cfg: "RunConfig", safe_mt5_
         # Cơ chế dự phòng: sử dụng prompt cũ nếu đọc file lỗi
         prompt_to_use = prompt_entry_run if has_positions else prompt_no_entry
         
-    logger.debug("Kết thúc select_prompt_dynamically.")
+    logger.debug("Kết thúc hàm select_prompt_dynamically.")
     return prompt_to_use
 
 def construct_final_prompt(app: "TradingToolApp", prompt: str, mt5_dict: Dict, safe_mt5_data: SafeMT5Data, context_block: str, mt5_json_full: str, paths: List[str]) -> str:
@@ -47,7 +47,7 @@ def construct_final_prompt(app: "TradingToolApp", prompt: str, mt5_dict: Dict, s
     Xây dựng nội dung prompt cuối cùng để gửi đến model AI.
     Tích hợp dữ liệu có cấu trúc từ MT5, ngữ cảnh lịch sử và thông tin timeframe.
     """
-    logger.debug("Bắt đầu construct_final_prompt.")
+    logger.debug("Bắt đầu hàm construct_final_prompt.")
     # Bắt đầu với thông tin timeframe từ tên file
     tf_section = app._build_timeframe_section([Path(p).name for p in paths]).strip()
     parts_text = []
@@ -91,5 +91,5 @@ def construct_final_prompt(app: "TradingToolApp", prompt: str, mt5_dict: Dict, s
 
     # Dùng dict.fromkeys để loại bỏ các phần tử trùng lặp và giữ nguyên thứ tự
     final_prompt_content = "".join(list(dict.fromkeys(parts_text)))
-    logger.debug(f"Kết thúc construct_final_prompt. Độ dài prompt cuối cùng: {len(final_prompt_content)}.")
+    logger.debug(f"Kết thúc hàm construct_final_prompt. Độ dài prompt cuối cùng: {len(final_prompt_content)}.")
     return final_prompt_content

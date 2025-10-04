@@ -18,14 +18,16 @@ def _get_reports_dir(app: "TradingToolApp", folder_override: str | None = None) 
     Lấy đường dẫn đến thư mục "Reports" bên trong thư mục ảnh đã chọn.
     Nếu thư mục chưa tồn tại, nó sẽ được tạo.
     """
-    logger.debug(f"Bắt đầu _get_reports_dir. Folder override: {folder_override}")
+    logger.debug(f"Bắt đầu hàm _get_reports_dir. Folder override: {folder_override}")
     folder = Path(folder_override) if folder_override else (Path(app.folder_path.get().strip()) if app.folder_path.get().strip() else None)
     if not folder:
         logger.warning("Không có folder path, không thể lấy reports dir.")
+        logger.debug("Kết thúc hàm _get_reports_dir (không có folder).")
         return None
     d = folder / "Reports"
     d.mkdir(parents=True, exist_ok=True)
     logger.debug(f"Đã lấy reports dir: {d}")
+    logger.debug("Kết thúc hàm _get_reports_dir.")
     return d
 
 def _refresh_history_list(app: "TradingToolApp"):
@@ -33,9 +35,10 @@ def _refresh_history_list(app: "TradingToolApp"):
     Làm mới danh sách các báo cáo lịch sử (file report_*.md) trong thư mục "Reports"
     và hiển thị chúng trên giao diện.
     """
-    logger.debug("Bắt đầu _refresh_history_list.")
+    logger.debug("Bắt đầu hàm _refresh_history_list.")
     if not hasattr(app, "history_list"):
         logger.warning("app không có thuộc tính history_list.")
+        logger.debug("Kết thúc hàm _refresh_history_list (không có history_list).")
         return
     app.history_list.delete(0, "end")
     d = _get_reports_dir(app)
@@ -48,15 +51,17 @@ def _refresh_history_list(app: "TradingToolApp"):
     else:
         app._history_files = []
         logger.warning("Không thể làm mới history list vì không có thư mục reports hợp lệ.")
+    logger.debug("Kết thúc hàm _refresh_history_list.")
 
 def _preview_history_selected(app: "TradingToolApp"):
     """
     Hiển thị nội dung của báo cáo lịch sử được chọn trong khu vực chi tiết trên giao diện.
     """
-    logger.debug("Bắt đầu _preview_history_selected.")
+    logger.debug("Bắt đầu hàm _preview_history_selected.")
     sel = getattr(app, "history_list", None).curselection() if hasattr(app, "history_list") else None
     if not sel:
         logger.debug("Không có báo cáo lịch sử nào được chọn.")
+        logger.debug("Kết thúc hàm _preview_history_selected (không có lựa chọn).")
         return
     p = app._history_files[sel[0]]
     try:
@@ -76,10 +81,11 @@ def _open_history_selected(app: "TradingToolApp"):
     """
     Mở báo cáo lịch sử được chọn bằng ứng dụng mặc định của hệ điều hành.
     """
-    logger.debug("Bắt đầu _open_history_selected.")
+    logger.debug("Bắt đầu hàm _open_history_selected.")
     sel = app.history_list.curselection()
     if not sel:
         logger.debug("Không có báo cáo lịch sử nào được chọn để mở.")
+        logger.debug("Kết thúc hàm _open_history_selected (không có lựa chọn).")
         return
     p = app._history_files[sel[0]]
     try:
@@ -95,10 +101,11 @@ def _delete_history_selected(app: "TradingToolApp"):
     """
     Xóa báo cáo lịch sử được chọn khỏi hệ thống và làm mới danh sách trên giao diện.
     """
-    logger.debug("Bắt đầu _delete_history_selected.")
+    logger.debug("Bắt đầu hàm _delete_history_selected.")
     sel = app.history_list.curselection()
     if not sel:
         logger.debug("Không có báo cáo lịch sử nào được chọn để xóa.")
+        logger.debug("Kết thúc hàm _delete_history_selected (không có lựa chọn).")
         return
     p = app._history_files[sel[0]]
     try:
@@ -117,7 +124,7 @@ def _open_reports_folder(app: "TradingToolApp"):
     """
     Mở thư mục "Reports" bằng ứng dụng mặc định của hệ điều hành.
     """
-    logger.debug("Bắt đầu _open_reports_folder.")
+    logger.debug("Bắt đầu hàm _open_reports_folder.")
     d = _get_reports_dir(app)
     if d:
         ui_utils._open_path(app, d)
@@ -131,9 +138,10 @@ def _refresh_json_list(app: "TradingToolApp"):
     Làm mới danh sách các file JSON ngữ cảnh (ctx_*.json) trong thư mục "Reports"
     và hiển thị chúng trên giao diện.
     """
-    logger.debug("Bắt đầu _refresh_json_list.")
+    logger.debug("Bắt đầu hàm _refresh_json_list.")
     if not hasattr(app, "json_list"):
         logger.warning("app không có thuộc tính json_list.")
+        logger.debug("Kết thúc hàm _refresh_json_list (không có json_list).")
         return
     app.json_list.delete(0, "end")
     d = _get_reports_dir(app)
@@ -146,15 +154,17 @@ def _refresh_json_list(app: "TradingToolApp"):
     else:
         app.json_files = []
         logger.warning("Không thể làm mới JSON list vì không có thư mục reports hợp lệ.")
+    logger.debug("Kết thúc hàm _refresh_json_list.")
 
 def _preview_json_selected(app: "TradingToolApp"):
     """
     Hiển thị nội dung của file JSON ngữ cảnh được chọn trong khu vực chi tiết trên giao diện.
     """
-    logger.debug("Bắt đầu _preview_json_selected.")
+    logger.debug("Bắt đầu hàm _preview_json_selected.")
     sel = getattr(app, "json_list", None).curselection() if hasattr(app, "json_list") else None
     if not sel:
         logger.debug("Không có file JSON nào được chọn.")
+        logger.debug("Kết thúc hàm _preview_json_selected (không có lựa chọn).")
         return
     p = app.json_files[sel[0]]
     try:
@@ -174,10 +184,11 @@ def _load_json_selected(app: "TradingToolApp"):
     """
     Mở file JSON ngữ cảnh được chọn bằng ứng dụng mặc định của hệ điều hành.
     """
-    logger.debug("Bắt đầu _load_json_selected.")
+    logger.debug("Bắt đầu hàm _load_json_selected.")
     sel = app.json_list.curselection()
     if not sel:
         logger.debug("Không có file JSON nào được chọn để mở.")
+        logger.debug("Kết thúc hàm _load_json_selected (không có lựa chọn).")
         return
     p = app.json_files[sel[0]]
     try:
@@ -193,10 +204,11 @@ def _delete_json_selected(app: "TradingToolApp"):
     """
     Xóa file JSON ngữ cảnh được chọn khỏi hệ thống và làm mới danh sách trên giao diện.
     """
-    logger.debug("Bắt đầu _delete_json_selected.")
+    logger.debug("Bắt đầu hàm _delete_json_selected.")
     sel = app.json_list.curselection()
     if not sel:
         logger.debug("Không có file JSON nào được chọn để xóa.")
+        logger.debug("Kết thúc hàm _delete_json_selected (không có lựa chọn).")
         return
     p = app.json_files[sel[0]]
     try:
@@ -215,7 +227,7 @@ def _open_json_folder(app: "TradingToolApp"):
     """
     Mở thư mục chứa các file JSON ngữ cảnh bằng ứng dụng mặc định của hệ điều hành.
     """
-    logger.debug("Bắt đầu _open_json_folder.")
+    logger.debug("Bắt đầu hàm _open_json_folder.")
     d = _get_reports_dir(app)
     if d:
         ui_utils._open_path(app, d)

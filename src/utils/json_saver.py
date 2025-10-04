@@ -16,11 +16,12 @@ def save_json_report(app: "TradingToolApp", text: str, cfg: "RunConfig", names: 
     Saves the JSON report file.
     This function is refactored from the main app class for better organization.
     """
-    logger.debug("Bắt đầu save_json_report.")
+    logger.debug("Bắt đầu hàm save_json_report.")
     d = app._get_reports_dir(cfg.folder)
     if not d:
         ui_utils.ui_status(app, "Lỗi: Không thể xác định thư mục Reports để lưu .json.")
         logger.error("Không thể xác định thư mục Reports để lưu .json.")
+        logger.debug("Kết thúc hàm save_json_report (không có thư mục reports).")
         return None # Trả về None khi có lỗi
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     logger.debug(f"Thư mục reports: {d}, timestamp: {ts}.")
@@ -115,6 +116,7 @@ def save_json_report(app: "TradingToolApp", text: str, cfg: "RunConfig", names: 
         logging.exception(f"CRITICAL ERROR during final JSON save to {out.name}")
         ui_utils.ui_status(app, f"LỖI GHI FILE JSON: {e}")
         ui_utils.ui_message(app, "error", "Lỗi Lưu JSON", f"Không thể ghi file vào đường dẫn:\n{out}\n\nLỗi: {e}")
+        logger.debug("Kết thúc hàm save_json_report (lỗi ghi file).")
         return None
 
     # --- Log proposed trade for backtesting ---
@@ -146,5 +148,5 @@ def save_json_report(app: "TradingToolApp", text: str, cfg: "RunConfig", names: 
         logger.warning(f"Lỗi khi log proposed trade cho backtesting: {e}")
         pass # Silently fail if parsing/logging fails
 
-    logger.debug("Kết thúc save_json_report.")
+    logger.debug("Kết thúc hàm save_json_report.")
     return out

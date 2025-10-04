@@ -42,13 +42,14 @@ def _get_nested(d: dict, path: list[str], default: Any = None) -> Any:
     Returns:
         Giá trị tại đường dẫn đã cho hoặc giá trị mặc định.
     """
-    logger.debug(f"Bắt đầu _get_nested cho path: {path}, default: {default}")
+    logger.debug(f"Bắt đầu hàm _get_nested cho path: {path}, default: {default}")
     for key in path:
         if not isinstance(d, dict) or key not in d:
             logger.debug(f"Key '{key}' không tìm thấy hoặc d không phải dict. Trả về default.")
+            logger.debug("Kết thúc hàm _get_nested (key không tìm thấy).")
             return default
         d = d[key]
-    logger.debug(f"Kết thúc _get_nested. Giá trị: {d}")
+    logger.debug(f"Kết thúc hàm _get_nested. Giá trị: {d}")
     return d
 
 def vectorize_market_state(mt5_context: dict) -> list[float] | None:
@@ -58,12 +59,14 @@ def vectorize_market_state(mt5_context: dict) -> list[float] | None:
     Returns:
         Một danh sách các số thực (vector) hoặc None nếu dữ liệu không đủ.
     """
-    logger.debug("Bắt đầu vectorize_market_state.")
+    logger.debug("Bắt đầu hàm vectorize_market_state.")
     if not HAS_SKLEARN:
         logger.warning("sklearn không có sẵn, không thể vectorize market state.")
+        logger.debug("Kết thúc hàm vectorize_market_state (thiếu sklearn).")
         return None
     if not mt5_context:
         logger.warning("mt5_context trống, không thể vectorize market state.")
+        logger.debug("Kết thúc hàm vectorize_market_state (mt5_context trống).")
         return None
 
     try:
@@ -114,6 +117,7 @@ def vectorize_market_state(mt5_context: dict) -> list[float] | None:
 
     except Exception as e:
         logger.error(f"Lỗi khi vectorize market state: {e}")
+        logger.debug("Kết thúc hàm vectorize_market_state (lỗi).")
         return None
 
 def find_similar_vectors(current_vector: list[float], historical_vectors: list[dict], top_n: int = 3) -> list[dict]:
@@ -128,12 +132,14 @@ def find_similar_vectors(current_vector: list[float], historical_vectors: list[d
     Returns:
         Danh sách các từ điển chứa 'id' và 'similarity' của các vector tương tự nhất.
     """
-    logger.debug(f"Bắt đầu find_similar_vectors với {len(historical_vectors)} historical vectors, top_n: {top_n}")
+    logger.debug(f"Bắt đầu hàm find_similar_vectors với {len(historical_vectors)} historical vectors, top_n: {top_n}")
     if not HAS_SKLEARN:
         logger.warning("sklearn không có sẵn, không thể tìm similar vectors.")
+        logger.debug("Kết thúc hàm find_similar_vectors (thiếu sklearn).")
         return []
     if not historical_vectors or not current_vector:
         logger.warning("Không có historical vectors hoặc current_vector trống.")
+        logger.debug("Kết thúc hàm find_similar_vectors (không có vector).")
         return []
 
     current_v = np.array(current_vector).reshape(1, -1)
@@ -167,5 +173,5 @@ def find_similar_vectors(current_vector: list[float], historical_vectors: list[d
             logger.debug(f"Đã đạt top_n={top_n} similar vectors.")
             break
             
-    logger.debug(f"Kết thúc find_similar_vectors. Kết quả: {results}")
+    logger.debug(f"Kết thúc hàm find_similar_vectors. Kết quả: {results}")
     return results

@@ -18,7 +18,7 @@ def handle_no_change_scenario(app: "TradingToolApp", cfg: "RunConfig"):
     Xử lý trường hợp không có ảnh nào thay đổi so với lần chạy trước.
     Sẽ tạo một báo cáo ngắn gọn, quản lý các lệnh đang chạy và thoát sớm.
     """
-    logger.debug("Bắt đầu handle_no_change_scenario.")
+    logger.debug("Bắt đầu hàm handle_no_change_scenario.")
     app.ui_status("Ảnh không đổi, tạo báo cáo nhanh...")
     logger.info("Ảnh không đổi, tạo báo cáo nhanh.")
     composed = app.compose_context(cfg, budget_chars=max(800, int(cfg.ctx_limit))) or ""
@@ -58,4 +58,4 @@ def handle_no_change_scenario(app: "TradingToolApp", cfg: "RunConfig"):
             logger.warning(f"Lỗi khi quản lý BE/Trailing trong kịch bản không thay đổi: {e}")
             
     # Không raise SystemExit ở đây, mà để main_worker xử lý
-    logger.debug("Kết thúc handle_no_change_scenario.")
+    logger.debug("Kết thúc hàm handle_no_change_scenario.")

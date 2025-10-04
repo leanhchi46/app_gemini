@@ -28,7 +28,7 @@ def build_ssl_context(cafile: Optional[str], skip_verify: bool) -> ssl.SSLContex
     - cafile: path to CA bundle (PEM/CRT). If None, try certifi, else system default.
     - skip_verify: if True, disable hostname check and verification (insecure).
     """
-    logger.debug(f"Bắt đầu build_ssl_context. cafile: {cafile}, skip_verify: {skip_verify}")
+    logger.debug(f"Bắt đầu hàm build_ssl_context. cafile: {cafile}, skip_verify: {skip_verify}")
     try:
         if cafile:
             ctx = ssl.create_default_context(cafile=cafile)
@@ -46,7 +46,7 @@ def build_ssl_context(cafile: Optional[str], skip_verify: bool) -> ssl.SSLContex
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         logger.warning("Đã bỏ qua xác minh SSL (INSECURE).")
-    logger.debug("Kết thúc build_ssl_context.")
+    logger.debug("Kết thúc hàm build_ssl_context.")
     return ctx
 
 
@@ -60,7 +60,7 @@ class TelegramClient:
 
     @classmethod
     def from_config(cls, cfg, timeout: int = 15) -> "TelegramClient":
-        logger.debug("Bắt đầu TelegramClient.from_config.")
+        logger.debug("Bắt đầu hàm from_config của TelegramClient.")
         client = cls(
             token=cfg.telegram_token,
             chat_id=(cfg.telegram_chat_id or None),
@@ -69,19 +69,22 @@ class TelegramClient:
             timeout=timeout,
         )
         logger.debug("Đã tạo TelegramClient từ config.")
+        logger.debug("Kết thúc hàm from_config của TelegramClient.")
         return client
 
     def _opener(self):
-        logger.debug("Bắt đầu _opener.")
+        logger.debug("Bắt đầu hàm _opener.")
         ctx = build_ssl_context(self.ca_path, self.skip_verify)
         opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
         logger.debug("Đã tạo urllib opener.")
+        logger.debug("Kết thúc hàm _opener.")
         return opener
 
     def api_call(self, method: str, params: dict, use_get_fallback: bool = True) -> Tuple[bool, dict]:
-        logger.debug(f"Bắt đầu api_call cho method: {method}, params: {params}.")
+        logger.debug(f"Bắt đầu hàm api_call cho method: {method}, params: {params}.")
         if not self.token:
             logger.error("Thiếu Telegram token.")
+            logger.debug("Kết thúc hàm api_call (thiếu token).")
             return False, {"error": "missing_token"}
         base = f"https://api.telegram.org/bot{self.token}/{method}"
         data = urllib.parse.urlencode(params).encode("utf-8")
@@ -142,6 +145,7 @@ class TelegramClient:
                 return ok, obj
         except Exception as e2:
             logger.error(f"Lỗi không xác định trong API GET call: {e2}.")
+            logger.debug("Kết thúc hàm api_call (lỗi GET).")
             return False, {"error": str(e2)}
 
     def send_message(
@@ -153,10 +157,11 @@ class TelegramClient:
         disable_web_page_preview: bool = True,
         truncate_to: int = 3900,
     ) -> Tuple[bool, dict]:
-        logger.debug(f"Bắt đầu send_message. Chat ID: {chat_id or self.chat_id}, độ dài text: {len(text)}.")
+        logger.debug(f"Bắt đầu hàm send_message. Chat ID: {chat_id or self.chat_id}, độ dài text: {len(text)}.")
         cid = (chat_id or self.chat_id or "").strip()
         if not cid:
             logger.error("Thiếu chat_id để gửi tin nhắn Telegram.")
+            logger.debug("Kết thúc hàm send_message (thiếu chat_id).")
             return False, {"error": "missing_chat_id"}
         if text is None:
             text = ""
@@ -170,7 +175,7 @@ class TelegramClient:
             "disable_web_page_preview": disable_web_page_preview,
         }
         ok, res = self.api_call("sendMessage", params)
-        logger.debug(f"Kết thúc send_message. OK: {ok}, response: {res}")
+        logger.debug(f"Kết thúc hàm send_message. OK: {ok}, response: {res}")
         return ok, res
 
     @staticmethod
@@ -182,7 +187,7 @@ class TelegramClient:
         now: Optional[datetime] = None,
         max_per_line: int = 220,
     ) -> str:
-        logger.debug(f"Bắt đầu build_message. Folder: {folder}, saved_report_path: {saved_report_path}.")
+        logger.debug(f"Bắt đầu hàm build_message. Folder: {folder}, saved_report_path: {saved_report_path}.")
         ts = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
         cleaned: list[str] = []
         for ln in seven_lines:
@@ -204,4 +209,5 @@ class TelegramClient:
             + (f"\n\n(Đã lưu: {saved_safe})" if saved_safe else "")
         )
         logger.debug(f"Đã xây dựng tin nhắn Telegram. Độ dài: {len(msg)}.")
+        logger.debug("Kết thúc hàm build_message.")
         return msg

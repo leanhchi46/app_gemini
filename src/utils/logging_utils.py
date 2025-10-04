@@ -15,7 +15,7 @@ def setup_logging():
     """
     Cấu hình hệ thống logging để ghi log vào file app_debug.log.
     """
-    logger.debug("Bắt đầu setup_logging.")
+    logger.debug("Bắt đầu hàm setup_logging.")
     log_dir = Path("Log")
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / "app_debug.log"
@@ -33,13 +33,13 @@ def setup_logging():
         ]
     )
     logger.info(f"Đã cấu hình logging, ghi vào: {log_file}")
-    logger.debug("Kết thúc setup_logging.")
+    logger.debug("Kết thúc hàm setup_logging.")
 
 def log_trade_decision(data: Dict, folder_override: Optional[str] = None):
     """
     Ghi lại các quyết định giao dịch vào file log JSONL.
     """
-    logger.debug(f"Bắt đầu log_trade_decision. Stage: {data.get('stage')}, Folder override: {folder_override}")
+    logger.debug(f"Bắt đầu hàm log_trade_decision. Stage: {data.get('stage')}, Folder override: {folder_override}")
     try:
         # Logic để xác định thư mục Reports.
         # Vì hàm này không có quyền truy cập vào đối tượng 'app',
@@ -97,3 +97,4 @@ def log_trade_decision(data: Dict, folder_override: Optional[str] = None):
     except Exception as e:
         logger.error(f"Lỗi khi ghi log giao dịch: {e}")
         pass
+    logger.debug("Kết thúc hàm log_trade_decision.")

@@ -29,20 +29,21 @@ if TYPE_CHECKING:
 
 def _calc_rr(entry: Optional[float], sl: Optional[float], tp: Optional[float]) -> Optional[float]:
     """Tính toán tỷ lệ rủi ro/lợi nhuận."""
-    logger.debug(f"Bắt đầu _calc_rr. Entry: {entry}, SL: {sl}, TP: {tp}")
+    logger.debug(f"Bắt đầu hàm _calc_rr. Entry: {entry}, SL: {sl}, TP: {tp}")
     try:
         risk = abs((entry or 0) - (sl or 0))
         reward = abs((tp or 0) - (entry or 0))
         result = (reward / risk) if risk > 0 else None
-        logger.debug(f"Kết thúc _calc_rr. RR: {result}")
+        logger.debug(f"Kết thúc hàm _calc_rr. RR: {result}")
         return result
     except Exception as e:
         logger.error(f"Lỗi khi tính toán RR: {e}")
+        logger.debug("Kết thúc hàm _calc_rr (lỗi).")
         return None
 
 def _near_key_levels_too_close(mt5_ctx: Dict, min_pips: float, cp: float) -> bool:
     """Kiểm tra xem giá hiện tại có quá gần các mức key level hay không."""
-    logger.debug(f"Bắt đầu _near_key_levels_too_close. Min pips: {min_pips}, Current Price: {cp}")
+    logger.debug(f"Bắt đầu hàm _near_key_levels_too_close. Min pips: {min_pips}, Current Price: {cp}")
     try:
         lst = (mt5_ctx.get("key_levels_nearby") or [])
         for lv in lst:
@@ -54,6 +55,7 @@ def _near_key_levels_too_close(mt5_ctx: Dict, min_pips: float, cp: float) -> boo
         logger.error(f"Lỗi khi kiểm tra key levels quá gần: {e}")
         pass
     logger.debug("Giá không quá gần bất kỳ key level nào.")
+    logger.debug("Kết thúc hàm _near_key_levels_too_close.")
     return False
 
 # Hàm _log_trade_decision đã được di chuyển sang src/utils/logging_utils.py
@@ -61,19 +63,21 @@ def _near_key_levels_too_close(mt5_ctx: Dict, min_pips: float, cp: float) -> boo
 
 def _load_last_trade_state() -> Dict:
     """Tải trạng thái giao dịch cuối cùng từ file."""
-    logger.debug("Bắt đầu _load_last_trade_state.")
+    logger.debug("Bắt đầu hàm _load_last_trade_state.")
     f = APP_DIR / "last_trade_state.json"
     try:
         state = json.loads(f.read_text(encoding="utf-8"))
         logger.debug(f"Đã tải last trade state: {state}")
+        logger.debug("Kết thúc hàm _load_last_trade_state.")
         return state
     except Exception as e:
         logger.warning(f"Không thể tải last trade state từ {f}: {e}. Trả về rỗng.")
+        logger.debug("Kết thúc hàm _load_last_trade_state (lỗi).")
         return {}
 
 def _save_last_trade_state(state: Dict):
     """Lưu trạng thái giao dịch hiện tại vào file."""
-    logger.debug(f"Bắt đầu _save_last_trade_state. State: {state}")
+    logger.debug(f"Bắt đầu hàm _save_last_trade_state. State: {state}")
     f = APP_DIR / "last_trade_state.json"
     try:
         f.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -81,10 +85,11 @@ def _save_last_trade_state(state: Dict):
     except Exception as e:
         logger.error(f"Lỗi khi lưu last trade state vào {f}: {e}")
         pass
+    logger.debug("Kết thúc hàm _save_last_trade_state.")
 
 def _order_send_safe(app: "TradingToolApp", req: Dict, retry: int = 2):
     """Gửi lệnh giao dịch an toàn với cơ chế thử lại và kiểm tra kết nối MT5."""
-    logger.debug(f"Bắt đầu _order_send_safe. Request: {req}, Retry: {retry}")
+    logger.debug(f"Bắt đầu hàm _order_send_safe. Request: {req}, Retry: {retry}")
     last = None
     # Log account info before sending
     try:
@@ -144,11 +149,12 @@ def _order_send_safe(app: "TradingToolApp", req: Dict, retry: int = 2):
         logger.warning(f"Lệnh gửi thất bại (lần {i+1}): {result}. Thử lại sau 0.6s.")
         time.sleep(0.6)
     logger.error(f"Tất cả các lần thử gửi lệnh đều thất bại. Kết quả cuối cùng: {last}")
+    logger.debug("Kết thúc hàm _order_send_safe (thất bại).")
     return last
 
 def _fill_priority(prefer: str) -> List[int]:
     """Trả về thứ tự ưu tiên các chế độ filling lệnh."""
-    logger.debug(f"Bắt đầu _fill_priority cho prefer: {prefer}")
+    logger.debug(f"Bắt đầu hàm _fill_priority cho prefer: {prefer}")
     try:
         IOC = mt5.ORDER_FILLING_IOC
         FOK = mt5.ORDER_FILLING_FOK
@@ -159,24 +165,24 @@ def _fill_priority(prefer: str) -> List[int]:
         FOK = 0
         RET = 2
     result = ([IOC, FOK, RET] if prefer == "market" else [FOK, IOC, RET])
-    logger.debug(f"Kết thúc _fill_priority. Priority: {result}")
+    logger.debug(f"Kết thúc hàm _fill_priority. Priority: {result}")
     return result
 
 def _fill_name(val: int) -> str:
     """Trả về tên của chế độ filling."""
-    logger.debug(f"Bắt đầu _fill_name cho value: {val}")
+    logger.debug(f"Bắt đầu hàm _fill_name cho value: {val}")
     names = {
         getattr(mt5, "ORDER_FILLING_IOC", 1): "IOC",
         getattr(mt5, "ORDER_FILLING_FOK", 0): "FOK",
         getattr(mt5, "ORDER_FILLING_RETURN", 2): "RETURN",
     }
     result = names.get(val, str(val))
-    logger.debug(f"Kết thúc _fill_name. Name: {result}")
+    logger.debug(f"Kết thúc hàm _fill_name. Name: {result}")
     return result
 
 def _order_send_smart(app: "TradingToolApp", req: Dict, prefer: str = "market", retry_per_mode: int = 2):
     """Gửi lệnh thông minh với các chế độ filling khác nhau."""
-    logger.debug(f"Bắt đầu _order_send_smart. Prefer: {prefer}, Retry per mode: {retry_per_mode}")
+    logger.debug(f"Bắt đầu hàm _order_send_smart. Prefer: {prefer}, Retry per mode: {retry_per_mode}")
     last_res = None
     tried = []
     for fill in _fill_priority(prefer):
@@ -211,6 +217,7 @@ def _order_send_smart(app: "TradingToolApp", req: Dict, prefer: str = "market", 
     cmt = getattr(last_res, "comment", "unknown") if last_res else "no result"
     ui_utils.ui_status(app, f"Order FAIL với các filling: {', '.join(tried)} — {cmt}")
     logger.error(f"Tất cả các lần thử gửi lệnh thông minh đều thất bại. Comment: {cmt}")
+    logger.debug("Kết thúc hàm _order_send_smart (thất bại).")
     return last_res
 
 
@@ -219,13 +226,15 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
     Place market/pending orders when setup qualifies.
     Returns True if a trade action was successfully taken, False otherwise.
     """
-    logger.debug("Bắt đầu auto_trade_if_high_prob.")
+    logger.debug("Bắt đầu hàm auto_trade_if_high_prob.")
     if not cfg.auto_trade_enabled:
         logger.debug("Auto-Trade không được bật.")
+        logger.debug("Kết thúc hàm auto_trade_if_high_prob (không được bật).")
         return False
     if not cfg.mt5_enabled or mt5 is None:
         app.ui_status("Auto-Trade: MT5 not enabled or missing.")
         logger.warning("Auto-Trade không thể chạy: MT5 không bật hoặc module MT5 thiếu.")
+        logger.debug("Kết thúc hàm auto_trade_if_high_prob (MT5 không được bật).")
         return False
 
     # NO-TRADE evaluate: hard filters + session + news window
@@ -293,6 +302,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
         # but should be enough to contain a full setup block.
         if len(combined_text) < 200:
             logger.debug("Combined text quá ngắn, bỏ qua parsing.")
+            logger.debug("Kết thúc hàm auto_trade_if_high_prob (text quá ngắn).")
             return False
         app.ui_status("Auto-Trade: Vision JSON không kết luận, dùng text parsing.")
         logger.debug("Vision JSON không kết luận, dùng text parsing.")
@@ -378,6 +388,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
         logger.debug("Hướng lệnh không hợp lệ hoặc chưa có, bỏ qua.")
         # This is a common case when the stream is still in progress, so we don't log it as a failure.
         # ui_utils.ui_status(app, "Auto-Trade: missing direction.")
+        logger.debug("Kết thúc hàm auto_trade_if_high_prob (thiếu hướng).")
         return False
 
     if cfg.trade_strict_bias:
@@ -588,6 +599,7 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
             logger.warning(f"Lỗi khi log send errors: {e}")
             pass
         logger.info("Auto-Trade: có lỗi khi gửi lệnh.")
+        logger.debug("Kết thúc hàm auto_trade_if_high_prob (lỗi gửi lệnh).")
         return False
     else:
         _save_last_trade_state({"sig": setup_sig, "time": time.time()})
@@ -598,4 +610,5 @@ def auto_trade_if_high_prob(app: "TradingToolApp", combined_text: str, mt5_ctx: 
             pass
         app.ui_status("Auto-Trade: placed TP1/TP2 orders.")
         logger.info("Auto-Trade: đã đặt lệnh TP1/TP2 thành công.")
+        logger.debug("Kết thúc hàm auto_trade_if_high_prob (thành công).")
         return True

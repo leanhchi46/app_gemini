@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 class UploadCache:
     @staticmethod
     def load() -> dict:
-        logger.debug("Bắt đầu UploadCache.load().")
+        logger.debug("Bắt đầu hàm load của UploadCache.")
         try:
             if UPLOAD_CACHE_JSON.exists():
                 cache_data = json.loads(UPLOAD_CACHE_JSON.read_text(encoding="utf-8"))
@@ -43,11 +43,12 @@ class UploadCache:
             logger.error(f"Lỗi khi tải upload cache: {e}")
             pass
         logger.debug("Không tìm thấy hoặc lỗi khi tải upload cache, trả về rỗng.")
+        logger.debug("Kết thúc hàm load của UploadCache.")
         return {}
 
     @staticmethod
     def save(cache: dict) -> None:
-        logger.debug(f"Bắt đầu UploadCache.save(). Số mục: {len(cache)}")
+        logger.debug(f"Bắt đầu hàm save của UploadCache. Số mục: {len(cache)}")
         try:
             UPLOAD_CACHE_JSON.write_text(
                 json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -56,10 +57,11 @@ class UploadCache:
         except Exception as e:
             logger.error(f"Lỗi khi lưu upload cache: {e}")
             pass
+        logger.debug("Kết thúc hàm save của UploadCache.")
 
     @staticmethod
     def file_sig(path: str) -> str:
-        logger.debug(f"Bắt đầu UploadCache.file_sig cho path: {path}")
+        logger.debug(f"Bắt đầu hàm file_sig của UploadCache cho path: {path}")
         p = Path(path)
         try:
             size = p.stat().st_size
@@ -70,28 +72,33 @@ class UploadCache:
                     h.update(chunk)
             sig = f"{size}:{mtime}:{h.hexdigest()[:16]}"
             logger.debug(f"Đã tạo file signature: {sig}")
+            logger.debug("Kết thúc hàm file_sig của UploadCache.")
             return sig
         except Exception as e:
             logger.warning(f"Lỗi khi tạo file signature cho '{path}': {e}")
+            logger.debug("Kết thúc hàm file_sig của UploadCache (lỗi).")
             return ""
 
     @staticmethod
     def lookup(cache: dict, path: str) -> str:
-        logger.debug(f"Bắt đầu UploadCache.lookup cho path: {path}")
-        rec = cache.get(path)
+        logger.debug(f"Bắt đầu hàm lookup của UploadCache cho path: {path}")
+        rec = cache.get(str(path))
         if not rec:
             logger.debug("Không tìm thấy record trong cache.")
+            logger.debug("Kết thúc hàm lookup của UploadCache (không tìm thấy).")
             return ""
         sig_now = UploadCache.file_sig(path)
         result = rec["remote_name"] if sig_now and rec.get("sig") == sig_now else ""
         logger.debug(f"Kết quả lookup cache: {result}")
+        logger.debug("Kết thúc hàm lookup của UploadCache.")
         return result
 
     @staticmethod
     def put(cache: dict, path: str, remote_name: str) -> None:
-        logger.debug(f"Bắt đầu UploadCache.put cho path: {path}, remote_name: {remote_name}")
-        cache[path] = {"sig": UploadCache.file_sig(path), "remote_name": remote_name}
+        logger.debug(f"Bắt đầu hàm put của UploadCache cho path: {path}, remote_name: {remote_name}")
+        cache[str(path)] = {"sig": UploadCache.file_sig(path), "remote_name": remote_name}
         logger.debug("Đã thêm/cập nhật mục vào cache.")
+        logger.debug("Kết thúc hàm put của UploadCache.")
 
 
 def prepare_image(path: str, *, optimize: bool, app_dir: Path = APP_DIR) -> str:
@@ -102,9 +109,10 @@ def prepare_image(path: str, *, optimize: bool, app_dir: Path = APP_DIR) -> str:
     - Fills transparent backgrounds with white.
     - If optimization produces a larger file, keeps the original.
     """
-    logger.debug(f"Bắt đầu prepare_image cho path: {path}, optimize: {optimize}")
+    logger.debug(f"Bắt đầu hàm prepare_image cho path: {path}, optimize: {optimize}")
     if not optimize or Image is None:
         logger.debug("Không tối ưu hóa ảnh hoặc PIL.Image không có sẵn, trả về path gốc.")
+        logger.debug("Kết thúc hàm prepare_image (không tối ưu hóa).")
         return path
     try:
         src = Path(path)
@@ -161,32 +169,36 @@ def prepare_image(path: str, *, optimize: bool, app_dir: Path = APP_DIR) -> str:
     except Exception as e:
         logger.error(f"Lỗi khi chuẩn bị ảnh '{path}': {e}. Trả về path gốc.")
         # Fallback to original path on any error
+        logger.debug("Kết thúc hàm prepare_image (lỗi).")
         return path
 
 
 def as_inline_media_part(path: str) -> dict:
-    logger.debug(f"Bắt đầu as_inline_media_part cho path: {path}")
+    logger.debug(f"Bắt đầu hàm as_inline_media_part cho path: {path}")
     mime, _ = mimetypes.guess_type(path)
     with open(path, "rb") as f:
         data = f.read()
     logger.debug(f"Đã đọc file {path} làm inline media, mime_type: {mime}.")
+    logger.debug("Kết thúc hàm as_inline_media_part.")
     return {"mime_type": mime or "application/octet-stream", "data": data}
 
 
 def file_or_inline_for_model(
     file_obj, prepared_path: Optional[str], original_path: str
 ) -> object:
-    logger.debug(f"Bắt đầu file_or_inline_for_model cho original_path: {original_path}")
+    logger.debug(f"Bắt đầu hàm file_or_inline_for_model cho original_path: {original_path}")
     try:
         st = getattr(getattr(file_obj, "state", None), "name", None)
         if st == "ACTIVE":
             logger.debug(f"Sử dụng file_obj đã ACTIVE: {file_obj.name}")
+            logger.debug("Kết thúc hàm file_or_inline_for_model (sử dụng file_obj).")
             return file_obj
     except Exception as e:
         logger.warning(f"Lỗi khi kiểm tra trạng thái file_obj: {e}")
         pass
     use_path = prepared_path or original_path
     logger.debug(f"Sử dụng path inline: {use_path}")
+    logger.debug("Kết thúc hàm file_or_inline_for_model (sử dụng inline).")
     return as_inline_media_part(use_path)
 
 
@@ -195,7 +207,7 @@ def upload_one_file_for_worker(item) -> Tuple[str, object]:
     item = (original_path, display_name, upload_path)
     Returns (original_path, file_obj_or_upload_ref)
     """
-    logger.debug(f"Bắt đầu upload_one_file_for_worker cho item: {item[1]}")
+    logger.debug(f"Bắt đầu hàm upload_one_file_for_worker cho item: {item[1]}")
     if genai is None:  # pragma: no cover
         logger.error("google-generativeai SDK missing, không thể upload file.")
         raise RuntimeError(
@@ -229,6 +241,7 @@ def upload_one_file_for_worker(item) -> Tuple[str, object]:
         retries -= 1
         delay = min(delay * 1.5, 3.0)
     logger.error(f"Hết lần thử, file '{n}' không đạt trạng thái ACTIVE.")
+    logger.debug("Kết thúc hàm upload_one_file_for_worker (hết lần thử).")
     return (p, uf)
 
 
@@ -239,12 +252,13 @@ def upload_images_parallel(
     Upload các file ảnh song song và cho phép hủy bỏ các tác vụ đang chờ.
     Gán executor vào app.active_executor để luồng chính có thể truy cập và hủy.
     """
-    logger.debug(f"Bắt đầu upload_images_parallel. Số file cần upload: {len(to_upload)}")
+    logger.debug(f"Bắt đầu hàm upload_images_parallel. Số file cần upload: {len(to_upload)}")
     uploaded_files = []
     file_slots = [None] * len(app.results)
 
     if not to_upload:
         logger.debug("Không có file nào để upload, trả về rỗng.")
+        logger.debug("Kết thúc hàm upload_images_parallel (không có file).")
         return file_slots, 0
 
     max_workers = max(1, min(len(to_upload), int(cfg.upload_workers)))
@@ -304,7 +318,7 @@ def delete_uploaded_file(uploaded_file):
     """
     Thực hiện xóa file đã upload lên Gemini.
     """
-    logger.debug(f"Bắt đầu delete_uploaded_file cho file: {uploaded_file.name}")
+    logger.debug(f"Bắt đầu hàm delete_uploaded_file cho file: {uploaded_file.name}")
     try:
         if genai:
             genai.delete_file(uploaded_file.name)
@@ -313,3 +327,4 @@ def delete_uploaded_file(uploaded_file):
             logger.warning("genai không có sẵn, không thể xoá file Gemini.")
     except Exception as e:
         logger.warning(f"Lỗi khi xoá file Gemini '{uploaded_file.name}': {e}")
+    logger.debug("Kết thúc hàm delete_uploaded_file.")

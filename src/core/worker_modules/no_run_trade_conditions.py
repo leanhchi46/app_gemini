@@ -61,9 +61,12 @@ def check_no_run_conditions(app: "TradingToolApp", cfg: "RunConfig") -> Tuple[bo
     # TODO: Thêm các điều kiện NO-RUN khác tại đây (ví dụ: ngày lễ, trạng thái thị trường đặc biệt)
     
     if reasons:
+        logger.debug(f"Kết thúc hàm check_no_run_conditions. Kết quả: False, Lý do: {reasons}")
         return False, "\n- ".join(reasons)
     
-    return True, f"Đang chạy trong {active_kill_zone if cfg.no_run_killzone_enabled else 'các điều kiện cho phép'}."
+    result_reason = f"Đang chạy trong {active_kill_zone if cfg.no_run_killzone_enabled else 'các điều kiện cho phép'}."
+    logger.debug(f"Kết thúc hàm check_no_run_conditions. Kết quả: True, Lý do: {result_reason}")
+    return True, result_reason
 
 def evaluate_no_trade_conditions(
     safe_mt5_data: SafeMT5Data,
@@ -139,22 +142,22 @@ def evaluate_no_trade_conditions(
     current_hhmm = now_vn.strftime("%H:%M")
     
     is_allowed_session = False
-    if cfg.nt_allow_session_asia:
+    if cfg.trade_allow_session_asia:
         asia_session = sessions_today.get("asia", {})
         if asia_session and asia_session["start"] <= current_hhmm < asia_session["end"]:
             is_allowed_session = True
-    if cfg.nt_allow_session_london:
+    if cfg.trade_allow_session_london:
         london_session = sessions_today.get("london", {})
         if london_session and london_session["start"] <= current_hhmm < london_session["end"]:
             is_allowed_session = True
-    if cfg.nt_allow_session_ny:
+    if cfg.trade_allow_session_ny:
         ny_am_session = sessions_today.get("newyork_am", {})
         ny_pm_session = sessions_today.get("newyork_pm", {})
         if (ny_am_session and ny_am_session["start"] <= current_hhmm < ny_am_session["end"]) or \
            (ny_pm_session and (ny_pm_session["start"] <= current_hhmm or current_hhmm < ny_pm_session["end"])): # Xử lý qua nửa đêm
             is_allowed_session = True
     
-    if not (cfg.nt_allow_session_asia or cfg.nt_allow_session_london or cfg.nt_allow_session_ny):
+    if not (cfg.trade_allow_session_asia or cfg.trade_allow_session_london or cfg.trade_allow_session_ny):
         # Nếu không có phiên nào được phép, mặc định cho phép để không chặn hoàn toàn
         is_allowed_session = True 
     
@@ -162,18 +165,20 @@ def evaluate_no_trade_conditions(
         reasons.append("Không nằm trong phiên giao dịch được phép.")
 
     # 5. Kiểm tra Khoảng cách đến các mức quan trọng (Key Levels)
-    if cfg.nt_min_dist_keylvl_pips > 0 and current_price > 0:
+    if cfg.trade_min_dist_keylvl_pips > 0 and current_price > 0:
         key_levels_nearby = mt5_raw_data.get("key_levels_nearby", [])
         for level in key_levels_nearby:
             dist_pips = level.get("distance_pips")
-            if dist_pips is not None and dist_pips < cfg.nt_min_dist_keylvl_pips:
-                reasons.append(f"Giá quá gần mức key level {level.get('name')} ({dist_pips:.2f} pips < {cfg.nt_min_dist_keylvl_pips:.2f} pips).")
+            if dist_pips is not None and dist_pips < cfg.trade_min_dist_keylvl_pips:
+                reasons.append(f"Giá quá gần mức key level {level.get('name')} ({dist_pips:.2f} pips < {cfg.trade_min_dist_keylvl_pips:.2f} pips).")
 
     # TODO: Thêm các điều kiện NO-TRADE khác tại đây
     
     if reasons:
+        logger.debug(f"Kết thúc hàm evaluate_no_trade_conditions. Kết quả: False, Lý do: {reasons}")
         return False, reasons, current_events, current_fetch_time, ttl_sec
     
+    logger.debug("Kết thúc hàm evaluate_no_trade_conditions. Kết quả: True")
     return True, [], current_events, current_fetch_time, ttl_sec
 
 def check_all_preconditions(
@@ -234,6 +239,8 @@ def check_all_preconditions(
             # ui_utils.ui_refresh_history_list(app) # Sẽ được gọi sau trong main_worker
             
             logger.info(f"Điều kiện No-Trade được kích hoạt: {', '.join(reasons_nt)}, thoát sớm.")
+            logger.debug("Kết thúc hàm check_all_preconditions. Kết quả: False (No-Trade)")
             return False, note
     
+    logger.debug("Kết thúc hàm check_all_preconditions. Kết quả: True")
     return True, ""

@@ -25,7 +25,7 @@ def _calculate_stats(win_loss_dict: dict) -> dict:
     Returns:
         Một từ điển chứa số lần thắng, thua, tổng số và tỷ lệ thắng.
     """
-    logger.debug(f"Bắt đầu _calculate_stats với dict: {win_loss_dict}")
+    logger.debug(f"Bắt đầu hàm _calculate_stats với dict: {win_loss_dict}")
     stats = {}
     for key, value in win_loss_dict.items():
         wins = value.get("wins", 0)
@@ -33,7 +33,7 @@ def _calculate_stats(win_loss_dict: dict) -> dict:
         total = wins + losses
         win_rate = (wins / total) if total > 0 else None
         stats[key] = {"wins": wins, "losses": losses, "total": total, "win_rate": win_rate}
-    logger.debug(f"Kết thúc _calculate_stats. Stats: {stats}")
+    logger.debug(f"Kết thúc hàm _calculate_stats. Stats: {stats}")
     return stats
 
 def evaluate_trade_outcomes(proposed_trades: list[dict], symbol: str) -> dict:
@@ -48,9 +48,10 @@ def evaluate_trade_outcomes(proposed_trades: list[dict], symbol: str) -> dict:
     Returns:
         Một từ điển chứa tóm tắt kết quả và hiệu suất theo ngữ cảnh.
     """
-    logger.debug(f"Bắt đầu evaluate_trade_outcomes cho symbol: {symbol}, số trades: {len(proposed_trades)}")
+    logger.debug(f"Bắt đầu hàm evaluate_trade_outcomes cho symbol: {symbol}, số trades: {len(proposed_trades)}")
     if not proposed_trades or mt5 is None or not mt5.is_connected():
         logger.warning("Không có trades được đề xuất hoặc MT5 không kết nối.")
+        logger.debug("Kết thúc hàm evaluate_trade_outcomes (không có trades hoặc MT5 không kết nối).")
         return {"summary": {"total_proposed": len(proposed_trades), "wins": 0, "losses": 0, "untriggered": 0, "win_rate": None}}
 
     stats = {
@@ -151,5 +152,5 @@ def evaluate_trade_outcomes(proposed_trades: list[dict], symbol: str) -> dict:
             "trend_regime": _calculate_stats(stats["by_trend_regime"]),
         }
     }
-    logger.debug(f"Kết thúc evaluate_trade_outcomes. Kết quả: {final_results}")
+    logger.debug(f"Kết thúc hàm evaluate_trade_outcomes. Kết quả: {final_results}")
     return final_results

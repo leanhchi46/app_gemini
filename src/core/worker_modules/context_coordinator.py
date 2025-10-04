@@ -17,7 +17,7 @@ def prepare_and_build_context(app: "TradingToolApp", cfg: "RunConfig") -> Tuple[
     Xây dựng toàn bộ ngữ cảnh cần thiết để cung cấp cho model AI.
     Bao gồm: ngữ cảnh lịch sử, dữ liệu MT5, và phân tích tin tức.
     """
-    logger.debug("Bắt đầu prepare_and_build_context.")
+    logger.debug("Bắt đầu hàm prepare_and_build_context.")
     # 1. Xây dựng ngữ cảnh lịch sử từ các lần chạy trước
     composed = app.compose_context(cfg, budget_chars=max(800, int(cfg.ctx_limit))) or ""
     plan = None
@@ -70,5 +70,5 @@ def prepare_and_build_context(app: "TradingToolApp", cfg: "RunConfig") -> Tuple[
     mt5_json_full = json.dumps({"MT5_DATA": mt5_dict}, ensure_ascii=False) if mt5_dict else ""
     logger.debug("Đã tạo mt5_json_full.")
     
-    logger.debug("Kết thúc prepare_and_build_context.")
+    logger.debug("Kết thúc hàm prepare_and_build_context.")
     return safe_mt5_data, mt5_dict, context_block, mt5_json_full

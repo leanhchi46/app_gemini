@@ -17,9 +17,10 @@ def find_fvgs(rates: Sequence[dict], current_price: float) -> list:
     Returns:
         Một danh sách các từ điển FVG.
     """
-    logger.debug(f"Bắt đầu find_fvgs với {len(rates)} rates, current_price: {current_price}")
+    logger.debug(f"Bắt đầu hàm find_fvgs với {len(rates)} rates, current_price: {current_price}")
     if not rates or len(rates) < 3:
         logger.debug("Không đủ rates để tìm FVG.")
+        logger.debug("Kết thúc hàm find_fvgs (không đủ rates).")
         return []
 
     fvgs = []
@@ -48,6 +49,7 @@ def find_fvgs(rates: Sequence[dict], current_price: float) -> list:
 
     if not fvgs:
         logger.debug("Không tìm thấy FVG nào.")
+        logger.debug("Kết thúc hàm find_fvgs (không tìm thấy FVG).")
         return []
 
     # Kiểm tra xem các FVG đã được lấp đầy chưa
@@ -72,6 +74,7 @@ def find_fvgs(rates: Sequence[dict], current_price: float) -> list:
     
     if not unfilled_fvgs:
         logger.debug("Không có FVG nào chưa được fill.")
+        logger.debug("Kết thúc hàm find_fvgs (không có FVG chưa fill).")
         return []
 
     # Tìm FVG bullish và bearish gần nhất với giá hiện tại
@@ -106,7 +109,7 @@ def find_fvgs(rates: Sequence[dict], current_price: float) -> list:
         nearest_bearish['type'] = 'bear'
         results.append(nearest_bearish)
         logger.debug(f"Nearest Bearish FVG: {nearest_bearish}")
-    logger.debug(f"Kết thúc find_fvgs. Kết quả: {results}")
+    logger.debug(f"Kết thúc hàm find_fvgs. Kết quả: {results}")
     return results
 
 
@@ -122,9 +125,10 @@ def find_liquidity_levels(rates: Sequence[dict], lookback: int = 200) -> dict:
     Returns:
         Một từ điển chứa danh sách các swing highs và swing lows.
     """
-    logger.debug(f"Bắt đầu find_liquidity_levels với {len(rates)} rates, lookback: {lookback}")
+    logger.debug(f"Bắt đầu hàm find_liquidity_levels với {len(rates)} rates, lookback: {lookback}")
     if not rates or len(rates) < 3:
         logger.debug("Không đủ rates để tìm liquidity levels.")
+        logger.debug("Kết thúc hàm find_liquidity_levels (không đủ rates).")
         return {}
     
     limited_rates = rates[-lookback:]
@@ -146,7 +150,7 @@ def find_liquidity_levels(rates: Sequence[dict], lookback: int = 200) -> dict:
         "swing_highs_BSL": sorted(swing_highs, key=lambda x: x['price'], reverse=True)[:5], # Top 5 cao nhất
         "swing_lows_SSL": sorted(swing_lows, key=lambda x: x['price'])[:5], # Top 5 thấp nhất
     }
-    logger.debug(f"Kết thúc find_liquidity_levels. Kết quả: {results}")
+    logger.debug(f"Kết thúc hàm find_liquidity_levels. Kết quả: {results}")
     return results
 
 
@@ -163,9 +167,10 @@ def find_order_blocks(rates: Sequence[dict], lookback: int = 100) -> list:
     Returns:
         Một danh sách các từ điển OB.
     """
-    logger.debug(f"Bắt đầu find_order_blocks với {len(rates)} rates, lookback: {lookback}")
+    logger.debug(f"Bắt đầu hàm find_order_blocks với {len(rates)} rates, lookback: {lookback}")
     if not rates or len(rates) < 5: # Cần đủ nến cho ngữ cảnh
         logger.debug("Không đủ rates để tìm order blocks.")
+        logger.debug("Kết thúc hàm find_order_blocks (không đủ rates).")
         return []
 
     limited_rates = rates[-lookback:]
@@ -224,7 +229,7 @@ def find_order_blocks(rates: Sequence[dict], lookback: int = 100) -> list:
         nearest_bearish['type'] = 'bear'
         results.append(nearest_bearish)
         logger.debug(f"Nearest Bearish OB: {nearest_bearish}")
-    logger.debug(f"Kết thúc find_order_blocks. Kết quả: {results}")
+    logger.debug(f"Kết thúc hàm find_order_blocks. Kết quả: {results}")
     return results
 
 
@@ -242,9 +247,10 @@ def analyze_premium_discount(rates: Sequence[dict], current_price: float, lookba
         Một từ điển chứa thông tin về phạm vi, điểm cân bằng và trạng thái (Premium/Discount),
         hoặc None nếu không thể phân tích.
     """
-    logger.debug(f"Bắt đầu analyze_premium_discount với {len(rates)} rates, current_price: {current_price}, lookback: {lookback}")
+    logger.debug(f"Bắt đầu hàm analyze_premium_discount với {len(rates)} rates, current_price: {current_price}, lookback: {lookback}")
     if not rates or len(rates) < 20: # Cần một số lượng nến hợp lý
         logger.debug("Không đủ rates để phân tích premium/discount.")
+        logger.debug("Kết thúc hàm analyze_premium_discount (không đủ rates).")
         return None
 
     limited_rates = rates[-lookback:]
@@ -261,6 +267,7 @@ def analyze_premium_discount(rates: Sequence[dict], current_price: float, lookba
 
     if highest_high == 0.0 or lowest_low == float('inf') or highest_high == lowest_low:
         logger.warning("Không thể xác định range cho premium/discount.")
+        logger.debug("Kết thúc hàm analyze_premium_discount (không xác định được range).")
         return None
 
     equilibrium = lowest_low + (highest_high - lowest_low) * 0.5
@@ -272,7 +279,7 @@ def analyze_premium_discount(rates: Sequence[dict], current_price: float, lookba
         "equilibrium": equilibrium,
         "status": status,
     }
-    logger.debug(f"Kết thúc analyze_premium_discount. Kết quả: {result}")
+    logger.debug(f"Kết thúc hàm analyze_premium_discount. Kết quả: {result}")
     return result
 
 
@@ -290,9 +297,10 @@ def find_market_structure_shift(rates: Sequence[dict], swing_highs: list, swing_
         Một từ điển chứa thông tin về MSS (loại, sự kiện, mức giá, chỉ mục nến phá vỡ),
         hoặc None nếu không tìm thấy.
     """
-    logger.debug(f"Bắt đầu find_market_structure_shift với {len(rates)} rates, {len(swing_highs)} swing_highs, {len(swing_lows)} swing_lows.")
+    logger.debug(f"Bắt đầu hàm find_market_structure_shift với {len(rates)} rates, {len(swing_highs)} swing_highs, {len(swing_lows)} swing_lows.")
     if not rates or len(rates) < 20:
         logger.debug("Không đủ rates để tìm market structure shift.")
+        logger.debug("Kết thúc hàm find_market_structure_shift (không đủ rates).")
         return None
 
     # Kết hợp và sắp xếp tất cả các swing theo chỉ mục
@@ -300,6 +308,7 @@ def find_market_structure_shift(rates: Sequence[dict], swing_highs: list, swing_
     
     if len(all_swings) < 4: # Cần ít nhất hai đỉnh và hai đáy để xác định xu hướng
         logger.debug("Không đủ swings để xác định trend.")
+        logger.debug("Kết thúc hàm find_market_structure_shift (không đủ swings).")
         return None # Không đủ swings để xác định xu hướng một cách đáng tin cậy
 
     # 1. Xác định chuỗi 4 swing chính gần nhất để xác định xu hướng
@@ -311,6 +320,7 @@ def find_market_structure_shift(rates: Sequence[dict], swing_highs: list, swing_
 
     if len(last_highs) < 2 or len(last_lows) < 2:
         logger.debug("Không đủ highs hoặc lows để xác định trend.")
+        logger.debug("Kết thúc hàm find_market_structure_shift (không đủ highs/lows).")
         return None # Không đủ swings để xác định xu hướng một cách đáng tin cậy
 
     recent_high = max(last_highs, key=lambda x: x['bar_index'])
@@ -335,6 +345,7 @@ def find_market_structure_shift(rates: Sequence[dict], swing_highs: list, swing_
     scan_start_index = min(recent_high['bar_index'], recent_low['bar_index']) + 1
     if scan_start_index >= len(rates):
         logger.debug("Scan start index vượt quá số lượng rates.")
+        logger.debug("Kết thúc hàm find_market_structure_shift (scan index out of bounds).")
         return None
 
     for i in range(scan_start_index, len(rates)):
@@ -376,7 +387,7 @@ def find_market_structure_shift(rates: Sequence[dict], swing_highs: list, swing_
                  logger.debug(f"Tìm thấy Bearish BOS (undetermined trend): {mss}")
                  break
 
-    logger.debug(f"Kết thúc find_market_structure_shift. Kết quả: {mss}")
+    logger.debug(f"Kết thúc hàm find_market_structure_shift. Kết quả: {mss}")
     return mss
 
 
@@ -393,9 +404,10 @@ def get_session_liquidity(rates: Sequence[dict], sessions: dict, now_hhmm: str) 
     Returns:
         Một từ điển chứa mức cao nhất và thấp nhất của các phiên trước đó.
     """
-    logger.debug(f"Bắt đầu get_session_liquidity với {len(rates)} rates, sessions: {sessions}, now_hhmm: {now_hhmm}")
+    logger.debug(f"Bắt đầu hàm get_session_liquidity với {len(rates)} rates, sessions: {sessions}, now_hhmm: {now_hhmm}")
     if not rates:
         logger.debug("Không có rates để tìm session liquidity.")
+        logger.debug("Kết thúc hàm get_session_liquidity (không có rates).")
         return {}
 
     session_liquidity = {}
@@ -430,7 +442,7 @@ def get_session_liquidity(rates: Sequence[dict], sessions: dict, now_hhmm: str) 
                 session_liquidity["london_low"] = min(r["low"] for r in london_candles)
                 logger.debug(f"Tìm thấy London High/Low: {session_liquidity['london_high']}/{session_liquidity['london_low']}")
                 
-    logger.debug(f"Kết thúc get_session_liquidity. Kết quả: {session_liquidity}")
+    logger.debug(f"Kết thúc hàm get_session_liquidity. Kết quả: {session_liquidity}")
     return session_liquidity
 
 
@@ -446,9 +458,10 @@ def find_liquidity_voids(rates: Sequence[dict], lookback: int = 150) -> list:
     Returns:
         Một danh sách các từ điển Liquidity Void.
     """
-    logger.debug(f"Bắt đầu find_liquidity_voids với {len(rates)} rates, lookback: {lookback}")
+    logger.debug(f"Bắt đầu hàm find_liquidity_voids với {len(rates)} rates, lookback: {lookback}")
     if not rates or len(rates) < 3:
         logger.debug("Không đủ rates để tìm liquidity voids.")
+        logger.debug("Kết thúc hàm find_liquidity_voids (không đủ rates).")
         return []
 
     voids = []
@@ -485,7 +498,7 @@ def find_liquidity_voids(rates: Sequence[dict], lookback: int = 150) -> list:
 
     # Trả về 3 khoảng trống gần nhất
     results = sorted(voids, key=lambda x: x['bar_index'], reverse=True)[:3]
-    logger.debug(f"Kết thúc find_liquidity_voids. Kết quả: {results}")
+    logger.debug(f"Kết thúc hàm find_liquidity_voids. Kết quả: {results}")
     return results
 
 
@@ -500,13 +513,14 @@ def is_silver_bullet_window(now_hhmm: str, kills: dict) -> bool:
     Returns:
         True nếu thời gian hiện tại nằm trong cửa sổ Silver Bullet, ngược lại là False.
     """
-    logger.debug(f"Bắt đầu is_silver_bullet_window với now_hhmm: {now_hhmm}, kills: {kills}")
+    logger.debug(f"Bắt đầu hàm is_silver_bullet_window với now_hhmm: {now_hhmm}, kills: {kills}")
     # Silver Bullet của NY (10:00-11:00 AM giờ NY)
     # Killzone `newyork_am` được định nghĩa là 8:30-11:00 AM giờ NY.
     # Vì vậy, cửa sổ Silver Bullet bắt đầu 1.5 giờ sau khi KZ bắt đầu và kéo dài trong 1 giờ.
     ny_am_start = kills.get("newyork_am", {}).get("start")
     if not ny_am_start:
         logger.debug("Không tìm thấy thời gian bắt đầu killzone NY AM.")
+        logger.debug("Kết thúc hàm is_silver_bullet_window (không tìm thấy NY AM start).")
         return False
     
     try:
@@ -531,7 +545,9 @@ def is_silver_bullet_window(now_hhmm: str, kills: dict) -> bool:
             
     except Exception as e:
         logger.error(f"Lỗi khi tính toán cửa sổ Silver Bullet: {e}")
+        logger.debug("Kết thúc hàm is_silver_bullet_window (lỗi tính toán).")
         return False
 
     logger.debug("Không nằm trong cửa sổ Silver Bullet.")
+    logger.debug("Kết thúc hàm is_silver_bullet_window.")
     return False

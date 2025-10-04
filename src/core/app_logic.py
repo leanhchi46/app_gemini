@@ -316,7 +316,7 @@ class AppLogic:
             trade_news_block_after_min=int(app.trade_news_block_after_min_var.get()),
             trade_news_block_enabled=True,
             news_cache_ttl_sec=300,
-            no_run_killzone_enabled=bool(app.no_run_killzone_enabled_var.get()),
+            no_run_killzone_enabled=bool(app.norun_killzone_var.get()),
         )
         logger.debug(f"Đã chụp snapshot cấu hình cho news fetch: {config}")
         logger.debug("Kết thúc hàm _snapshot_config.")

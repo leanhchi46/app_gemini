@@ -24,39 +24,51 @@ FF_NEXTWEEK = "https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.json"
 def _http_get(
     url: str, *, cafile: Optional[str], skip_verify: bool, timeout: int = 20
 ) -> str:
-    logger.debug(f"Bắt đầu _http_get cho URL: {url}")
+    logger.debug(f"Bắt đầu hàm _http_get cho URL: {url}")
     ctx = build_ssl_context(cafile, skip_verify)
     opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (AI-ICT)"})
-    try:
-        with opener.open(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="ignore")
-            logger.debug(f"Đã fetch thành công URL: {url}, độ dài body: {len(body)}.")
-            return body
-    except Exception as e:
-        logger.error(f"Lỗi khi fetch URL '{url}': {e}")
-        raise # Re-raise để hàm gọi có thể xử lý
-    finally:
-        logger.debug("Kết thúc _http_get.")
+    
+    # Thêm cơ chế retry
+    for attempt in range(3):
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+                logger.debug(f"Đã fetch thành công URL: {url}, độ dài body: {len(body)}.")
+                return body
+        except Exception as e:
+            logger.warning(f"Lần thử {attempt + 1} thất bại khi fetch URL '{url}': {e}")
+            if attempt < 2:
+                time.sleep(1) # Chờ 1 giây trước khi thử lại
+            else:
+                logger.error(f"Lỗi khi fetch URL '{url}' sau 3 lần thử: {e}")
+                logger.debug("Kết thúc hàm _http_get (lỗi).")
+                raise # Re-raise để hàm gọi có thể xử lý
+    
+    # Dòng này sẽ không bao giờ được thực thi nếu vòng lặp hoạt động đúng
+    raise RuntimeError("Không thể fetch URL sau nhiều lần thử.")
 
 
 def event_currency(ev: dict) -> Optional[str]:
-    logger.debug(f"Bắt đầu event_currency cho event: {ev.get('title')}")
+    logger.debug(f"Bắt đầu hàm event_currency cho event: {ev.get('title')}")
     for k in ("currency", "country", "countryCode", "country_code"):
         c = ev.get(k)
         if isinstance(c, str):
             c = c.strip().upper()
             if len(c) == 3 and c.isalpha():
                 logger.debug(f"Tìm thấy currency: {c}")
+                logger.debug("Kết thúc hàm event_currency.")
                 return c
     logger.debug("Không tìm thấy currency hợp lệ.")
+    logger.debug("Kết thúc hàm event_currency (không tìm thấy).")
     return None
 
 
 def symbol_currencies(sym: str) -> set[str]:
-    logger.debug(f"Bắt đầu symbol_currencies cho symbol: {sym}")
+    logger.debug(f"Bắt đầu hàm symbol_currencies cho symbol: {sym}")
     if not sym:
         logger.debug("Symbol trống, trả về set rỗng.")
+        logger.debug("Kết thúc hàm symbol_currencies (symbol trống).")
         return set()
     s = sym.upper()
     tokens = set(re.findall(r"[A-Z]{3}", s))
@@ -75,12 +87,12 @@ def symbol_currencies(sym: str) -> set[str]:
     if any(k in s for k in ("JP225", "NIK", "NKY")):
         tokens.update({"JPY"})
     result = {t for t in tokens if len(t) == 3 and t.isalpha()}
-    logger.debug(f"Kết thúc symbol_currencies. Currencies: {result}")
+    logger.debug(f"Kết thúc hàm symbol_currencies. Currencies: {result}")
     return result
 
 
 def _parse_dataset(data: Any) -> List[Dict[str, Any]]:
-    logger.debug("Bắt đầu _parse_dataset.")
+    logger.debug("Bắt đầu hàm _parse_dataset.")
     items: List[dict] = []
     if isinstance(data, list):
         items = data
@@ -149,14 +161,14 @@ def _parse_dataset(data: Any) -> List[Dict[str, Any]]:
         except Exception as e:
             logger.warning(f"Lỗi khi parse event: {ev}. Chi tiết: {e}")
             continue
-    logger.debug(f"Kết thúc _parse_dataset. Tổng số high-impact events: {len(out)}")
+    logger.debug(f"Kết thúc hàm _parse_dataset. Tổng số high-impact events: {len(out)}")
     return out
 
 
 def _dedup_and_trim_week(
     events: List[Dict[str, Any]], now: Optional[datetime] = None
 ) -> List[Dict[str, Any]]:
-    logger.debug(f"Bắt đầu _dedup_and_trim_week với {len(events)} events.")
+    logger.debug(f"Bắt đầu hàm _dedup_and_trim_week với {len(events)} events.")
     now_local = (now or datetime.now()).astimezone()
     keep = [
         x
@@ -172,14 +184,14 @@ def _dedup_and_trim_week(
             continue
         seen.add(key)
         dedup.append(x)
-    logger.debug(f"Kết thúc _dedup_and_trim_week. Số events sau khi dedup: {len(dedup)}")
+    logger.debug(f"Kết thúc hàm _dedup_and_trim_week. Số events sau khi dedup: {len(dedup)}")
     return dedup
 
 
 def fetch_high_impact_events(
     *, cafile: Optional[str], skip_verify: bool, timeout: int = 20
 ) -> List[Dict[str, Any]]:
-    logger.debug("Bắt đầu fetch_high_impact_events.")
+    logger.debug("Bắt đầu hàm fetch_high_impact_events.")
     datasets: List[Any] = []
     for url in (FF_THISWEEK, FF_NEXTWEEK):
         try:
@@ -195,18 +207,18 @@ def fetch_high_impact_events(
     for ds in datasets:
         all_events.extend(_parse_dataset(ds))
     result = _dedup_and_trim_week(all_events)
-    logger.debug(f"Kết thúc fetch_high_impact_events. Tổng số events: {len(result)}")
+    logger.debug(f"Kết thúc hàm fetch_high_impact_events. Tổng số events: {len(result)}")
     return result
 
 
 def fetch_high_impact_events_for_cfg(
     cfg: RunConfig, timeout: int = 20
 ) -> List[Dict[str, Any]]:
-    logger.debug("Bắt đầu fetch_high_impact_events_for_cfg.")
+    logger.debug("Bắt đầu hàm fetch_high_impact_events_for_cfg.")
     cafile = getattr(cfg, "telegram_ca_path", None) or None
     skip = bool(getattr(cfg, "telegram_skip_verify", False))
     result = fetch_high_impact_events(cafile=cafile, skip_verify=skip, timeout=timeout)
-    logger.debug("Kết thúc fetch_high_impact_events_for_cfg.")
+    logger.debug("Kết thúc hàm fetch_high_impact_events_for_cfg.")
     return result
 
 
@@ -218,7 +230,7 @@ def is_within_news_window(
     *,
     now: Optional[datetime] = None,
 ) -> Tuple[bool, Optional[str]]:
-    logger.debug(f"Bắt đầu is_within_news_window cho symbol: {symbol}, before: {minutes_before}, after: {minutes_after}.")
+    logger.debug(f"Bắt đầu hàm is_within_news_window cho symbol: {symbol}, before: {minutes_before}, after: {minutes_after}.")
     now_local = (now or datetime.now()).astimezone()
     allowed = symbol_currencies(symbol)
     bef = max(0, int(minutes_before))
@@ -231,8 +243,10 @@ def is_within_news_window(
         if (t - timedelta(minutes=bef)) <= now_local <= (t + timedelta(minutes=aft)):
             why = f"{ev['title']}" + (f" [{ev['curr']}]" if ev.get("curr") else "")
             logger.info(f"Trong cửa sổ tin tức: {why} @ {t.strftime('%Y-%m-%d %H:%M')}")
+            logger.debug("Kết thúc hàm is_within_news_window (trong cửa sổ).")
             return True, f"{why} @ {t.strftime('%Y-%m-%d %H:%M')}"
     logger.debug("Không có event nào trong cửa sổ tin tức.")
+    logger.debug("Kết thúc hàm is_within_news_window (ngoài cửa sổ).")
     return False, None
 
 
@@ -252,7 +266,7 @@ def within_news_window_ui_cached(
 
     Returns (ok, why, events, fetch_time).
     """
-    logger.debug(f"Bắt đầu within_news_window_ui_cached cho symbol: {symbol}, TTL: {ttl_sec}.")
+    logger.debug(f"Bắt đầu hàm within_news_window_ui_cached cho symbol: {symbol}, TTL: {ttl_sec}.")
     cur_ts = time.time()
     events: List[Dict[str, Any]]
     fetch_ts: float
@@ -271,7 +285,7 @@ def within_news_window_ui_cached(
     ok, why = is_within_news_window(
         events, symbol, minutes_before, minutes_after, now=now
     )
-    logger.debug(f"Kết thúc within_news_window_ui_cached. OK: {ok}, Why: {why}, Số events: {len(events)}")
+    logger.debug(f"Kết thúc hàm within_news_window_ui_cached. OK: {ok}, Why: {why}, Số events: {len(events)}")
     return ok, why, events, fetch_ts
 
 
@@ -289,7 +303,7 @@ def within_news_window_cfg_cached(
 
     Returns (ok, why, events, fetch_time).
     """
-    logger.debug(f"Bắt đầu within_news_window_cfg_cached cho symbol: {cfg.mt5_symbol}, TTL: {ttl_sec}.")
+    logger.debug(f"Bắt đầu hàm within_news_window_cfg_cached cho symbol: {cfg.mt5_symbol}, TTL: {ttl_sec}.")
     cur_ts = time.time()
     events: List[Dict[str, Any]]
     fetch_ts: float
@@ -306,7 +320,7 @@ def within_news_window_cfg_cached(
     ok, why = is_within_news_window(
         events, cfg.mt5_symbol, minutes_before, minutes_after, now=now
     )
-    logger.debug(f"Kết thúc within_news_window_cfg_cached. OK: {ok}, Why: {why}, Số events: {len(events)}")
+    logger.debug(f"Kết thúc hàm within_news_window_cfg_cached. OK: {ok}, Why: {why}, Số events: {len(events)}")
     return ok, why, events, fetch_ts
 
 
@@ -321,7 +335,7 @@ def next_events_for_symbol(
 
     Filters by future time and symbol currencies, sorted ascending by time.
     """
-    logger.debug(f"Bắt đầu next_events_for_symbol cho symbol: {symbol}, limit: {limit}.")
+    logger.debug(f"Bắt đầu hàm next_events_for_symbol cho symbol: {symbol}, limit: {limit}.")
     try:
         now_local = (now or datetime.now()).astimezone()
         allowed = symbol_currencies(symbol)
@@ -338,8 +352,9 @@ def next_events_for_symbol(
             fut.append(ev)
         fut.sort(key=lambda x: x.get("when"))
         result = fut[: max(0, int(limit))]
-        logger.debug(f"Kết thúc next_events_for_symbol. Số events: {len(result)}")
+        logger.debug(f"Kết thúc hàm next_events_for_symbol. Số events: {len(result)}")
         return result
     except Exception as e:
         logger.error(f"Lỗi trong next_events_for_symbol: {e}")
+        logger.debug("Kết thúc hàm next_events_for_symbol (lỗi).")
         return []

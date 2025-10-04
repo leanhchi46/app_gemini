@@ -84,4 +84,6 @@ class RunConfig:
         """
         Ghi log debug sau khi một đối tượng RunConfig được khởi tạo.
         """
+        logger.debug("Bắt đầu hàm __post_init__ của RunConfig.")
         logger.debug(f"RunConfig được khởi tạo: {self}")
+        logger.debug("Kết thúc hàm __post_init__ của RunConfig.")

@@ -33,7 +33,7 @@ class ChartTabTV:
             app: Đối tượng ứng dụng chính chứa các biến và phương thức cần thiết.
             notebook: Đối tượng ttk.Notebook mà tab biểu đồ sẽ được thêm vào.
         """
-        logger.debug("Bắt đầu khởi tạo ChartTabTV.")
+        logger.debug("Bắt đầu hàm __init__ của ChartTabTV.")
         self.app = app
         self.root = app.root
 
@@ -208,7 +208,7 @@ class ChartTabTV:
         logger.debug("Đã khởi tạo panel No-Trade.")
 
         self._redraw_safe()
-        logger.debug("Kết thúc khởi tạo ChartTabTV.")
+        logger.debug("Kết thúc hàm __init__ của ChartTabTV.")
 
     def start(self):
         """
@@ -217,6 +217,7 @@ class ChartTabTV:
         logger.debug("Bắt đầu hàm start.")
         if self._running:
             logger.debug("ChartTabTV đã chạy, bỏ qua.")
+            logger.debug("Kết thúc hàm start (đã chạy).")
             return
         try:
             self._ensure_mt5(want_account=False)
@@ -244,10 +245,11 @@ class ChartTabTV:
         """
         Điền danh sách các ký hiệu giao dịch vào combobox.
         """
-        logger.debug("Bắt đầu _populate_symbol_list.")
+        logger.debug("Bắt đầu hàm _populate_symbol_list.")
         try:
             if not self._ensure_mt5(want_account=False):
                 logger.warning("Không thể populate symbol list vì MT5 chưa sẵn sàng.")
+                logger.debug("Kết thúc hàm _populate_symbol_list (MT5 không sẵn sàng).")
                 return
             import MetaTrader5 as mt5
             syms = mt5.symbols_get()
@@ -280,11 +282,12 @@ class ChartTabTV:
         Returns:
             Mã khung thời gian của MT5 hoặc None nếu không thể chuyển đổi.
         """
-        logger.debug(f"Bắt đầu _mt5_tf cho chuỗi: '{tf_str}'")
+        logger.debug(f"Bắt đầu hàm _mt5_tf cho chuỗi: '{tf_str}'")
         try:
             import MetaTrader5 as mt5
         except Exception as e:
             logger.warning(f"Không thể import MetaTrader5 trong _mt5_tf: {e}")
+            logger.debug("Kết thúc hàm _mt5_tf (lỗi import).")
             return None
         mapping = {
             "M1": mt5.TIMEFRAME_M1,
@@ -295,7 +298,7 @@ class ChartTabTV:
             "D1": mt5.TIMEFRAME_D1,
         }
         result = mapping.get(tf_str.upper(), mt5.TIMEFRAME_M5)
-        logger.debug(f"Kết thúc _mt5_tf. Mã khung thời gian: {result}")
+        logger.debug(f"Kết thúc hàm _mt5_tf. Mã khung thời gian: {result}")
         return result
 
     def _ensure_mt5(self, *, want_account: bool = True) -> bool:
@@ -308,12 +311,13 @@ class ChartTabTV:
         Returns:
             True nếu MT5 đã được khởi tạo và sẵn sàng, ngược lại là False.
         """
-        logger.debug(f"Bắt đầu _ensure_mt5. Want account: {want_account}")
+        logger.debug(f"Bắt đầu hàm _ensure_mt5. Want account: {want_account}")
         try:
             import MetaTrader5 as mt5
         except Exception as e:
             self.acc_status.set("Chưa cài MetaTrader5 (pip install MetaTrader5)")
             logger.warning(f"Không thể import MetaTrader5 trong _ensure_mt5: {e}")
+            logger.debug("Kết thúc hàm _ensure_mt5 (lỗi import).")
             return False
 
         # If app says it's initialized, trust it but verify account if needed
@@ -345,9 +349,10 @@ class ChartTabTV:
         if want_account and mt5.account_info() is None:
             self.acc_status.set("MT5: chưa đăng nhập (account_info=None)")
             logger.warning("MT5 initialize() thành công nhưng không lấy được account info sau đó.")
+            logger.debug("Kết thúc hàm _ensure_mt5 (không có account info).")
             return False
 
-        logger.debug("Kết thúc _ensure_mt5. Kết nối MT5 OK.")
+        logger.debug("Kết thúc hàm _ensure_mt5. Kết nối MT5 OK.")
         return True
 
     def _rates_to_df(self, symbol: str, tf_code: Any, count: int) -> Tuple[Any, Optional[str]]:
@@ -362,12 +367,13 @@ class ChartTabTV:
         Returns:
             Một tuple chứa DataFrame và thông báo lỗi (nếu có).
         """
-        logger.debug(f"Bắt đầu _rates_to_df cho symbol: {symbol}, tf_code: {tf_code}, count: {count}")
+        logger.debug(f"Bắt đầu hàm _rates_to_df cho symbol: {symbol}, tf_code: {tf_code}, count: {count}")
         try:
             import MetaTrader5 as mt5
             import pandas as pd
         except Exception as e:
             logger.error(f"Không thể import MetaTrader5 hoặc pandas trong _rates_to_df: {e}")
+            logger.debug("Kết thúc hàm _rates_to_df (lỗi import).")
             return None, "Không thể import MetaTrader5 hoặc pandas"
         try:
             # Normalize inputs
@@ -436,13 +442,14 @@ class ChartTabTV:
             return df, None
         except Exception as e:
             logger.error(f"Lỗi ngoại lệ trong _rates_to_df: {e}")
+            logger.debug("Kết thúc hàm _rates_to_df (lỗi ngoại lệ).")
             return None, f"Lỗi ngoại lệ: {e}"
 
     def _style(self):
         """
         Cấu hình kiểu hiển thị cho biểu đồ matplotlib.
         """
-        logger.debug("Bắt đầu _style.")
+        logger.debug("Bắt đầu hàm _style.")
         try:
             import matplotlib as mpl
             mpl.rcParams.update({"axes.grid": True, "grid.alpha": 0.25})
@@ -450,7 +457,7 @@ class ChartTabTV:
         except Exception as e:
             logger.warning(f"Lỗi khi cập nhật style matplotlib: {e}")
             pass
-        logger.debug("Kết thúc _style.")
+        logger.debug("Kết thúc hàm _style.")
 
     def _fmt(self, x: Any, digits: int = 5) -> str:
         """
@@ -463,13 +470,15 @@ class ChartTabTV:
         Returns:
             Chuỗi đã định dạng.
         """
-        logger.debug(f"Bắt đầu _fmt cho giá trị: {x}, digits: {digits}")
+        logger.debug(f"Bắt đầu hàm _fmt cho giá trị: {x}, digits: {digits}")
         try:
             result = f"{float(x):.{int(digits)}f}"
             logger.debug(f"Đã format giá trị: {result}")
+            logger.debug("Kết thúc hàm _fmt.")
             return result
         except Exception as e:
             logger.warning(f"Lỗi khi format giá trị '{x}': {e}")
+            logger.debug("Kết thúc hàm _fmt (lỗi).")
             return str(x)
 
     def _update_account_info(self, symbol: str):
@@ -479,10 +488,11 @@ class ChartTabTV:
         Args:
             symbol: Ký hiệu giao dịch hiện tại (để lấy thông tin liên quan).
         """
-        logger.debug(f"Bắt đầu _update_account_info cho symbol: {symbol}")
+        logger.debug(f"Bắt đầu hàm _update_account_info cho symbol: {symbol}")
         try:
             if not self._ensure_mt5(want_account=True):
                 logger.warning("Không thể cập nhật thông tin tài khoản vì MT5 chưa sẵn sàng.")
+                logger.debug("Kết thúc hàm _update_account_info (MT5 không sẵn sàng).")
                 return
             import MetaTrader5 as mt5
             ai = mt5.account_info()
@@ -509,7 +519,7 @@ class ChartTabTV:
         Args:
             symbol: Ký hiệu giao dịch để lọc các lệnh.
         """
-        logger.debug(f"Bắt đầu _fill_positions_table cho symbol: {symbol}")
+        logger.debug(f"Bắt đầu hàm _fill_positions_table cho symbol: {symbol}")
         try:
             import MetaTrader5 as mt5
             poss = mt5.positions_get(symbol=symbol) or []
@@ -536,7 +546,7 @@ class ChartTabTV:
         Args:
             symbol: Ký hiệu giao dịch để lọc lịch sử.
         """
-        logger.debug(f"Bắt đầu _fill_history_table cho symbol: {symbol}")
+        logger.debug(f"Bắt đầu hàm _fill_history_table cho symbol: {symbol}")
         try:
             import MetaTrader5 as mt5
             self.tree_his.delete(*self.tree_his.get_children())
@@ -559,7 +569,7 @@ class ChartTabTV:
         """
         Vẽ biểu đồ giá bằng dữ liệu từ MT5 và matplotlib.
         """
-        logger.debug("Bắt đầu _draw_chart.")
+        logger.debug("Bắt đầu hàm _draw_chart.")
         # Ensure `sym` is always bound even if an early error occurs
         try:
             sym = self.symbol_var.get().strip()
@@ -709,14 +719,14 @@ class ChartTabTV:
         self.ax_price.set_title(f"{sym}  •  {self.tf_var.get()}  •  {len(df)} bars")
         self.fig.subplots_adjust(right=0.75)
         self.canvas.draw_idle()
-        logger.debug("Kết thúc _draw_chart.")
+        logger.debug("Kết thúc hàm _draw_chart.")
 
     def _redraw_safe(self):
         """
         Vẽ lại biểu đồ và cập nhật các panel thông tin một cách an toàn.
         Xử lý lỗi để tránh crash ứng dụng.
         """
-        logger.debug("Bắt đầu _redraw_safe.")
+        logger.debug("Bắt đầu hàm _redraw_safe.")
         try:
             self._draw_chart()
         except Exception as e:
@@ -750,15 +760,16 @@ class ChartTabTV:
         except Exception as e:
             logger.error(f"Lỗi khi cập nhật panel No-Trade: {e}")
             pass
-        logger.debug("Kết thúc _redraw_safe.")
+        logger.debug("Kết thúc hàm _redraw_safe.")
 
     def _tick(self):
         """
         Hàm tick được gọi định kỳ để làm mới dữ liệu và biểu đồ.
         """
-        logger.debug("Bắt đầu _tick.")
+        logger.debug("Bắt đầu hàm _tick.")
         if not self._running:
             logger.debug("_tick dừng vì _running là False.")
+            logger.debug("Kết thúc hàm _tick (không chạy).")
             return
         try:
             # Opportunistic refresh of shared news cache (non-blocking)
@@ -793,16 +804,18 @@ class ChartTabTV:
         Returns:
             Một từ điển chứa thông tin về các phiên giao dịch.
         """
-        logger.debug(f"Bắt đầu _compute_sessions_today cho symbol: {symbol}")
+        logger.debug(f"Bắt đầu hàm _compute_sessions_today cho symbol: {symbol}")
         try:
             from src.utils import mt5_utils as _mt5u
             # The session ranges are now based on system time, not rates.
             # We can call the helper directly without fetching MT5 data here.
             result = _mt5u.session_ranges_today(None) or {}
             logger.debug(f"Đã tính toán sessions today: {result}")
+            logger.debug("Kết thúc hàm _compute_sessions_today.")
             return result
         except Exception as e:
             logger.error(f"Lỗi khi tính toán sessions today: {e}")
+            logger.debug("Kết thúc hàm _compute_sessions_today (lỗi).")
             return {}
 
     def _allowed_session_now(self, ss: dict) -> bool:
@@ -815,7 +828,7 @@ class ChartTabTV:
         Returns:
             True nếu phiên hiện tại được phép, ngược lại là False.
         """
-        logger.debug(f"Bắt đầu _allowed_session_now với sessions: {ss}")
+        logger.debug(f"Bắt đầu hàm _allowed_session_now với sessions: {ss}")
         try:
             now = __import__("datetime").datetime.now().strftime("%H:%M")
             def _in(r):
@@ -839,17 +852,18 @@ class ChartTabTV:
             if not any(flags):
                 ok = True
                 logger.debug("Không có cờ phiên nào được chọn, mặc định cho phép.")
-            logger.debug(f"Kết thúc _allowed_session_now. Kết quả: {ok}")
+            logger.debug(f"Kết thúc hàm _allowed_session_now. Kết quả: {ok}")
             return bool(ok)
         except Exception as e:
             logger.error(f"Lỗi khi kiểm tra phiên giao dịch: {e}")
+            logger.debug("Kết thúc hàm _allowed_session_now (lỗi).")
             return True
 
     def _update_notrade_panel(self):
         """
         Cập nhật panel "Không giao dịch" với trạng thái phiên, lý do và các sự kiện sắp tới.
         """
-        logger.debug("Bắt đầu _update_notrade_panel.")
+        logger.debug("Bắt đầu hàm _update_notrade_panel.")
         # Session gate
         sym = (self.symbol_var.get().strip() or getattr(self.app, "mt5_symbol_var", tk.StringVar(value="")).get().strip() or "")
         ss = self._compute_sessions_today(sym) if sym else {}
@@ -892,4 +906,4 @@ class ChartTabTV:
         except Exception as e:
             self.nt_events.set("(none)")
             logger.error(f"Lỗi khi cập nhật sự kiện tin tức: {e}")
-        logger.debug("Kết thúc _update_notrade_panel.")
+        logger.debug("Kết thúc hàm _update_notrade_panel.")

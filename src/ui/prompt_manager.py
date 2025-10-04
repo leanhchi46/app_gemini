@@ -19,7 +19,7 @@ def _extract_text_from_obj(obj):
     Trích xuất tất cả các chuỗi văn bản từ một đối tượng Python (dict, list, str)
     một cách đệ quy và nối chúng lại thành một chuỗi duy nhất.
     """
-    logger.debug(f"Bắt đầu _extract_text_from_obj cho đối tượng kiểu: {type(obj)}")
+    logger.debug(f"Bắt đầu hàm _extract_text_from_obj cho đối tượng kiểu: {type(obj)}")
     parts = []
 
     def walk(x):
@@ -47,7 +47,7 @@ def _extract_text_from_obj(obj):
                     .replace("\\t", "\t")
                     .replace('\\"', '"')
                     .replace("\\'", "'"))
-    logger.debug(f"Kết thúc _extract_text_from_obj. Độ dài văn bản: {len(text)}")
+    logger.debug(f"Kết thúc hàm _extract_text_from_obj. Độ dài văn bản: {len(text)}")
     return text or json.dumps(obj, ensure_ascii=False, indent=2)
 
 def _normalize_prompt_text(raw: str) -> str:
@@ -56,10 +56,11 @@ def _normalize_prompt_text(raw: str) -> str:
     Cố gắng phân tích dưới dạng JSON hoặc đối tượng Python, sau đó trích xuất văn bản.
     Nếu không thành công, trả về văn bản gốc.
     """
-    logger.debug(f"Bắt đầu _normalize_prompt_text. Độ dài raw text: {len(raw)}")
+    logger.debug(f"Bắt đầu hàm _normalize_prompt_text. Độ dài raw text: {len(raw)}")
     s = raw.strip()
     if not s:
         logger.debug("Raw text trống, trả về rỗng.")
+        logger.debug("Kết thúc hàm _normalize_prompt_text (raw text trống).")
         return ""
 
     # Cố gắng phân tích văn bản đầu vào theo các định dạng khác nhau.
@@ -85,6 +86,7 @@ def _normalize_prompt_text(raw: str) -> str:
 
     # Nếu cả hai cách trên đều thất bại, trả về chuỗi văn bản gốc.
     logger.debug("Không thể normalize prompt, trả về raw text.")
+    logger.debug("Kết thúc hàm _normalize_prompt_text.")
     return s
 
 def _reformat_prompt_area(app: "TradingToolApp"):
@@ -92,7 +94,7 @@ def _reformat_prompt_area(app: "TradingToolApp"):
     Định dạng lại nội dung của khu vực nhập prompt hiện tại (tab "No Entry" hoặc "Entry/Run")
     bằng cách chuẩn hóa văn bản.
     """
-    logger.debug("Bắt đầu _reformat_prompt_area.")
+    logger.debug("Bắt đầu hàm _reformat_prompt_area.")
     try:
         selected_tab_index = app.prompt_nb.index(app.prompt_nb.select())
         if selected_tab_index == 0:
@@ -119,7 +121,7 @@ def _load_prompts_from_disk(app: "TradingToolApp", silent=False):
     Tải nội dung các file prompt từ đĩa (`prompt_no_entry.txt` và `prompt_entry_run.txt`)
     và hiển thị chúng trên các tab prompt tương ứng.
     """
-    logger.debug(f"Bắt đầu _load_prompts_from_disk. Silent: {silent}")
+    logger.debug(f"Bắt đầu hàm _load_prompts_from_disk. Silent: {silent}")
     files_to_load = {
         "no_entry": (APP_DIR / "prompt_no_entry.txt", app.prompt_no_entry_text),
         "entry_run": (APP_DIR / "prompt_entry_run.txt", app.prompt_entry_run_text),
@@ -146,13 +148,13 @@ def _load_prompts_from_disk(app: "TradingToolApp", silent=False):
     if loaded_count > 0 and not silent:
         ui_utils.ui_status(app, f"Đã nạp {loaded_count} prompt từ file.")
         logger.info(f"Đã nạp {loaded_count} prompt từ file.")
-    logger.debug("Kết thúc _load_prompts_from_disk.")
+    logger.debug("Kết thúc hàm _load_prompts_from_disk.")
 
 def _save_current_prompt_to_disk(app: "TradingToolApp"):
     """
     Lưu nội dung của prompt hiện tại (trên tab đang chọn) vào file tương ứng trên đĩa.
     """
-    logger.debug("Bắt đầu _save_current_prompt_to_disk.")
+    logger.debug("Bắt đầu hàm _save_current_prompt_to_disk.")
     try:
         selected_tab_index = app.prompt_nb.index(app.prompt_nb.select())
         if selected_tab_index == 0:
