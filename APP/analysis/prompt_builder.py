@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Dict, Any, List
 if TYPE_CHECKING:
     from APP.configs.app_config import RunConfig
     from APP.ui.app_ui import AppUI
-    from APP.utils.safe_data import SafeData
+from APP.utils.safe_data import SafeData
 
 logger = logging.getLogger(__name__)
 

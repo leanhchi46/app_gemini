@@ -1,63 +1,161 @@
+# -*- coding: utf-8 -*-
+"""
+Module để lấy và xử lý các tin tức kinh tế có tác động mạnh từ Forex Factory.
+Sử dụng Playwright để trích xuất dữ liệu JSON từ biến JavaScript của trang web.
+"""
+
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
 import re
 import time
-import urllib.request
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from APP.services.telegram_service import build_ssl_context
+from playwright.async_api import async_playwright
 
 if TYPE_CHECKING:
     from APP.configs.app_config import RunConfig
 
 logger = logging.getLogger(__name__)
 
-FF_THISWEEK = "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"
-FF_NEXTWEEK = "https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.json"
+
+# --- Constants ---
+BASE_URL = "https://www.forexfactory.com"
+# URL mới dựa trên phương pháp scraping
+FF_THISWEEK_URL = f"{BASE_URL}/calendar?week=this"
+FF_NEXTWEEK_URL = f"{BASE_URL}/calendar?week=next"
+
+EXCLUDED_EVENT_KEYWORDS = (
+    "bank holiday", "holiday", "tentative", "all day",
+    "daylight", "speaks", "speech",
+)
 
 
-def _http_get(
-    url: str, *, cafile: Optional[str], skip_verify: bool, timeout: int = 20
-) -> str:
-    logger.debug(f"Bắt đầu hàm _http_get cho URL: {url}")
-    ctx = build_ssl_context(cafile, skip_verify)
-    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (AI-ICT)"})
+# --- Core Scraping Logic ---
 
-    for attempt in range(3):
-        try:
-            with opener.open(req, timeout=timeout) as resp:
-                body = resp.read().decode("utf-8", errors="ignore")
-                logger.debug(f"Đã fetch thành công URL: {url}, độ dài body: {len(body)}.")
-                return body
-        except Exception as e:
-            logger.warning(f"Lần thử {attempt + 1} thất bại khi fetch URL '{url}': {e}")
-            if attempt < 2:
-                time.sleep(1)
-            else:
-                logger.error(f"Lỗi khi fetch URL '{url}' sau 3 lần thử: {e}")
-                raise
-    raise RuntimeError("Không thể fetch URL sau nhiều lần thử.")
+async def _scrape_calendar_data(url: str) -> List[Dict[str, Any]]:
+    """
+    Sử dụng Playwright để truy cập URL và trích xuất dữ liệu lịch từ biến JS.
+    """
+    logger.info(f"🌐 Đang scrape dữ liệu từ: {url}")
+    days_array: List[Dict[str, Any]] = []
+    
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            )
+            page = await context.new_page()
+            
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            
+            # Trích xuất dữ liệu từ biến JavaScript `calendarComponentStates`
+            data = await page.evaluate(
+                """() => {
+                    if (typeof window.calendarComponentStates === 'undefined') { return []; }
+                    return (window.calendarComponentStates[1]?.days || window.calendarComponentStates[0]?.days || []);
+                }"""
+            )
+            days_array = data or []
+            
+            await browser.close()
+            logger.info(f"✅ Trích xuất thành công {len(days_array)} ngày dữ liệu.")
+            return days_array
+    except Exception:
+        logger.error(f"⚠️ Lỗi nghiêm trọng khi scraping {url}", exc_info=True)
+        return []
 
 
-def event_currency(ev: dict) -> Optional[str]:
-    logger.debug(f"Bắt đầu hàm event_currency cho event: {ev.get('title')}")
-    for k in ("currency", "country", "countryCode", "country_code"):
-        c = ev.get(k)
-        if isinstance(c, str):
-            c = c.strip().upper()
-            if len(c) == 3 and c.isalpha():
-                logger.debug(f"Tìm thấy currency: {c}")
-                return c
-    logger.debug("Không tìm thấy currency hợp lệ.")
-    return None
+# --- Data Parsing and Normalization ---
 
+def _parse_scraped_data(days_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Phân tích dữ liệu thô từ scraping và chuyển đổi thành định dạng chuẩn.
+    """
+    all_events: List[Dict[str, Any]] = []
+    for day in days_data:
+        for event in day.get("events", []):
+            try:
+                impact = event.get("impact", "").lower()
+                if "high" not in impact and "red" not in impact:
+                    continue
+
+                title = event.get("title", "").strip()
+                if not title or any(k in title.lower() for k in EXCLUDED_EVENT_KEYWORDS):
+                    continue
+
+                timestamp = event.get("datetime")
+                if not isinstance(timestamp, int) or timestamp <= 0:
+                    continue
+                
+                # Chuyển đổi timestamp sang datetime object có múi giờ
+                dt_utc = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+
+                all_events.append({
+                    "when": dt_utc.astimezone(), # Chuyển sang múi giờ địa phương
+                    "title": title,
+                    "curr": event.get("currency", "").strip().upper() or None,
+                })
+            except Exception:
+                logger.warning(f"Lỗi khi parse event: {event}", exc_info=True)
+                continue
+    return all_events
+
+
+def _dedup_and_sort_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Loại bỏ các sự kiện trùng lặp và sắp xếp theo thời gian."""
+    events.sort(key=lambda x: x["when"])
+    seen, dedup = set(), []
+    for x in events:
+        key = (x["title"], int(x["when"].timestamp()) // 60)
+        if key not in seen:
+            seen.add(key)
+            dedup.append(x)
+    return dedup
+
+
+# --- Main Public Function ---
+
+async def get_forex_factory_news_async() -> List[Dict[str, Any]]:
+    """
+    Hàm bất đồng bộ chính để lấy, phân tích và xử lý tin tức.
+    """
+    logger.debug("Bắt đầu quy trình lấy tin tức (async).")
+    
+    # Chạy song song 2 tác vụ scraping
+    tasks = [
+        _scrape_calendar_data(FF_THISWEEK_URL),
+        _scrape_calendar_data(FF_NEXTWEEK_URL),
+    ]
+    results = await asyncio.gather(*tasks)
+    
+    raw_data = results[0] + results[1]
+    parsed_events = _parse_scraped_data(raw_data)
+    final_events = _dedup_and_sort_events(parsed_events)
+    
+    logger.info(f"Hoàn tất lấy tin tức, tìm thấy {len(final_events)} sự kiện có tác động mạnh.")
+    return final_events
+
+def get_forex_factory_news() -> List[Dict[str, Any]]:
+    """
+    Hàm đồng bộ (wrapper) để tương thích với code hiện tại.
+    """
+    try:
+        # Chạy vòng lặp sự kiện asyncio nếu nó chưa chạy
+        loop = asyncio.get_running_loop()
+        return loop.run_until_complete(get_forex_factory_news_async())
+    except RuntimeError:
+        # Nếu không có vòng lặp nào đang chạy, tạo một cái mới
+        return asyncio.run(get_forex_factory_news_async())
+
+
+# --- Utility and Logic Functions (Largely Unchanged) ---
 
 def symbol_currencies(sym: str) -> set[str]:
-    logger.debug(f"Bắt đầu hàm symbol_currencies cho symbol: {sym}")
+    """Phân tích một symbol giao dịch để tìm các tiền tệ liên quan."""
     if not sym:
         return set()
     s = sym.upper()
@@ -79,84 +177,6 @@ def symbol_currencies(sym: str) -> set[str]:
     return {t for t in tokens if len(t) == 3 and t.isalpha()}
 
 
-def _parse_dataset(data: Any) -> List[Dict[str, Any]]:
-    logger.debug("Bắt đầu hàm _parse_dataset.")
-    items: List[dict] = []
-    if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        for key in ("events", "thisWeek", "week", "items", "result"):
-            if isinstance(data.get(key), list):
-                items = data[key]
-                break
-        if not items:
-            for v in data.values():
-                if isinstance(v, list) and v and isinstance(v[0], dict):
-                    items = v
-                    break
-
-    out: List[Dict[str, Any]] = []
-    for ev in items or []:
-        try:
-            impact = (ev.get("impact") or ev.get("impactLabel") or ev.get("impact_text") or "").strip().lower()
-            if not (("high" in impact) or ("red" in impact) or ("độ cao" in impact)):
-                continue
-            title = (ev.get("title") or ev.get("event") or ev.get("name") or "").strip()
-            tlow = title.lower()
-            if any(k in tlow for k in ("bank holiday", "holiday", "tentative", "all day", "daylight", "speaks", "speech")):
-                continue
-            ts = (ev.get("timestamp") or ev.get("dateEventUnix") or ev.get("unixTime") or ev.get("timeUnix"))
-            dt_local = None
-            if isinstance(ts, (int, float)) and ts > 0:
-                dt_local = datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone()
-            if not dt_local:
-                continue
-            cur = event_currency(ev)
-            out.append({"when": dt_local, "title": title or "High-impact event", "curr": cur})
-        except Exception as e:
-            logger.warning(f"Lỗi khi parse event: {ev}. Chi tiết: {e}")
-            continue
-    return out
-
-
-def _dedup_and_trim_week(events: List[Dict[str, Any]], now: Optional[datetime] = None) -> List[Dict[str, Any]]:
-    logger.debug(f"Bắt đầu hàm _dedup_and_trim_week với {len(events)} events.")
-    now_local = (now or datetime.now()).astimezone()
-    keep = [x for x in events if abs((x["when"] - now_local).total_seconds()) <= 7 * 24 * 3600]
-    keep.sort(key=lambda x: x["when"])
-    seen, dedup = set(), []
-    for x in keep:
-        key = (x["title"], int(x["when"].timestamp()) // 60)
-        if key in seen:
-            continue
-        seen.add(key)
-        dedup.append(x)
-    return dedup
-
-
-def fetch_high_impact_events(*, cafile: Optional[str], skip_verify: bool, timeout: int = 20) -> List[Dict[str, Any]]:
-    logger.debug("Bắt đầu hàm fetch_high_impact_events.")
-    datasets: List[Any] = []
-    for url in (FF_THISWEEK, FF_NEXTWEEK):
-        try:
-            body = _http_get(url, cafile=cafile, skip_verify=skip_verify, timeout=timeout)
-            datasets.append(json.loads(body))
-        except Exception as e:
-            logger.warning(f"Lỗi khi fetch hoặc parse dataset từ URL '{url}': {e}")
-            continue
-    all_events: List[Dict[str, Any]] = []
-    for ds in datasets:
-        all_events.extend(_parse_dataset(ds))
-    return _dedup_and_trim_week(all_events)
-
-
-def fetch_high_impact_events_for_cfg(cfg: "RunConfig", timeout: int = 20) -> List[Dict[str, Any]]:
-    logger.debug("Bắt đầu hàm fetch_high_impact_events_for_cfg.")
-    cafile = getattr(cfg.telegram, "ca_path", None) or None
-    skip = bool(getattr(cfg.telegram, "skip_verify", False))
-    return fetch_high_impact_events(cafile=cafile, skip_verify=skip, timeout=timeout)
-
-
 def is_within_news_window(
     events: List[Dict[str, Any]],
     symbol: str,
@@ -165,25 +185,27 @@ def is_within_news_window(
     *,
     now: Optional[datetime] = None,
 ) -> Tuple[bool, Optional[str]]:
-    logger.debug(f"Bắt đầu hàm is_within_news_window cho symbol: {symbol}, before: {minutes_before}, after: {minutes_after}.")
+    """Kiểm tra xem thời điểm hiện tại có nằm trong cửa sổ tin tức của một symbol không."""
     now_local = (now or datetime.now()).astimezone()
-    allowed = symbol_currencies(symbol)
-    bef = max(0, int(minutes_before))
-    aft = max(0, int(minutes_after))
+    allowed_currencies = symbol_currencies(symbol)
+    
     for ev in events:
-        if allowed and ev.get("curr") and ev["curr"] not in allowed:
+        if allowed_currencies and ev.get("curr") and ev["curr"] not in allowed_currencies:
             continue
-        t = ev["when"]
-        if (t - timedelta(minutes=bef)) <= now_local <= (t + timedelta(minutes=aft)):
+
+        event_time = ev["when"]
+        start_window = event_time - timedelta(minutes=max(0, minutes_before))
+        end_window = event_time + timedelta(minutes=max(0, minutes_after))
+
+        if start_window <= now_local <= end_window:
             why = f"{ev['title']}" + (f" [{ev['curr']}]" if ev.get("curr") else "")
-            logger.info(f"Trong cửa sổ tin tức: {why} @ {t.strftime('%Y-%m-%d %H:%M')}")
-            return True, f"{why} @ {t.strftime('%Y-%m-%d %H:%M')}"
+            logger.info(f"Phát hiện trong cửa sổ tin tức: {why} @ {event_time.strftime('%H:%M')}")
+            return True, f"{why} @ {event_time.strftime('%Y-%m-%d %H:%M')}"
+            
     return False, None
 
 
-def within_news_window_ui_cached(
-    cafile: Optional[str],
-    skip_verify: bool,
+def within_news_window_cached(
     symbol: str,
     minutes_before: int,
     minutes_after: int,
@@ -193,41 +215,25 @@ def within_news_window_ui_cached(
     ttl_sec: int = 300,
     now: Optional[datetime] = None,
 ) -> Tuple[bool, Optional[str], List[Dict[str, Any]], float]:
-    logger.debug(f"Bắt đầu hàm within_news_window_ui_cached cho symbol: {symbol}, TTL: {ttl_sec}.")
+    """
+    Kiểm tra cửa sổ tin tức sử dụng cache, làm mới nếu cache hết hạn.
+    """
     cur_ts = time.time()
     events: List[Dict[str, Any]]
     fetch_ts: float
-    if not cache_events or (cur_ts - float(cache_fetch_time or 0.0)) > max(0, int(ttl_sec)):
-        events = fetch_high_impact_events(cafile=cafile, skip_verify=skip_verify, timeout=20)
+
+    if not cache_events or (cur_ts - (cache_fetch_time or 0.0)) > ttl_sec:
+        logger.debug("Cache tin tức hết hạn hoặc không tồn tại, đang fetch lại.")
+        events = get_forex_factory_news()
         fetch_ts = cur_ts
     else:
+        logger.debug("Sử dụng cache tin tức hiện có.")
         events = cache_events
-        fetch_ts = float(cache_fetch_time or 0.0)
-    ok, why = is_within_news_window(events, symbol, minutes_before, minutes_after, now=now)
-    return ok, why, events, fetch_ts
+        fetch_ts = cache_fetch_time or 0.0
 
-
-def within_news_window_cfg_cached(
-    cfg: "RunConfig",
-    minutes_before: int,
-    minutes_after: int,
-    *,
-    cache_events: Optional[List[Dict[str, Any]]],
-    cache_fetch_time: Optional[float],
-    ttl_sec: int = 300,
-    now: Optional[datetime] = None,
-) -> Tuple[bool, Optional[str], List[Dict[str, Any]], float]:
-    logger.debug(f"Bắt đầu hàm within_news_window_cfg_cached cho symbol: {cfg.mt5.symbol}, TTL: {ttl_sec}.")
-    cur_ts = time.time()
-    events: List[Dict[str, Any]]
-    fetch_ts: float
-    if not cache_events or (cur_ts - float(cache_fetch_time or 0.0)) > max(0, int(ttl_sec)):
-        events = fetch_high_impact_events_for_cfg(cfg, timeout=20)
-        fetch_ts = cur_ts
-    else:
-        events = cache_events
-        fetch_ts = float(cache_fetch_time or 0.0)
-    ok, why = is_within_news_window(events, cfg.mt5.symbol, minutes_before, minutes_after, now=now)
+    ok, why = is_within_news_window(
+        events, symbol, minutes_before, minutes_after, now=now
+    )
     return ok, why, events, fetch_ts
 
 
@@ -238,31 +244,21 @@ def next_events_for_symbol(
     now: Optional[datetime] = None,
     limit: int = 3,
 ) -> List[Dict[str, Any]]:
-    logger.debug(f"Bắt đầu hàm next_events_for_symbol cho symbol: {symbol}, limit: {limit}.")
+    """
+    Trả về các sự kiện quan trọng sắp tới cho một symbol cụ thể.
+    """
     try:
         now_local = (now or datetime.now()).astimezone()
-        allowed = symbol_currencies(symbol)
-        fut = []
+        allowed_currencies = symbol_currencies(symbol)
+        
+        future_events = []
         for ev in events or []:
-            t = ev.get("when")
-            if not t or t < now_local:
-                continue
-            cur = ev.get("curr")
-            if allowed and cur and cur not in allowed:
-                continue
-            fut.append(ev)
-        fut.sort(key=lambda x: x.get("when"))
-        return fut[: max(0, int(limit))]
-    except Exception as e:
-        logger.error(f"Lỗi trong next_events_for_symbol: {e}")
+            if ev.get("when") and ev["when"] > now_local:
+                if not allowed_currencies or (ev.get("curr") and ev["curr"] in allowed_currencies):
+                    future_events.append(ev)
+        
+        future_events.sort(key=lambda x: x["when"])
+        return future_events[:max(0, limit)]
+    except Exception:
+        logger.error("Lỗi trong next_events_for_symbol.", exc_info=True)
         return []
-
-__all__ = [
-    "fetch_high_impact_events",
-    "fetch_high_impact_events_for_cfg",
-    "is_within_news_window",
-    "within_news_window_ui_cached",
-    "within_news_window_cfg_cached",
-    "next_events_for_symbol",
-    "symbol_currencies",
-]

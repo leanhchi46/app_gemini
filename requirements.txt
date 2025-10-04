@@ -6,6 +6,10 @@ pandas
 Pillow
 certifi
 scikit-learn
+holidays
 
 # UI
 matplotlib
+mplfinance
+beautifulsoup4
+playwright

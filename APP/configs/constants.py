@@ -46,11 +46,20 @@ class Files:
     )
 
 
+@dataclass(frozen=True)
+class Reports:
+    """Lớp chứa các hằng số liên quan đến việc xử lý báo cáo."""
+
+    # Mẫu regex để tìm điểm bắt đầu của báo cáo dành cho người đọc
+    REPORT_START_MARKER: str = r"###\s+NHIỆM VỤ 2"
+
+
 # Tạo các instance bất biến của các lớp cấu hình
 # Các module khác sẽ import các instance này để sử dụng.
 MODELS = Models()
 PATHS = Paths()
 FILES = Files()
+REPORTS = Reports()
 
 # Ghi log các đường dẫn quan trọng để dễ dàng gỡ lỗi
 logger.debug(f"APP_DIR: {PATHS.APP_DIR}")

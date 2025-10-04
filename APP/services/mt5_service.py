@@ -4,22 +4,22 @@ import json
 import logging
 import math
 import time
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from statistics import median
-from typing import Any, Dict, Iterable, Optional, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 import MetaTrader5 as mt5
 
-from APP.analysis import ict_analyzer as ict_analysis
-from APP.utils.safe_data import SafeMT5Data
+from APP.analysis import ict_analyzer
+from APP.analysis.ict_analyzer import LiquidityLevel
+from APP.utils.safe_data import SafeData
 
 logger = logging.getLogger(__name__)
 
-
 if TYPE_CHECKING:
-    from APP.configs.app_config import RunConfig
-    from APP.ui.app_ui import AppUI
+    from APP.configs.app_config import MT5Config, RunConfig
 
 
 # ------------------------------
@@ -53,11 +53,32 @@ def connect(path: str | None = None) -> tuple[bool, str | None]:
 
 
 def ensure_initialized(path: str | None = None) -> bool:
-    """Ensure MT5 is initialized. Returns True if ready."""
+    """Ensure MT5 is ready. Returns True if ready."""
     logger.debug(f"Bắt đầu ensure_initialized. Path: {path}")
     ok, _ = connect(path)
     logger.debug(f"Kết thúc ensure_initialized. Kết quả: {ok}")
     return ok
+
+
+def get_all_symbols() -> list[str]:
+    """
+    Lấy danh sách tên của tất cả các symbol có sẵn.
+    """
+    logger.debug("Bắt đầu get_all_symbols.")
+    if not ensure_initialized():
+        logger.warning("MT5 chưa được khởi tạo, không thể lấy danh sách symbol.")
+        return []
+    try:
+        symbols = mt5.symbols_get()
+        if symbols:
+            names = sorted([s.name for s in symbols])
+            logger.debug(f"Đã lấy được {len(names)} symbols.")
+            return names
+        logger.warning("Không lấy được symbol nào từ mt5.symbols_get().")
+        return []
+    except Exception as e:
+        logger.exception(f"Lỗi khi lấy danh sách symbol: {e}")
+        return []
 
 
 # ------------------------------
@@ -483,16 +504,13 @@ def _nearby_key_levels(
     return out
 
 
-def build_context(
+def build_mt5_context(
     symbol: str,
+    cfg: "MT5Config",
     *,
-    n_m1: int = 120,
-    n_m5: int = 180,
-    n_m15: int = 96,
-    n_h1: int = 120,
-    return_json: bool = False,  # Default changed to return the object
+    return_json: bool = False,
     plan: dict | None = None,
-) -> SafeMT5Data:
+) -> SafeData:
     """
     Fetches MT5 data + computes helpers used by the app.
     Returns a JSON string (default) containing a single object with key MT5_DATA.
@@ -500,12 +518,12 @@ def build_context(
     logger.debug(f"Bắt đầu build_context cho symbol: {symbol}")
     if mt5 is None:
         logger.warning("MetaTrader5 module not installed, cannot build MT5 context.")
-        return SafeMT5Data(None)
+        return SafeData(None)
 
     info = mt5.symbol_info(symbol)
     if not info:
         logger.warning(f"Không tìm thấy thông tin symbol cho {symbol}.")
-        return SafeMT5Data(None)
+        return SafeData(None)
     if not getattr(info, "visible", True):
         try:
             mt5.symbol_select(symbol, True)
@@ -516,6 +534,19 @@ def build_context(
     acc = mt5.account_info()
     tick = mt5.symbol_info_tick(symbol)
     logger.debug("Đã lấy symbol info, account info, tick info.")
+
+    # --- Broker Time ---
+    broker_time = datetime.now(timezone.utc) # Fallback
+    try:
+        if tick and getattr(tick, "time", 0) > 0:
+            broker_timestamp = int(getattr(tick, "time"))
+            terminal_info = mt5.terminal_info()
+            if terminal_info:
+                broker_timezone = ZoneInfo(terminal_info.timezone)
+                broker_time = datetime.fromtimestamp(broker_timestamp, tz=broker_timezone)
+    except Exception as e:
+        logger.warning(f"Không thể xác định thời gian broker chính xác, sử dụng UTC. Lỗi: {e}")
+
 
     # --- Fetch Open Positions ---
     positions_list = []
@@ -627,10 +658,10 @@ def build_context(
 
     # OHLCV series
     series = {
-        "M1": _series_from_mt5(symbol, mt5.TIMEFRAME_M1, n_m1),
-        "M5": _series_from_mt5(symbol, mt5.TIMEFRAME_M5, n_m5),
-        "M15": _series_from_mt5(symbol, mt5.TIMEFRAME_M15, n_m15),
-        "H1": _series_from_mt5(symbol, mt5.TIMEFRAME_H1, n_h1),
+        "M1": _series_from_mt5(symbol, mt5.TIMEFRAME_M1, cfg.n_M1),
+        "M5": _series_from_mt5(symbol, mt5.TIMEFRAME_M5, cfg.n_M5),
+        "M15": _series_from_mt5(symbol, mt5.TIMEFRAME_M15, cfg.n_M15),
+        "H1": _series_from_mt5(symbol, mt5.TIMEFRAME_H1, cfg.n_H1),
     }
     logger.debug("Đã lấy OHLCV series cho các khung thời gian.")
 
@@ -676,9 +707,8 @@ def build_context(
 
     # Sessions and VWAPs
     sessions_today = session_ranges_today(series["M1"]) if series["M1"] else {}
-    now_hhmm_for_sessions = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%H:%M")
-    session_liquidity = ict_analysis.get_session_liquidity(
-        series.get("M15", []), sessions_today, now_hhmm_for_sessions
+    session_liquidity = ict_analyzer.get_session_liquidity(
+        series.get("M15", []), sessions_today, broker_time
     )
     vwap_day = vwap_from_rates(
         [
@@ -774,8 +804,8 @@ def build_context(
 
     # Killzone detection using DST-aware VN schedule
     kills = _killzone_ranges_vn()
-    now_hhmm = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%H:%M")
-    is_silver_bullet = ict_analysis.is_silver_bullet_window(now_hhmm, kills)
+    is_silver_bullet = ict_analyzer.is_silver_bullet_window(broker_time, kills)
+    now_hhmm = broker_time.strftime("%H:%M")
     kill_active = None
     mins_to_next = None
     try:
@@ -881,53 +911,48 @@ def build_context(
     ict_patterns = {}
     try:
         timeframes_to_analyze = {"h1": "H1", "m15": "M15", "m5": "M5", "m1": "M1"}
-        liquidity_levels = {}
-
         for tf_key, tf_name in timeframes_to_analyze.items():
             tf_series = series.get(tf_name, [])
             if not tf_series:
-                logger.debug(f"Không có series cho timeframe {tf_name}, bỏ qua ICT analysis.")
                 continue
 
-            # 1. Find Liquidity Levels (needed for MSS)
-            liquidity = ict_analysis.find_liquidity_levels(tf_series) or {}
-            liquidity_levels[tf_key] = liquidity
-            ict_patterns[f"liquidity_{tf_key}"] = liquidity
-            logger.debug(f"Liquidity levels cho {tf_name}: {liquidity}")
+            # 1. Liquidity Levels (nền tảng cho các phân tích khác)
+            liquidity_data = ict_analyzer.find_liquidity_levels(tf_series)
+            swing_highs: list[LiquidityLevel] = liquidity_data.get("swing_highs_BSL", [])
+            swing_lows: list[LiquidityLevel] = liquidity_data.get("swing_lows_SSL", [])
+            ict_patterns[f"liquidity_{tf_key}"] = {
+                "swing_highs_BSL": [asdict(h) for h in swing_highs],
+                "swing_lows_SSL": [asdict(l) for l in swing_lows],
+            }
 
-            # 2. Find other ICT patterns
-            ict_patterns[f"fvgs_{tf_key}"] = ict_analysis.find_fvgs(tf_series, cp) or []
-            ict_patterns[f"order_blocks_{tf_key}"] = (
-                ict_analysis.find_order_blocks(tf_series) or []
-            )
-            ict_patterns[f"premium_discount_{tf_key}"] = (
-                ict_analysis.analyze_premium_discount(tf_series, cp) or {}
-            )
-            ict_patterns[f"liquidity_voids_{tf_key}"] = (
-                ict_analysis.find_liquidity_voids(tf_series) or []
-            )
-            logger.debug(f"FVGs, OBs, Premium/Discount, Liquidity Voids cho {tf_name} đã được tính.")
+            # 2. Các mẫu hình ICT khác
+            fvgs = ict_analyzer.find_fvgs(tf_series, cp)
+            ict_patterns[f"fvgs_{tf_key}"] = [asdict(fvg) for fvg in fvgs]
 
-            # 3. Find MSS/BOS (which depends on liquidity levels)
-            swing_highs = liquidity.get("swing_highs_BSL", [])
-            swing_lows = liquidity.get("swing_lows_SSL", [])
-            ict_patterns[f"mss_{tf_key}"] = ict_analysis.find_market_structure_shift(
-                tf_series, swing_highs, swing_lows
-            )
-            logger.debug(f"MSS cho {tf_name} đã được tính.")
+            order_blocks = ict_analyzer.find_order_blocks(tf_series)
+            ict_patterns[f"order_blocks_{tf_key}"] = [asdict(ob) for ob in order_blocks]
+            
+            liquidity_voids = ict_analyzer.find_liquidity_voids(tf_series)
+            ict_patterns[f"liquidity_voids_{tf_key}"] = [asdict(v) for v in liquidity_voids]
+
+            # 3. Các phân tích phụ thuộc (sử dụng kết quả từ bước 1)
+            pd_range = ict_analyzer.analyze_premium_discount(cp, swing_highs, swing_lows)
+            ict_patterns[f"premium_discount_{tf_key}"] = asdict(pd_range) if pd_range else None
+
+            mss = ict_analyzer.find_market_structure_shift(tf_series, swing_highs, swing_lows)
+            ict_patterns[f"mss_{tf_key}"] = asdict(mss) if mss else None
+            
+            logger.debug(f"Đã hoàn thành phân tích ICT cho timeframe {tf_name}.")
 
     except Exception as e:
-        logger.error(f"Lỗi trong ICT analysis: {e}")
-        # If any ICT analysis fails, ensure ict_patterns is an empty dict
+        logger.exception("Lỗi nghiêm trọng trong quá trình phân tích ICT.")
         ict_patterns = {}
 
     payload = {
         "MT5_DATA": {
             "symbol": symbol,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "broker_time": datetime.now(timezone.utc)
-            .isoformat(timespec="seconds")
-            .replace("+00:00", "Z"),
+            "broker_time": broker_time.isoformat(timespec="seconds"),
             "account": account_obj or {},
             "positions": positions_list,
             "info": info_obj or {},
@@ -980,9 +1005,9 @@ def build_context(
     }
     logger.debug("Đã xây dựng payload MT5_DATA.")
 
-    # Always wrap in SafeMT5Data. The caller can decide to get the raw dict or json.
-    safe_data_obj = SafeMT5Data(payload.get("MT5_DATA"))
-    logger.debug("Đã tạo SafeMT5Data object.")
+    # Always wrap in SafeData. The caller can decide to get the raw dict or json.
+    safe_data_obj = SafeData(payload.get("MT5_DATA"))
+    logger.debug("Đã tạo SafeData object.")
 
     if return_json:
         try:
@@ -998,62 +1023,288 @@ def build_context(
     return safe_data_obj
 
 
-def build_context_from_app(
-    app: "AppUI",
-    plan: Optional[Dict] = None,
-    cfg: Optional["RunConfig"] = None,
-) -> Optional["SafeMT5Data"]:
-    """
-    Xây dựng đối tượng ngữ cảnh MetaTrader 5 (SafeMT5Data) chứa dữ liệu thị trường hiện tại
-    (giá nến, thông tin tài khoản, các lệnh đang mở...).
-    Hàm này là wrapper cho build_context, lấy thông tin từ đối tượng app.
-    """
-    logger.debug("Bắt đầu build_context_from_app.")
-    sym = cfg.mt5.symbol if cfg else (app.mt5_symbol_var.get() or "").strip()
-    if (
-        not ((cfg.mt5.enabled if cfg else app.mt5_enabled_var.get()) and sym)
-        or mt5 is None
-    ):
-        logger.warning("MT5 không được bật, không có symbol, hoặc module MT5 không cài đặt. Bỏ qua xây dựng ngữ cảnh MT5.")
-        return None
-    if not app.mt5_initialized:
-        logger.info("MT5 chưa được khởi tạo, đang cố gắng kết nối.")
-        ok, _ = app.app_logic._mt5_connect(app)  # Gọi _mt5_connect từ app_logic
-        if not ok:
-            logger.error("Kết nối MT5 thất bại trong build_context_from_app.")
-            return None
+# ------------------------------
+# Trading action helpers
+# ------------------------------
 
-    # Ủy quyền cho mt5_utils.build_context để xây dựng đối tượng ngữ cảnh MT5
+def calculate_lots(
+    cfg: "RunConfig",
+    symbol: str,
+    entry_price: float,
+    sl_price: float,
+    info: dict[str, Any],
+    account: dict[str, Any],
+    risk_multiplier: float = 1.0
+) -> float | None:
+    """
+    Tính toán khối lượng giao dịch dựa trên rủi ro.
+    """
+    logger.debug(f"Bắt đầu calculate_lots cho {symbol} với risk_multiplier={risk_multiplier}")
+    if not all([symbol, entry_price, sl_price, info, account]):
+        logger.error("Thiếu thông tin đầu vào để tính toán lots.")
+        return None
+
     try:
-        result = build_context(  # Gọi hàm build_context đã có trong mt5_utils
-            sym,
-            n_m1=(cfg.mt5.n_M1 if cfg else int(app.mt5_n_M1.get())),
-            n_m5=(cfg.mt5.n_M5 if cfg else int(app.mt5_n_M5.get())),
-            n_m15=(cfg.mt5.n_M15 if cfg else int(app.mt5_n_M15.get())),
-            n_h1=(cfg.mt5.n_H1 if cfg else int(app.mt5_n_H1.get())),
-            plan=plan,
-            return_json=False,  # Đảm bảo chúng ta nhận được đối tượng Python, không phải chuỗi JSON
-        )
-        logger.debug("Kết thúc build_context_from_app.")
-        return result
+        balance = float(account.get("balance", 0.0))
+        risk_per_trade_pct = float(cfg.auto_trade.risk_per_trade)
+        
+        # Tính toán số tiền rủi ro
+        risk_amount = balance * (risk_per_trade_pct / 100.0) * risk_multiplier
+        
+        # Tính khoảng cách stop loss bằng điểm
+        sl_points = abs(entry_price - sl_price) / (info.get("point", 0.00001))
+        
+        # Lấy giá trị mỗi điểm cho 1 lot
+        val_per_point = value_per_point(symbol, info)
+        if not val_per_point or val_per_point <= 0:
+            logger.error("Không thể lấy value_per_point.")
+            return None
+            
+        # Tính giá trị rủi ro cho mỗi lot
+        risk_per_lot = sl_points * val_per_point
+        
+        if risk_per_lot <= 0:
+            logger.error("Rủi ro mỗi lot không hợp lệ.")
+            return None
+            
+        # Tính toán khối lượng
+        lots = risk_amount / risk_per_lot
+        
+        # Làm tròn khối lượng theo quy tắc của sàn
+        volume_step = info.get("volume_step", 0.01)
+        lots = round(lots / volume_step) * volume_step
+        
+        # Kiểm tra giới hạn khối lượng
+        min_vol = info.get("volume_min", 0.01)
+        max_vol = info.get("volume_max", 100.0)
+        
+        if lots < min_vol:
+            logger.warning(f"Lots ({lots}) nhỏ hơn min_vol ({min_vol}). Đặt lại là min_vol.")
+            lots = min_vol
+        if lots > max_vol:
+            logger.warning(f"Lots ({lots}) lớn hơn max_vol ({max_vol}). Đặt lại là max_vol.")
+            lots = max_vol
+            
+        logger.info(f"Tính toán lots thành công: {lots:.2f}")
+        return lots
+        
     except Exception as e:
-        logger.exception(f"Lỗi khi gọi build_context từ build_context_from_app: {e}")
+        logger.exception(f"Lỗi trong quá trình tính toán lots: {e}")
         return None
 
 
-__all__ = [
-    "connect",
-    "ensure_initialized",
-    "info_get",
-    "points_per_pip_from_info",
-    "pip_size_from_info",
-    "value_per_point",
-    "quantiles",
-    "ema",
-    "atr_series",
-    "vwap_from_rates",
-    "adr_stats",
-    "session_ranges_today",
-    "build_context",
-    "build_context_from_app",  # Thêm hàm mới vào __all__
-]
+def build_trade_requests(
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    sl_price: float,
+    tp1_price: float | None,
+    tp2_price: float | None,
+    total_lots: float,
+    current_price: float,
+    config: "RunConfig",
+    info: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """
+    Xây dựng danh sách các yêu cầu giao dịch (có thể chia lệnh).
+    """
+    logger.debug("Bắt đầu build_trade_requests.")
+    requests = []
+    
+    trade_type = mt5.ORDER_TYPE_BUY if direction.upper() == "BUY" else mt5.ORDER_TYPE_SELL
+    
+    # Xác định filling type từ config
+    filling_type_str = config.auto_trade.filling_type.upper()
+    filling_map = {
+        "FOK": mt5.ORDER_FILLING_FOK,
+        "IOC": mt5.ORDER_FILLING_IOC,
+        "RETURN": mt5.ORDER_FILLING_RETURN,
+    }
+    filling_type = filling_map.get(filling_type_str, mt5.ORDER_FILLING_IOC)
+    logger.debug(f"Sử dụng filling type: {filling_type_str} ({filling_type})")
+
+    # Logic chia lệnh
+    split_tp = config.auto_trade.split_tp_enabled and tp1_price and tp2_price
+    lots1 = round(total_lots * (config.auto_trade.split_tp_ratio / 100.0), 2) if split_tp else total_lots
+    lots2 = round(total_lots - lots1, 2) if split_tp else 0
+    
+    # Tạo yêu cầu cho lệnh 1 (hoặc lệnh duy nhất)
+    if lots1 > 0:
+        req1 = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": lots1,
+            "type": trade_type,
+            "price": entry_price,
+            "sl": sl_price,
+            "tp": tp1_price if split_tp else (tp1_price or tp2_price or 0.0),
+            "deviation": config.auto_trade.deviation,
+            "magic": config.auto_trade.magic_number,
+            "comment": "AI Trade TP1" if split_tp else "AI Trade",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": filling_type,
+        }
+        requests.append(req1)
+
+    # Tạo yêu cầu cho lệnh 2
+    if lots2 > 0:
+        req2 = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": lots2,
+            "type": trade_type,
+            "price": entry_price,
+            "sl": sl_price,
+            "tp": tp2_price or 0.0,
+            "deviation": config.auto_trade.deviation,
+            "magic": config.auto_trade.magic_number,
+            "comment": "AI Trade TP2",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": filling_type,
+        }
+        requests.append(req2)
+        
+    logger.info(f"Đã tạo {len(requests)} yêu cầu giao dịch.")
+    return requests
+
+
+def order_send_smart(request: dict[str, Any], retries: int = 3, delay: float = 0.5):
+    """
+    Gửi yêu cầu giao dịch một cách thông minh với cơ chế thử lại.
+    """
+    logger.debug(f"Bắt đầu order_send_smart với request: {request}")
+    
+    # Các mã lỗi có thể thử lại
+    RETRYABLE_RETCODES = {
+        mt5.TRADE_RETCODE_REQUOTE,
+        mt5.TRADE_RETCODE_PRICE_OFF,
+        mt5.TRADE_RETCODE_CONNECTION,
+        mt5.TRADE_RETCODE_SERVER_BUSY,
+    }
+
+    for attempt in range(retries):
+        try:
+            result = mt5.order_send(request)
+            
+            if result is None:
+                logger.error(f"(Attempt {attempt+1}/{retries}) Gửi lệnh thất bại, không có kết quả. Lỗi MT5: {mt5.last_error()}")
+                time.sleep(delay * (attempt + 1))
+                continue
+
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"Gửi lệnh thành công. Ticket: {result.order}")
+                return result
+            
+            if result.retcode in RETRYABLE_RETCODES:
+                logger.warning(f"(Attempt {attempt+1}/{retries}) Gửi lệnh không thành công, sẽ thử lại. Retcode: {result.retcode}, Comment: {result.comment}")
+                time.sleep(delay * (attempt + 1))
+                continue
+            else:
+                logger.error(f"Gửi lệnh không thành công, lỗi không thể thử lại. Retcode: {result.retcode}, Comment: {result.comment}")
+                return result # Trả về kết quả lỗi không thể thử lại
+
+        except Exception as e:
+            logger.exception(f"(Attempt {attempt+1}/{retries}) Lỗi nghiêm trọng khi gửi lệnh: {e}")
+            if attempt + 1 == retries:
+                return None # Trả về None sau khi hết số lần thử
+            time.sleep(delay * (attempt + 1))
+            
+    logger.error("Gửi lệnh thất bại sau tất cả các lần thử.")
+    return None
+
+
+def close_position_partial(ticket: int, percentage: float) -> bool:
+    """Đóng một phần vị thế."""
+    logger.debug(f"Bắt đầu close_position_partial cho ticket {ticket}, percentage {percentage}")
+    pos = mt5.positions_get(ticket=ticket)
+    if not pos or len(pos) == 0:
+        logger.error(f"Không tìm thấy vị thế với ticket {ticket}.")
+        return False
+        
+    position = pos[0]
+    volume_to_close = round(position.volume * (percentage / 100.0), 2)
+    
+    if volume_to_close <= 0:
+        logger.warning("Khối lượng cần đóng quá nhỏ, bỏ qua.")
+        return False
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "position": ticket,
+        "symbol": position.symbol,
+        "volume": volume_to_close,
+        "type": mt5.ORDER_TYPE_SELL if position.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY,
+        "price": mt5.symbol_info_tick(position.symbol).ask if position.type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(position.symbol).bid,
+        "deviation": 10,
+        "magic": position.magic,
+        "comment": f"Partial Close {percentage}%",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    
+    result = order_send_smart(request)
+    return result and result.retcode == mt5.TRADE_RETCODE_DONE
+
+
+def get_last_swing_low_high(symbol: str, timeframe: int, bars: int, pivot_strength: int = 2) -> tuple[float | None, float | None]:
+    """
+    Lấy giá trị đáy/đỉnh cấu trúc (swing low/high) gần nhất.
+    Sử dụng thuật toán xác định điểm xoay (pivot point).
+    """
+    logger.debug(f"Bắt đầu get_last_swing_low_high cho {symbol}, timeframe {timeframe}, {bars} bars.")
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, bars)
+    if rates is None or len(rates) < (2 * pivot_strength + 1):
+        logger.warning("Không đủ dữ liệu nến để xác định swing low/high.")
+        return None, None
+        
+    last_swing_high = None
+    last_swing_low = None
+
+    # Duyệt ngược từ nến gần nhất để tìm điểm xoay
+    for i in range(len(rates) - 1 - pivot_strength, pivot_strength - 1, -1):
+        # Kiểm tra Swing High
+        is_swing_high = True
+        for j in range(1, pivot_strength + 1):
+            if rates[i]['high'] < rates[i-j]['high'] or rates[i]['high'] < rates[i+j]['high']:
+                is_swing_high = False
+                break
+        if is_swing_high:
+            last_swing_high = rates[i]['high']
+            logger.debug(f"Tìm thấy Swing High gần nhất tại giá {last_swing_high}")
+            break # Tìm thấy cái gần nhất thì dừng
+
+    for i in range(len(rates) - 1 - pivot_strength, pivot_strength - 1, -1):
+        # Kiểm tra Swing Low
+        is_swing_low = True
+        for j in range(1, pivot_strength + 1):
+            if rates[i]['low'] > rates[i-j]['low'] or rates[i]['low'] > rates[i+j]['low']:
+                is_swing_low = False
+                break
+        if is_swing_low:
+            last_swing_low = rates[i]['low']
+            logger.debug(f"Tìm thấy Swing Low gần nhất tại giá {last_swing_low}")
+            break # Tìm thấy cái gần nhất thì dừng
+            
+    return last_swing_low, last_swing_high
+
+
+def modify_position(ticket: int, sl: float | None = None, tp: float | None = None) -> bool:
+    """Sửa đổi Stop Loss và/hoặc Take Profit cho một vị thế."""
+    logger.debug(f"Bắt đầu modify_position cho ticket {ticket} với SL={sl}, TP={tp}")
+    pos = mt5.positions_get(ticket=ticket)
+    if not pos or len(pos) == 0:
+        logger.error(f"Không tìm thấy vị thế với ticket {ticket}.")
+        return False
+        
+    position = pos[0]
+    
+    request = {
+        "action": mt5.TRADE_ACTION_SLTP,
+        "position": ticket,
+        "symbol": position.symbol,
+        "sl": sl if sl is not None else position.sl,
+        "tp": tp if tp is not None else position.tp,
+    }
+    
+    result = order_send_smart(request)
+    return result and result.retcode == mt5.TRADE_RETCODE_DONE

@@ -1,83 +1,218 @@
+# -*- coding: utf-8 -*-
+"""
+Quản lý các thành phần UI liên quan đến việc nhập và chỉnh sửa prompt.
+
+Lớp PromptManager đóng gói logic để tải, lưu, định dạng và quản lý
+nội dung của các ô nhập liệu prompt trong giao diện người dùng.
+"""
+
 from __future__ import annotations
 
+import ast
+import json
 import logging
-from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING
 
+# Sắp xếp import theo quy tắc
 from APP.configs.constants import PATHS
-from APP.analysis import report_parser
+from APP.ui.utils import ui_builder
 
 if TYPE_CHECKING:
-    from APP.configs.app_config import RunConfig
     from APP.ui.app_ui import AppUI
-    from APP.utils.safe_data import SafeMT5Data
 
 logger = logging.getLogger(__name__)
 
 
-def select_prompt_dynamically(app: "AppUI", cfg: "RunConfig", safe_mt5_data: "SafeMT5Data", prompt_no_entry: str, prompt_entry_run: str) -> str:
+class PromptManager:
     """
-    Chọn prompt phù hợp dựa trên trạng thái giao dịch hiện tại (có lệnh đang mở hay không).
+    Quản lý các hoạt động liên quan đến các ô nhập prompt trong UI.
+
+    Bao gồm tải từ file, lưu vào file, và định dạng lại nội dung.
     """
-    logger.debug("Bắt đầu hàm select_prompt_dynamically.")
-    prompt_to_use = ""
-    has_positions = cfg.mt5.enabled and safe_mt5_data and safe_mt5_data.positions
-    logger.debug(f"MT5 enabled: {cfg.mt5.enabled}, có lệnh đang mở: {bool(has_positions)}")
+    # Cải tiến: Hằng số hóa các key thường dùng để trích xuất văn bản.
+    # Điều này giúp dễ dàng quản lý và mở rộng khi có thêm các định dạng dữ liệu mới.
+    _TEXT_KEYS = ("text", "content", "prompt", "body", "value")
 
-    try:
-        if has_positions:
-            prompt_path = PATHS.APP_DIR / "prompts" / "prompt_entry_run_vision.txt"
-            prompt_to_use = prompt_path.read_text(encoding="utf-8")
-            app.ui_status("Worker: Lệnh đang mở, dùng prompt Vision Quản Lý Lệnh.")
-            logger.info(f"Đã chọn prompt từ file: {prompt_path.name} (Lệnh đang mở).")
-        else:
-            prompt_path = PATHS.APP_DIR / "prompts" / "prompt_no_entry_vision.txt"
-            prompt_to_use = prompt_path.read_text(encoding="utf-8")
-            app.ui_status("Worker: Không có lệnh mở, dùng prompt Vision Tìm Lệnh Mới.")
-            logger.info(f"Đã chọn prompt từ file: {prompt_path.name} (Không có lệnh mở).")
-    except Exception as e:
-        app.ui_status(f"Lỗi đọc prompt từ file: {e}. Sử dụng prompt dự phòng.")
-        logger.error(f"Lỗi đọc prompt từ file: {e}. Sử dụng prompt dự phòng.")
-        prompt_to_use = prompt_entry_run if has_positions else prompt_no_entry
+    def __init__(self, app: "AppUI") -> None:
+        """
+        Khởi tạo PromptManager.
 
-    logger.debug("Kết thúc hàm select_prompt_dynamically.")
-    return prompt_to_use
+        Args:
+            app (AppUI): Instance của ứng dụng UI chính.
+        """
+        self.app = app
+        self.prompt_no_entry_path = PATHS.PROMPTS_DIR / "prompt_no_entry_vision.txt"
+        self.prompt_entry_run_path = PATHS.PROMPTS_DIR / "prompt_entry_run_vision.txt"
 
+    def _extract_text_from_obj(self, obj: object) -> str:
+        """
+        Trích xuất đệ quy tất cả văn bản từ một đối tượng Python.
 
-def construct_final_prompt(app: "AppUI", prompt: str, mt5_dict: Dict, safe_mt5_data: "SafeMT5Data", context_block: str, mt5_json_full: str, paths: List[str]) -> str:
-    """
-    Xây dựng nội dung prompt cuối cùng để gửi đến model AI.
-    """
-    logger.debug("Bắt đầu hàm construct_final_prompt.")
-    tf_section = app._build_timeframe_section([Path(p).name for p in paths]).strip()
-    parts_text = []
-    if tf_section:
-        parts_text.append(f"### Nhãn khung thời gian (tự nhận từ tên tệp)\n{tf_section}\n\n")
+        Args:
+            obj: Đối tượng cần trích xuất (dict, list, str).
 
-    if mt5_dict:
-        structured_report = report_parser.parse_mt5_data_to_report(safe_mt5_data)
-        prompt = prompt.replace(
-            "[Dữ liệu từ `CONCEPT_VALUE_TABLE` và `EXTRACT_JSON` sẽ được chèn vào đây]",
-            f"DỮ LIỆU SỐ THAM KHẢO:\n{structured_report}"
-        )
-        if context_block:
-            prompt = prompt.replace(
-                "[Dữ liệu từ `CONTEXT_COMPOSED` sẽ được chèn vào đây]",
-                f"DỮ LIỆU LỊCH SỬ (VÒNG TRƯỚC):\n{context_block}"
-            )
-        else:
-            prompt = prompt.replace(
-                "**DỮ LIỆU LỊCH SỬ (NẾU CÓ):**\n[Dữ liệu từ `CONTEXT_COMPOSED` sẽ được chèn vào đây]",
-                ""
-            )
-        parts_text.append(prompt)
-    else:
-        parts_text.append(prompt)
-        if mt5_json_full:
-            parts_text.append(f"\n\n[PHỤ LỤC_MT5_JSON]\n{mt5_json_full}")
+        Returns:
+            Một chuỗi duy nhất chứa toàn bộ văn bản được tìm thấy.
+        """
+        logger.debug(f"Bắt đầu trích xuất văn bản từ đối tượng kiểu: {type(obj)}")
+        parts = []
 
-    final_prompt_content = "".join(list(dict.fromkeys(parts_text)))
-    logger.debug(f"Kết thúc hàm construct_final_prompt. Độ dài prompt cuối cùng: {len(final_prompt_content)}.")
-    return final_prompt_content
+        def walk(x):
+            if isinstance(x, str):
+                parts.append(x)
+                return
+            if isinstance(x, dict):
+                for k in self._TEXT_KEYS:
+                    v = x.get(k)
+                    if isinstance(v, str) and v.strip():
+                        parts.append(v)
+                for v in x.values():
+                    if v is not None and not isinstance(v, str):
+                        walk(v)
+            elif isinstance(x, list):
+                for v in x:
+                    walk(v)
 
-__all__ = ["select_prompt_dynamically", "construct_final_prompt"]
+        walk(obj)
+        text = "\n\n".join(t.strip() for t in parts if t and t.strip())
+
+        # Cải tiến: Thêm comment giải thích logic đặc thù.
+        # Logic này xử lý trường hợp người dùng dán một chuỗi JSON chứa các chuỗi con
+        # được đặt trong dấu ngoặc kép. Nó cố gắng chuyển đổi các dấu ngoặc kép này
+        # thành các dòng mới để cải thiện khả năng đọc của prompt.
+        if text and text.count('"') > 0 and text.count('\n') <= text.count('"'):
+            text = (text.replace('"', '\n')
+                        .replace("\\t", "\t")
+                        .replace('\\"', '"')
+                        .replace("\\'", "'"))
+        logger.debug(f"Kết thúc trích xuất văn bản. Độ dài: {len(text)}")
+        return text or json.dumps(obj, ensure_ascii=False, indent=2)
+
+    def _normalize_prompt_text(self, raw: str) -> str:
+        """
+        Chuẩn hóa văn bản prompt, cố gắng phân tích dưới dạng JSON hoặc Python literal.
+
+        Args:
+            raw: Chuỗi văn bản thô.
+
+        Returns:
+            Chuỗi văn bản đã được chuẩn hóa.
+        """
+        logger.debug(f"Bắt đầu chuẩn hóa prompt. Độ dài raw: {len(raw)}")
+        s = raw.strip()
+        if not s:
+            logger.debug("Văn bản thô trống, trả về chuỗi rỗng.")
+            return ""
+
+        try:
+            obj = json.loads(s)
+            return self._extract_text_from_obj(obj)
+        except Exception:
+            logger.debug("Không thể phân tích raw text thành JSON.")
+
+        try:
+            obj = ast.literal_eval(s)
+            return self._extract_text_from_obj(obj)
+        except Exception:
+            logger.debug("Không thể phân tích raw text thành Python literal.")
+
+        logger.debug("Không thể chuẩn hóa, trả về văn bản thô.")
+        return s
+
+    def reformat_prompt_area(self) -> None:
+        """
+        Định dạng lại nội dung của khu vực nhập prompt đang được chọn.
+        """
+        logger.debug("Bắt đầu định dạng lại prompt area.")
+        try:
+            selected_tab_index = self.app.prompt_nb.index(self.app.prompt_nb.select())
+            if selected_tab_index == 0:
+                widget = self.app.prompt_no_entry_text
+                logger.debug("Định dạng lại tab 'No Entry'.")
+            else:
+                widget = self.app.prompt_entry_run_text
+                logger.debug("Định dạng lại tab 'Entry/Run'.")
+
+            raw = widget.get("1.0", "end")
+            pretty = self._normalize_prompt_text(raw)
+            widget.delete("1.0", "end")
+            widget.insert("1.0", pretty)
+            ui_builder.show_status_message(self.app, "Đã định dạng lại prompt.")
+            logger.debug("Định dạng lại prompt area thành công.")
+        except Exception as e:
+            ui_builder.show_message_box("Lỗi định dạng prompt", f"Đã xảy ra lỗi: {e}", "error")
+            logger.exception("Lỗi khi định dạng lại prompt area.")
+
+    def load_prompts_from_disk(self, silent: bool = False) -> None:
+        """
+        Tải nội dung các file prompt từ đĩa và hiển thị trên UI.
+
+        Args:
+            silent: Nếu True, không hiển thị thông báo lỗi.
+        """
+        logger.debug(f"Bắt đầu tải prompts từ đĩa. Silent: {silent}")
+        files_to_load = {
+            "no_entry": (self.prompt_no_entry_path, self.app.prompt_no_entry_text),
+            "entry_run": (self.prompt_entry_run_path, self.app.prompt_entry_run_text),
+        }
+        loaded_count = 0
+        for key, (path, widget) in files_to_load.items():
+            try:
+                if path.exists():
+                    raw = path.read_text(encoding="utf-8", errors="ignore")
+                    text = self._normalize_prompt_text(raw)
+                    widget.delete("1.0", "end")
+                    widget.insert("1.0", text)
+                    loaded_count += 1
+                    logger.debug(f"Đã tải prompt từ file: {path.name}")
+                elif not silent:
+                    widget.delete("1.0", "end")
+                    widget.insert("1.0", f"[LỖI] Không tìm thấy file: {path.name}")
+                    logger.warning(f"Không tìm thấy file prompt: {path.name}")
+            except Exception as e:
+                if not silent:
+                    ui_builder.show_message_box(f"Lỗi tải {path.name}", f"Đã xảy ra lỗi: {e}", "error")
+                logger.exception(f"Lỗi khi tải prompt từ file '{path.name}'.")
+
+        if loaded_count > 0 and not silent:
+            ui_builder.show_status_message(self.app, f"Đã tải {loaded_count} prompt từ file.")
+        logger.debug("Kết thúc tải prompts từ đĩa.")
+
+    def save_current_prompt_to_disk(self) -> None:
+        """
+        Lưu nội dung của prompt trên tab đang được chọn vào file tương ứng.
+        """
+        logger.debug("Bắt đầu lưu prompt hiện tại vào đĩa.")
+        try:
+            selected_tab_index = self.app.prompt_nb.index(self.app.prompt_nb.select())
+            if selected_tab_index == 0:
+                widget = self.app.prompt_no_entry_text
+                path = self.prompt_no_entry_path
+                logger.debug("Lưu prompt từ tab 'No Entry'.")
+            else:
+                widget = self.app.prompt_entry_run_text
+                path = self.prompt_entry_run_path
+                logger.debug("Lưu prompt từ tab 'Entry/Run'.")
+
+            content = widget.get("1.0", "end-1c")  # -1c để bỏ qua newline cuối cùng
+            path.write_text(content, encoding="utf-8")
+            ui_builder.show_message_box("Lưu thành công", f"Đã lưu prompt vào {path.name}", "info")
+            logger.info(f"Đã lưu prompt thành công vào: {path.name}")
+        except Exception as e:
+            ui_builder.show_message_box("Lỗi lưu file", f"Đã xảy ra lỗi: {e}", "error")
+            logger.exception("Lỗi khi lưu prompt vào file.")
+
+    def get_prompts(self) -> dict[str, str]:
+        """
+        Lấy nội dung văn bản hiện tại từ các ô nhập prompt.
+
+        Returns:
+            Một dictionary chứa prompt 'no_entry' và 'entry_run'.
+        """
+        logger.debug("Đang lấy nội dung prompts từ UI.")
+        no_entry_prompt = self.app.prompt_no_entry_text.get("1.0", "end-1c")
+        entry_run_prompt = self.app.prompt_entry_run_text.get("1.0", "end-1c")
+        return {
+            "no_entry": no_entry_prompt,
+            "entry_run": entry_run_prompt,
+        }

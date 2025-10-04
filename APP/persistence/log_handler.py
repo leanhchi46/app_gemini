@@ -1,78 +1,151 @@
+# -*- coding: utf-8 -*-
+"""
+Module để xử lý ghi log, bao gồm log debug của ứng dụng và log quyết định giao dịch.
+"""
+
 from __future__ import annotations
 
 import json
 import logging
 import os
 import threading
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Dict
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+# Thêm import từ cấu trúc mới
+from APP.configs import workspace_config
+
+if TYPE_CHECKING:
+    # Tránh import vòng lặp nhưng vẫn cho phép type hinting
+    from APP.configs.app_config import LoggingConfig, RunConfig
 
 logger = logging.getLogger(__name__)
 
+# Khóa riêng để ghi log giao dịch an toàn trong môi trường đa luồng
 _trade_log_lock = threading.Lock()
 
 
-def setup_logging():
+def setup_logging(config: Optional[LoggingConfig] = None) -> None:
     """
-    Cấu hình hệ thống logging để ghi log vào tệp và console.
-    """
-    log_dir = Path("Log")
-    log_dir.mkdir(exist_ok=True)
-    log_file = log_dir / "app_debug.log"
+    Cấu hình hệ thống logging với file xoay vòng (rotating file).
 
-    # Xóa các handler cũ để tránh ghi log trùng lặp
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
-    
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler(log_file, mode='w', encoding="utf-8"),
-            logging.StreamHandler(os.sys.stdout)
-        ]
+    Args:
+        config: Đối tượng cấu hình logging. Nếu None, sử dụng giá trị mặc định.
+    """
+    from APP.configs.app_config import LoggingConfig
+
+    # Sử dụng config được truyền vào hoặc tạo một config mặc định
+    cfg = config or LoggingConfig()
+
+    logger.debug("Bắt đầu thiết lập logging cho ứng dụng.")
+    try:
+        log_dir = Path(cfg.log_dir)
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / cfg.log_file_name
+
+        # Chuyển đổi MB sang bytes
+        max_bytes = cfg.log_rotation_size_mb * 1024 * 1024
+
+        # Tạo handler xoay vòng
+        rotating_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=max_bytes,
+            backupCount=cfg.log_rotation_backup_count,
+            encoding="utf-8",
+        )
+
+        # Gỡ bỏ các handler hiện có để tránh ghi log trùng lặp
+        root_logger = logging.getLogger()
+        if root_logger.hasHandlers():
+            for handler in root_logger.handlers[:]:
+                root_logger.removeHandler(handler)
+
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            handlers=[rotating_handler, logging.StreamHandler(os.sys.stdout)],
+        )
+        logger.info(
+            f"Đã cấu hình logging xoay vòng. File log: {log_file}, "
+            f"Size: {cfg.log_rotation_size_mb}MB, Backups: {cfg.log_rotation_backup_count}"
+        )
+    except Exception:
+        logger.exception("Đã xảy ra lỗi trong quá trình thiết lập logging.")
+        # Chuyển về cấu hình cơ bản nếu thiết lập thất bại
+        logging.basicConfig(level=logging.INFO)
+        logger.error("Đã chuyển về cấu hình logging cơ bản.")
+    logger.debug("Hoàn tất thiết lập logging cho ứng dụng.")
+
+
+def log_trade(
+    run_config: RunConfig,
+    trade_data: Dict[str, Any],
+    folder_override: Optional[str] = None,
+) -> None:
+    """
+    Ghi lại các quyết định giao dịch vào file JSONL trong thư mục reports tương ứng.
+
+    Hàm này an toàn khi chạy trong môi trường đa luồng (thread-safe).
+
+    Args:
+        run_config: Đối tượng cấu hình đang chạy của ứng dụng.
+        trade_data: Một dictionary chứa dữ liệu về quyết định giao dịch.
+        folder_override: Một thư mục con tùy chọn bên trong thư mục reports.
+    """
+    logger.debug(
+        f"Đang chuẩn bị ghi log giao dịch. Giai đoạn: {trade_data.get('stage')}, "
+        f"Thư mục con: {folder_override}"
     )
-    logger.info(f"Đã cấu hình logging, ghi vào: {log_file}")
-
-
-def log_trade(data: Dict, reports_dir: Path):
-    """
-    Ghi lại một quyết định hoặc hành động giao dịch vào tệp JSONL.
-    """
-    if not reports_dir:
-        logger.warning("Không có thư mục reports được cung cấp, không thể ghi log giao dịch.")
-        return
-
     try:
-        from datetime import datetime
-        ts = data.get('t') or datetime.now().strftime('%Y%m%d')
-        log_filename = f"trade_log_{ts.split(' ')[0].replace('-', '')}.jsonl"
-        log_path = reports_dir / log_filename
+        # Sử dụng workspace_config để lấy đúng thư mục reports
+        reports_dir = workspace_config.get_reports_dir(run_config.workspace_name)
+        if folder_override:
+            target_dir = reports_dir / folder_override
+        else:
+            target_dir = reports_dir
 
-        line = (json.dumps(data, ensure_ascii=False, separators=(',', ':')) + "\n").encode("utf-8")
+        # Đảm bảo thư mục đích tồn tại
+        target_dir.mkdir(parents=True, exist_ok=True)
 
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Xác định tên file log từ timestamp trong dữ liệu
+        timestamp_str = trade_data.get("t", datetime.now().isoformat())
+        log_date = datetime.fromisoformat(timestamp_str).strftime("%Y%m%d")
+        log_file_path = target_dir / f"trade_log_{log_date}.jsonl"
+
+        # Chuyển đổi dữ liệu thành chuỗi JSON
+        log_line = (
+            json.dumps(trade_data, ensure_ascii=False, separators=(",", ":")) + "\n"
+        )
+        encoded_line = log_line.encode("utf-8")
 
         with _trade_log_lock:
-            with open(log_path, "ab") as f:
-                f.write(line)
-    except Exception as e:
-        logger.error(f"Lỗi khi ghi log giao dịch: {e}", exc_info=True)
+            # Kiểm tra xem có cần thêm một dòng mới trước khi ghi không
+            needs_newline = False
+            if log_file_path.exists() and log_file_path.stat().st_size > 0:
+                try:
+                    with open(log_file_path, "rb") as f:
+                        f.seek(-1, os.SEEK_END)
+                        if f.read(1) != b"\n":
+                            needs_newline = True
+                except OSError:
+                    # Xử lý trường hợp seek thất bại (ví dụ: file trống)
+                    pass
 
+            with open(log_file_path, "ab") as f:
+                if needs_newline:
+                    f.write(b"\n")
+                f.write(encoded_line)
+                f.flush()
+                # Đảm bảo dữ liệu được ghi xuống đĩa
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    # fsync có thể không khả dụng trên mọi hệ điều hành
+                    pass
+        logger.debug(f"Đã ghi log giao dịch thành công vào {log_file_path.name}.")
 
-def log_proposed_trade(data: Dict, reports_dir: Path):
-    """
-    Ghi lại một giao dịch được đề xuất vào tệp JSONL riêng cho backtesting.
-    """
-    if not reports_dir:
-        logger.warning("Không có thư mục reports được cung cấp, không thể ghi log proposed trade.")
-        return
-        
-    log_path = reports_dir / "proposed_trades.jsonl"
-    try:
-        line = (json.dumps(data, ensure_ascii=False) + "\n").encode("utf-8")
-        with _trade_log_lock:
-            with open(log_path, "ab") as f:
-                f.write(line)
-    except Exception as e:
-        logger.error(f"Lỗi khi ghi log proposed trade: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Không thể ghi log quyết định giao dịch.")
+    logger.debug("Kết thúc hàm log_trade.")

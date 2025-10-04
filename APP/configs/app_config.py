@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +12,7 @@ class FolderConfig:
     folder: str
     delete_after: bool
     max_files: int
+    only_generate_if_changed: bool
 
 
 @dataclass(frozen=True)
@@ -20,7 +21,13 @@ class UploadConfig:
     upload_workers: int
     cache_enabled: bool
     optimize_lossless: bool
-    only_generate_if_changed: bool
+
+
+@dataclass(frozen=True)
+class ImageProcessingConfig:
+    """Cấu hình cho việc xử lý và tối ưu hóa hình ảnh."""
+    max_width: int = 1600
+    jpeg_quality: int = 85
 
 
 @dataclass(frozen=True)
@@ -40,6 +47,7 @@ class TelegramConfig:
     chat_id: str
     skip_verify: bool
     ca_path: str
+    notify_on_early_exit: bool = False
 
 
 @dataclass(frozen=True)
@@ -54,12 +62,25 @@ class MT5Config:
 
 
 @dataclass(frozen=True)
+class NoRunConfig:
+    """Cấu hình cho các quy tắc không cho phép chạy (NO-RUN)."""
+    weekend_enabled: bool
+    killzone_enabled: bool
+    holiday_check_enabled: bool
+    holiday_check_country: str = "US"
+    timezone: str = "Asia/Ho_Chi_Minh"
+
+
+@dataclass(frozen=True)
 class NoTradeConfig:
     """Cấu hình cho các quy tắc không giao dịch (NO-TRADE)."""
     enabled: bool
-    spread_factor: float
+    spread_max_pips: float
     min_atr_m5_pips: float
-    min_ticks_per_min: int
+    min_dist_keylvl_pips: float
+    allow_session_asia: bool
+    allow_session_london: bool
+    allow_session_ny: bool
 
 
 @dataclass(frozen=True)
@@ -68,25 +89,20 @@ class AutoTradeConfig:
     enabled: bool
     strict_bias: bool
     size_mode: str
-    lots_total: float
-    equity_risk_pct: float
-    money_risk: float
-    split_tp1_pct: int
-    deviation_points: int
-    pending_threshold_points: int
-    magic: int
-    comment_prefix: str
+    risk_per_trade: float  # Thay thế cho equity_risk_pct và money_risk
+    split_tp_enabled: bool
+    split_tp_ratio: int
+    deviation: int
+    magic_number: int
+    comment: str
     pending_ttl_min: int
     min_rr_tp2: float
-    min_dist_keylvl_pips: float
     cooldown_min: int
     dynamic_pending: bool
     dry_run: bool
     move_to_be_after_tp1: bool
     trailing_atr_mult: float
-    allow_session_asia: bool
-    allow_session_london: bool
-    allow_session_ny: bool
+    filling_type: str = "IOC"  # Thêm filling_type
 
 
 @dataclass(frozen=True)
@@ -99,10 +115,18 @@ class NewsConfig:
 
 
 @dataclass(frozen=True)
-class ScheduleConfig:
-    """Cấu hình cho các quy tắc lập lịch chạy."""
-    no_run_weekend_enabled: bool
-    no_run_killzone_enabled: bool
+class PersistenceConfig:
+    """Cấu hình liên quan đến việc lưu trữ dữ liệu."""
+    max_md_reports: int = 10
+
+
+@dataclass(frozen=True)
+class LoggingConfig:
+    """Cấu hình cho hệ thống logging."""
+    log_dir: str = "Log"
+    log_file_name: str = "app_debug.log"
+    log_rotation_size_mb: int = 5
+    log_rotation_backup_count: int = 5
 
 
 @dataclass(frozen=True)
@@ -112,13 +136,16 @@ class RunConfig:
     """
     folder: FolderConfig
     upload: UploadConfig
+    image_processing: ImageProcessingConfig
     context: ContextConfig
     telegram: TelegramConfig
     mt5: MT5Config
+    no_run: NoRunConfig
     no_trade: NoTradeConfig
     auto_trade: AutoTradeConfig
     news: NewsConfig
-    schedule: ScheduleConfig
+    persistence: PersistenceConfig
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     def __post_init__(self):
         """

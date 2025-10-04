@@ -25,6 +25,7 @@ except (NameError, IndexError):
         sys.path.insert(0, str(project_root))
 
 from APP.configs import workspace_config
+from APP.configs.app_config import LoggingConfig
 from APP.persistence.log_handler import setup_logging
 from APP.ui.app_ui import AppUI
 
@@ -50,23 +51,28 @@ def main(workspace_path: Optional[str] = None) -> None:
     Hàm chính để khởi tạo và chạy ứng dụng.
 
     Thực hiện các bước:
-    1. Thiết lập logging.
-    2. Tải cấu hình ban đầu từ file workspace.
+    1. Tải cấu hình ban đầu từ file workspace.
+    2. Thiết lập logging dựa trên cấu hình vừa tải.
     3. Khởi tạo cửa sổ chính Tkinter.
     4. Tạo instance của AppUI, truyền cấu hình vào.
     5. Thiết lập xử lý tắt ứng dụng an toàn (graceful shutdown).
     6. Bắt đầu vòng lặp sự kiện chính.
     """
     try:
-        setup_logging()
-        
         # Đảm bảo thư mục làm việc tồn tại trước khi thực hiện bất kỳ thao tác nào khác
         workspace_config.setup_workspace()
-        
-        logger.info("Ứng dụng đang khởi động...")
 
         # Tải cấu hình ban đầu một cách tường minh
         initial_config = workspace_config.load_config_from_file(workspace_path)
+
+        # Trích xuất hoặc tạo cấu hình logging
+        logging_dict = initial_config.get("logging", {})
+        logging_config = LoggingConfig(**logging_dict)
+
+        # Thiết lập logging VỚI cấu hình
+        setup_logging(config=logging_config)
+
+        logger.info("Ứng dụng đang khởi động...")
 
         root = tk.Tk()
         app = AppUI(root, initial_config=initial_config)
