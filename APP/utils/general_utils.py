@@ -9,6 +9,7 @@ và các hàm hỗ trợ khác không thuộc về một module cụ thể nào.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import logging
 import os
@@ -87,13 +88,13 @@ def deobfuscate_text(b64_text: str) -> str:
         result = decrypted.decode("utf-8")
         logger.debug("Đã deobfuscate text thành công.")
         return result
-    except (ValueError, TypeError, base64.binascii.Error) as e:
+    except (ValueError, TypeError, binascii.Error) as e:
         logger.warning(f"Lỗi khi deobfuscate text: {e}. Trả về chuỗi rỗng.")
         # Return empty string if the key is corrupted or invalid
         return ""
 
 
-def _tg_html_escape(text: str) -> str:
+def tg_html_escape(text: str) -> str:
     """
     Thực hiện HTML escape cho văn bản để sử dụng an toàn trong Telegram.
 

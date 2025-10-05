@@ -54,3 +54,46 @@ metadata {
 2025-10-04 06:30:24,449 - APP.configs.workspace_config - DEBUG - Bắt đầu lưu workspace.
 2025-10-04 06:30:24,450 - APP.configs.workspace_config - INFO - Workspace đã được lưu thành công.
 2025-10-04 06:30:24,532 - APP.ui.app_ui - INFO - Ứng dụng đã đóng.
+2025-10-05 07:26:23,344 - APP.persistence.log_handler - INFO - Đã cấu hình logging xoay vòng. File log: Log\app_debug.log, Size: 5MB, Backups: 5
+2025-10-05 07:26:23,347 - APP.persistence.log_handler - DEBUG - Hoàn tất thiết lập logging cho ứng dụng.
+2025-10-05 07:26:23,348 - __main__ - INFO - Ứng dụng đang khởi động...
+2025-10-05 07:26:24,339 - APP.ui.app_ui - DEBUG - Bắt đầu khởi tạo AppUI.
+2025-10-05 07:26:24,340 - APP.ui.app_ui - DEBUG - Khởi tạo các biến Tkinter.
+2025-10-05 07:26:24,365 - APP.utils.general_utils - DEBUG - Bắt đầu deobfuscate text.
+2025-10-05 07:26:24,366 - APP.utils.general_utils - DEBUG - Tạo machine key.
+2025-10-05 07:26:24,366 - APP.utils.general_utils - DEBUG - Đã tạo machine key. Độ dài: 32 bytes.
+2025-10-05 07:26:24,367 - APP.utils.general_utils - DEBUG - Thực hiện XOR bytes.
+2025-10-05 07:26:24,367 - APP.utils.general_utils - DEBUG - Đã deobfuscate text thành công.
+2025-10-05 07:26:24,368 - APP.ui.app_ui - DEBUG - Các biến Tkinter đã được khởi tạo.
+2025-10-05 07:26:24,369 - APP.ui.utils.ui_builder - DEBUG - Bắt đầu build_ui.
+2025-10-05 07:26:24,397 - APP.ui.app_ui - DEBUG - Bắt đầu cập nhật danh sách mô hình AI.
+2025-10-05 07:26:24,522 - urllib3.connectionpool - DEBUG - Starting new HTTP connection (1): metadata.google.internal:80
+2025-10-05 07:26:24,525 - urllib3.connectionpool - DEBUG - http://metadata.google.internal:80 "GET /computeMetadata/v1/universe/universe-domain HTTP/1.1" 404 1604
+2025-10-05 07:26:24,541 - urllib3.connectionpool - DEBUG - Starting new HTTP connection (1): metadata.google.internal:80
+2025-10-05 07:26:24,554 - urllib3.connectionpool - DEBUG - http://metadata.google.internal:80 "GET /computeMetadata/v1/instance/service-accounts/default/?recursive=true HTTP/1.1" 200 407
+2025-10-05 07:26:24,576 - urllib3.connectionpool - DEBUG - http://metadata.google.internal:80 "GET /computeMetadata/v1/instance/service-accounts/default/token HTTP/1.1" 200 1083
+2025-10-05 07:26:24,592 - APP.ui.app_ui - ERROR - Lỗi khi cập nhật danh sách mô hình AI: 403 Request had insufficient authentication scopes. [reason: "ACCESS_TOKEN_SCOPE_INSUFFICIENT"
+domain: "googleapis.com"
+metadata {
+  key: "service"
+  value: "generativelanguage.googleapis.com"
+}
+metadata {
+  key: "method"
+  value: "google.ai.generativelanguage.v1beta.ModelService.ListModels"
+}
+]
+2025-10-05 07:26:24,650 - __main__ - ERROR - Đã xảy ra lỗi nghiêm trọng trong hàm main.
+Traceback (most recent call last):
+  File "C:\tool\app_gemini\aPP\main.py", line 78, in main
+    app = AppUI(root, initial_config=initial_config)
+  File "C:\tool\app_gemini\APP\ui\app_ui.py", line 183, in __init__
+    ui_builder.build_ui(self)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\tool\app_gemini\APP\ui\utils\ui_builder.py", line 369, in build_ui
+    _build_report_tab(app)
+    ~~~~~~~~~~~~~~~~~^^^^^
+  File "C:\tool\app_gemini\APP\ui\utils\ui_builder.py", line 198, in _build_report_tab
+    hist_frame = _create_listbox_with_controls(archives, "History (.md)", "history_list", {"preview": app.history_manager.preview_history_selected, "open": app.history_manager.open_history_selected, "delete": app.history_manager.delete_history_selected, "folder": app.history_manager.open_reports_folder})
+                                                                                                      ^^^^^^^^^^^^^^^^^^^
+AttributeError: 'AppUI' object has no attribute 'history_manager'

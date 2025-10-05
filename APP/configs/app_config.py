@@ -130,6 +130,13 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True)
+class ApiConfig:
+    """Cấu hình cho các cuộc gọi API."""
+    tries: int = 5
+    delay: float = 2.0
+
+
+@dataclass(frozen=True)
 class RunConfig:
     """
     Snapshot cấu hình đã được nhóm lại cho một lần chạy phân tích.
@@ -145,6 +152,7 @@ class RunConfig:
     auto_trade: AutoTradeConfig
     news: NewsConfig
     persistence: PersistenceConfig
+    api: ApiConfig = field(default_factory=ApiConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     def __post_init__(self):

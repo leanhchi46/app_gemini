@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import google.generativeai as genai
+from google.generativeai.generative_models import GenerativeModel
 
 from APP.analysis import context_builder, image_processor
 from APP.core.trading import actions as trade_actions
@@ -14,7 +15,7 @@ from APP.core.trading import conditions as trade_conditions
 from APP.persistence import md_handler
 from APP.persistence.json_handler import JsonSaver
 from APP.services import gemini_service
-from APP.ui.components import prompt_manager
+from APP.analysis import prompt_builder
 from APP.ui.utils import ui_builder
 from APP.utils.safe_data import SafeData
 
@@ -46,7 +47,7 @@ class AnalysisWorker:
         self.app = app
         self.cfg = cfg
         self.model_name: str = self.app.model_var.get()
-        self.model: Optional[genai.GenerativeModel] = None
+        self.model: Optional[Any] = None
 
         # State variables
         self.early_exit: bool = False
@@ -78,7 +79,7 @@ class AnalysisWorker:
             logger.exception("Lỗi nghiêm trọng trong worker.")
             self.combined_text = f"[LỖI PHÂN TÍCH] Đã xảy ra lỗi.\n\nChi tiết:\n{tb_str}"
             self.app.combined_report_text = self.combined_text
-            ui_builder.enqueue(self.app, lambda: ui_builder.ui_detail_replace(self.app, self.combined_text))
+            self.app.ui_queue.put(lambda: self.app.ui_detail_replace(self.combined_text))
         finally:
             self._stage_6_finalize_and_cleanup()
 
@@ -92,16 +93,18 @@ class AnalysisWorker:
             self.paths, self.names = self.paths[:max_files], self.names[:max_files]
 
         if not self.paths:
-            self.app.ui_status("Không có ảnh để phân tích.")
-            ui_builder.enqueue(self.app, self.app._finalize_stopped)
+            self.app.ui_queue.put(lambda: self.app.ui_status("Không có ảnh để phân tích."))
+            self.app.ui_queue.put(self.app._finalize_stopped)
             raise SystemExit("Không có ảnh để phân tích.")
 
         try:
-            self.model = genai.GenerativeModel(model_name=self.model_name)
+            self.model = GenerativeModel(model_name=self.model_name)
             logger.debug(f"Model '{self.model_name}' được khởi tạo thành công.")
         except Exception as e:
-            ui_builder.enqueue(self.app, lambda: ui_builder.ui_message(self.app, "error", "Lỗi Model", f"Không thể khởi tạo model '{self.model_name}': {e}"))
-            ui_builder.enqueue(self.app, self.app._finalize_stopped)
+            error_message = f"Không thể khởi tạo model '{self.model_name}': {e}"
+            # Sửa lỗi: Thay thế hàm không tồn tại bằng cách gọi phương thức trên app
+            self.app.ui_queue.put(lambda: self.app.show_error_message("Lỗi Model", error_message))
+            self.app.ui_queue.put(self.app._finalize_stopped)
             raise SystemExit(f"Lỗi khởi tạo model: {e}")
 
     def _stage_2_build_context_and_check_conditions(self) -> None:
@@ -118,7 +121,7 @@ class AnalysisWorker:
         t_ctx0 = _tnow()
         self.safe_mt5_data, self.mt5_dict, self.context_block, self.mt5_json_full = \
             context_builder.coordinate_context_building(self.app, self.cfg)
-        ui_builder.enqueue(self.app, lambda: self.app.ui_status(f"Context+MT5 xong trong {(_tnow() - t_ctx0):.2f}s"))
+        self.app.ui_queue.put(lambda: self.app.ui_status(f"Context+MT5 xong trong {(_tnow() - t_ctx0):.2f}s"))
 
         # Kiểm tra điều kiện NO-TRADE ngay sau khi có context
         no_trade_reasons = trade_conditions.check_no_trade_conditions(
@@ -147,9 +150,9 @@ class AnalysisWorker:
             if self.app.stop_flag:
                 raise SystemExit("Dừng bởi người dùng trong quá trình chuẩn bị ảnh.")
 
-            ui_builder.enqueue(self.app, lambda i=i: self.app._update_progress(i, total_files + 2))
+            self.app.ui_queue.put(lambda i=i: self.app._update_progress(i, total_files + 2))
             self.app.results[i]["status"] = "Đang xử lý..."
-            ui_builder.enqueue(self.app, lambda i=i: self.app._update_tree_row(i, "Đang xử lý..."))
+            self.app.ui_queue.put(lambda i=i: self.app._update_tree_row(i, "Đang xử lý..."))
 
             path = Path(path_str)
             remote_name = image_processor.UploadCache.lookup(cache, path)
@@ -158,10 +161,10 @@ class AnalysisWorker:
             if remote_name:
                 try:
                     logger.debug(f"Tìm thấy trong cache: {name}, đang lấy thông tin file...")
-                    file_obj = genai.get_file(remote_name)
+                    file_obj = genai.files.get(remote_name)
                     self.file_slots[i] = file_obj
                     self.app.results[i]["status"] = "Đã cache"
-                    ui_builder.enqueue(self.app, lambda i=i: self.app._update_tree_row(i, "Đã cache"))
+                    self.app.ui_queue.put(lambda i=i: self.app._update_tree_row(i, "Đã cache"))
                     logger.info(f"Đã sử dụng cache cho ảnh: {name}")
                 except Exception as e:
                     logger.warning(f"Không thể lấy file từ cache cho {name} ({remote_name}): {e}. Sẽ upload lại.")
@@ -170,7 +173,7 @@ class AnalysisWorker:
             if not file_obj:
                 images_changed = True
                 self.app.results[i]["status"] = "Đang upload..."
-                ui_builder.enqueue(self.app, lambda i=i: self.app._update_tree_row(i, "Đang upload..."))
+                self.app.ui_queue.put(lambda i=i: self.app._update_tree_row(i, "Đang upload..."))
                 
                 prepared_path = image_processor.prepare_image(
                     path,
@@ -188,10 +191,10 @@ class AnalysisWorker:
                     if self.cfg.upload.cache_enabled:
                         image_processor.UploadCache.put(cache, path, file_obj.name)
                     self.app.results[i]["status"] = "Đã upload"
-                    ui_builder.enqueue(self.app, lambda i=i: self.app._update_tree_row(i, "Đã upload"))
+                    self.app.ui_queue.put(lambda i=i: self.app._update_tree_row(i, "Đã upload"))
                 else:
                     self.app.results[i]["status"] = "Lỗi Upload"
-                    ui_builder.enqueue(self.app, lambda i=i: self.app._update_tree_row(i, "Lỗi Upload"))
+                    self.app.ui_queue.put(lambda i=i: self.app._update_tree_row(i, "Lỗi Upload"))
                     # Có thể dừng hoặc tiếp tục tùy theo yêu cầu
                     raise SystemExit(f"Không thể upload ảnh: {name}")
 
@@ -205,7 +208,7 @@ class AnalysisWorker:
         if self.cfg.upload.cache_enabled:
             image_processor.UploadCache.save(cache)
 
-        ui_builder.enqueue(self.app, lambda: self.app.ui_status(f"Xử lý {total_files} ảnh xong trong {(_tnow() - t_up0):.2f}s"))
+        self.app.ui_queue.put(lambda: self.app.ui_status(f"Xử lý {total_files} ảnh xong trong {(_tnow() - t_up0):.2f}s"))
 
         if self.app.stop_flag:
             raise SystemExit("Dừng bởi người dùng sau khi upload.")
@@ -213,26 +216,24 @@ class AnalysisWorker:
     def _stage_4_call_ai_model(self) -> None:
         """Giai đoạn 4: Gọi model AI và xử lý kết quả."""
         logger.debug("GIAI ĐOẠN 4: Gọi model AI.")
-        ui_builder.enqueue(self.app, lambda: self.app.ui_status("Đang phân tích..."))
+        self.app.ui_queue.put(lambda: self.app.ui_status("Đang phân tích..."))
         
         # Lọc ra các file đã được upload thành công
         all_media = [f for f in self.file_slots if f is not None]
         if not all_media:
             raise SystemExit("Không có media nào để gửi đến model.")
 
-        prompt_no_entry = self.app.prompt_manager.get_prompt_no_entry()
-        prompt_entry_run = self.app.prompt_manager.get_prompt_entry_run()
+        prompt_no_entry = self.app.prompt_manager.get_prompts().get("no_entry", "")
+        prompt_entry_run = self.app.prompt_manager.get_prompts().get("entry_run", "")
 
-        prompt = prompt_manager.select_prompt_dynamically(
+        prompt = prompt_builder.select_prompt(
             self.app, self.cfg, self.safe_mt5_data, prompt_no_entry, prompt_entry_run
         )
-        prompt_final = prompt_manager.construct_final_prompt(
+        prompt_final = prompt_builder.construct_prompt(
             self.app,
             prompt,
             self.mt5_dict,
-            self.safe_mt5_data,
             self.context_block,
-            self.mt5_json_full,
             self.paths,
         )
 
@@ -246,11 +247,13 @@ class AnalysisWorker:
             tries = self.cfg.api.tries
             base_delay = self.cfg.api.delay
 
+            if not self.model:
+                raise SystemExit("Model chưa được khởi tạo.")
             stream_generator = gemini_service.stream_gemini_response(
                 model=self.model, parts=parts, tries=tries, base_delay=base_delay
             )
 
-            ui_builder.enqueue(self.app, lambda: ui_builder.ui_detail_replace(self.app, "Đang nhận dữ liệu từ AI..."))
+            self.app.ui_queue.put(lambda: self.app.ui_detail_replace("Đang nhận dữ liệu từ AI..."))
 
             for chunk in stream_generator:
                 if self.app.stop_flag:
@@ -262,11 +265,8 @@ class AnalysisWorker:
                 chunk_text = getattr(chunk, "text", "")
                 if chunk_text:
                     self.combined_text += chunk_text
-                    ui_builder.enqueue(
-                        self.app,
-                        lambda: ui_builder.ui_detail_replace(
-                            self.app, self.combined_text
-                        ),
+                    self.app.ui_queue.put(
+                        lambda: self.app.ui_detail_replace(self.combined_text)
                     )
 
             if not self.combined_text:
@@ -276,19 +276,20 @@ class AnalysisWorker:
             logger.error(f"Lỗi nghiêm trọng khi streaming từ Gemini: {e}")
             raise  # Ném lại lỗi để khối try...except chính của worker xử lý
 
-        ui_builder.enqueue(self.app, lambda: self.app.ui_status(f"Model trả lời trong {(_tnow() - t_llm0):.2f}s"))
-        ui_builder.enqueue(self.app, lambda: self.app._update_progress(self.steps_upload + 1, self.steps_upload + 2))
+        self.app.ui_queue.put(lambda: self.app.ui_status(f"Model trả lời trong {(_tnow() - t_llm0):.2f}s"))
+        self.app.ui_queue.put(lambda: self.app._update_progress(self.steps_upload + 1, self.steps_upload + 2))
 
     def _stage_5_execute_or_manage_trades(self) -> None:
         """Giai đoạn 5: Thực thi hoặc quản lý giao dịch."""
         logger.debug("GIAI ĐOẠN 5: Thực thi hoặc quản lý giao dịch.")
-        has_active_positions = self.safe_mt5_data and self.safe_mt5_data.positions
+        positions = self.safe_mt5_data.get("positions", []) if self.safe_mt5_data else []
+        has_active_positions = bool(positions)
         
         if not has_active_positions:
             logger.info("Không có lệnh. Tìm kiếm cơ hội vào lệnh mới.")
             trade_actions.execute_trade_action(self.app, self.combined_text, self.mt5_dict, self.cfg)
         else:
-            logger.info(f"Có {len(self.safe_mt5_data.positions)} lệnh. Thực hiện quản lý.")
+            logger.info(f"Có {len(positions)} lệnh. Thực hiện quản lý.")
             trade_actions.manage_existing_trades(self.app, self.combined_text, self.mt5_dict, self.cfg)
 
     def _stage_6_finalize_and_cleanup(self) -> None:
@@ -297,7 +298,7 @@ class AnalysisWorker:
         if not self.early_exit:
             for i in range(len(self.paths)):
                 self.app.results[i]["status"] = "Hoàn tất"
-                ui_builder.enqueue(self.app, lambda i=i: self.app._update_tree_row(i, "Hoàn tất"))
+                self.app.ui_queue.put(lambda i=i: self.app._update_tree_row(i, "Hoàn tất"))
 
             self.app.combined_report_text = self.combined_text
             # Tái cấu trúc: Sử dụng lớp MdSaver chuyên dụng
@@ -314,10 +315,11 @@ class AnalysisWorker:
             except Exception:
                 tb_str = traceback.format_exc()
                 err_msg = f"Lỗi nghiêm trọng khi lưu ctx_*.json:\n{tb_str}"
-                ui_builder.enqueue(self.app, lambda: ui_builder.ui_message(self.app, "error", "Lỗi Lưu JSON", err_msg))
+                # Sửa lỗi: Thay thế hàm không tồn tại bằng cách gọi phương thức trên app
+                self.app.ui_queue.put(lambda: self.app.show_error_message("Lỗi Lưu JSON", err_msg))
 
-            ui_builder.enqueue(self.app, self.app.history_manager.refresh_history_list)
-            ui_builder.enqueue(self.app, self.app.history_manager.refresh_json_list)
+            self.app.ui_queue.put(self.app.history_manager.refresh_history_list)
+            self.app.ui_queue.put(self.app.history_manager.refresh_json_list)
 
             # Logic thông báo đã được chuyển vào trade_actions và conditions.py
             # if not self.app.stop_flag:
@@ -328,12 +330,12 @@ class AnalysisWorker:
             for uf, _ in self.uploaded_files:
                 try:
                     if genai:
-                        genai.delete_file(uf.name)
+                        genai.files.delete(uf.name)
                         logger.debug(f"Đã xóa file Gemini: {uf.name}")
                 except Exception as e:
                     logger.warning(f"Lỗi khi xóa file Gemini '{uf.name}': {e}")
         
-        ui_builder.enqueue(self.app, lambda: self.app._update_progress(0, 1))
+        self.app.ui_queue.put(lambda: self.app.ui_progress(0))
         final_state = self.app._finalize_done if not self.app.stop_flag else self.app._finalize_stopped
-        ui_builder.enqueue(self.app, final_state)
+        self.app.ui_queue.put(final_state)
         logger.debug("Kết thúc AnalysisWorker.run.")

@@ -1,0 +1,25 @@
+ sử dụng cú pháp PlantUML để mô tả nó
+------------------------------------------
+check lỗi bằng pyright APP --outputjson và fix đến khi hết.
+đọc kỹ và Kiểm tra đồng bộ với toàn dự án @/APP để tránh lỗi. 
+tôi muốn toàn bộ dự án được liên kết logic với nhau chứ không phải sửa cục bộ.
+-------------------
+bạn nên đọc lại file cũ trong thư mục @/src để chỉnh sửa đúng nhất
+Kiểm tra đồng bộ với toàn dự án @/APP để tránh lỗi
+kiểm tra lại Phân bổ lại Hàm và Logic (Chi tiết từng Tệp)
+
+-------------------
+Kiểm tra đồng bộ với toàn dự án @/APP để tránh lỗi
+Liệt kê tất cả các hàm có trong APP/utils/general_utils.py:
+- Mô tả chức năng của hàm đó
+- Đánh giá logic và code của hàm đó
+- gợi ý cải tiến các hàm đó
+-------------------
+thực hiện đề xuất trong file:
+
+Kiểm tra đồng bộ với toàn dự án @/APP để tránh lỗi
+
+thực hiện đề xuất tất cả đề xuất trên vào trong APP/utils/general_utils.py
+Kiểm tra đồng bộ với toàn dự án @/APP để tránh lỗi
+---------------------
+tôi muốn chú thích 1. Mô tả chức năng và 2. Đánh giá Logic và Code của file  vào file rule-tool.txt để cline ghi nhớ

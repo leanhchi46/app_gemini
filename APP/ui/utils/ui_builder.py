@@ -17,8 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple
 
 if TYPE_CHECKING:
     from APP.ui.app_ui import AppUI
-
-from APP.ui.components.chart_tab import ChartTabTV
+    from APP.ui.components.chart_tab import ChartTab
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,7 @@ else:
 
 
 def _create_labeled_spinbox(
-    parent: ttk.Frame,
+    parent: tk.Widget,
     label_text: str,
     textvariable: tk.Variable,
     from_: float,
@@ -52,7 +51,7 @@ def _create_labeled_spinbox(
 
 
 def _create_listbox_with_controls(
-    parent: ttk.Frame,
+    parent: tk.Widget,
     title: str,
     listbox_attr_name: str,
     callbacks: Dict[str, Callable[[], None]],
@@ -78,9 +77,16 @@ def _create_listbox_with_controls(
     listbox.bind("<<ListboxSelect>>", lambda e: callbacks.get("preview", lambda: None)())
     listbox.bind("<Double-Button-1>", lambda e: callbacks.get("open", lambda: None)())
 
-    ttk.Button(buttons_frame, text="Mở", command=callbacks.get("open")).pack(side="left")
-    ttk.Button(buttons_frame, text="Xoá", command=callbacks.get("delete")).pack(side="left", padx=6)
-    ttk.Button(buttons_frame, text="Thư mục", command=callbacks.get("folder")).pack(side="left", padx=6)
+    open_cmd = callbacks.get("open")
+    delete_cmd = callbacks.get("delete")
+    folder_cmd = callbacks.get("folder")
+
+    if open_cmd:
+        ttk.Button(buttons_frame, text="Mở", command=open_cmd).pack(side="left")
+    if delete_cmd:
+        ttk.Button(buttons_frame, text="Xoá", command=delete_cmd).pack(side="left", padx=6)
+    if folder_cmd:
+        ttk.Button(buttons_frame, text="Thư mục", command=folder_cmd).pack(side="left", padx=6)
 
     return col_frame
 
@@ -157,6 +163,8 @@ def _build_progress_frame(app: "AppUI") -> None:
 
 def _build_report_tab(app: "AppUI") -> None:
     """Xây dựng tab "Report"."""
+    if not app.nb:
+        return
     tab = ttk.Frame(app.nb, padding=8)
     app.nb.add(tab, text="Report")
     tab.columnconfigure(0, weight=1)
@@ -174,7 +182,7 @@ def _build_report_tab(app: "AppUI") -> None:
     app.tree = ttk.Treeview(left_panel, columns=cols, show="headings", selectmode="browse")
     for col, text, width, anchor in [("#", "#", 56, "e"), ("name", "Tệp ảnh", 320, "w"), ("status", "Trạng thái", 180, "w")]:
         app.tree.heading(col, text=text)
-        app.tree.column(col, width=width, anchor=anchor)
+        app.tree.column(col, width=width, anchor=anchor) # type: ignore
     app.tree.grid(row=0, column=0, sticky="nsew")
     scr_y = ttk.Scrollbar(left_panel, orient="vertical", command=app.tree.yview)
     app.tree.configure(yscrollcommand=scr_y.set)
@@ -187,10 +195,10 @@ def _build_report_tab(app: "AppUI") -> None:
     archives.columnconfigure(1, weight=1)
     archives.rowconfigure(0, weight=1)
 
-    hist_frame = _create_listbox_with_controls(archives, "History (.md)", "history_list", {"preview": app._preview_history_selected, "open": app._open_history_selected, "delete": app._delete_history_selected, "folder": app._open_reports_folder})
+    hist_frame = _create_listbox_with_controls(archives, "History (.md)", "history_list", {"preview": app.history_manager.preview_history_selected, "open": app.history_manager.open_history_selected, "delete": app.history_manager.delete_history_selected, "folder": app.history_manager.open_reports_folder})
     hist_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
 
-    json_frame = _create_listbox_with_controls(archives, "JSON (ctx_*.json)", "json_list", {"preview": app._preview_json_selected, "open": app._load_json_selected, "delete": app._delete_json_selected, "folder": app._open_json_folder})
+    json_frame = _create_listbox_with_controls(archives, "JSON (ctx_*.json)", "json_list", {"preview": app.history_manager.preview_json_selected, "open": app.history_manager.load_json_selected, "delete": app.history_manager.delete_json_selected, "folder": app.history_manager.open_json_folder})
     json_frame.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
 
     # Right Panel
@@ -209,8 +217,9 @@ def _build_report_tab(app: "AppUI") -> None:
 
 def _build_chart_tab(app: "AppUI") -> None:
     """Xây dựng tab "Chart"."""
+    if not app.nb: return
     if HAS_MPL:
-        app.chart_tab_tv = ChartTabTV(app, app.nb)
+        app.chart_tab = ChartTab(app, app.nb)
     else:
         placeholder = ttk.Frame(app.nb, padding=8)
         app.nb.add(placeholder, text="Chart")
@@ -219,6 +228,7 @@ def _build_chart_tab(app: "AppUI") -> None:
 
 def _build_prompt_tab(app: "AppUI") -> None:
     """Xây dựng tab "Prompt"."""
+    if not app.nb: return
     tab = ttk.Frame(app.nb, padding=8)
     app.nb.add(tab, text="Prompt")
     tab.columnconfigure(0, weight=1)
@@ -327,6 +337,7 @@ def _build_opts_norun(app: "AppUI", parent: ttk.Notebook) -> None:
 
 def _build_options_tab(app: "AppUI") -> None:
     """Xây dựng tab "Options"."""
+    if not app.nb: return
     tab = ttk.Frame(app.nb, padding=8)
     app.nb.add(tab, text="Options")
     tab.columnconfigure(0, weight=1)
@@ -361,3 +372,79 @@ def build_ui(app: "AppUI") -> None:
     _build_options_tab(app)
 
     logger.debug("Kết thúc build_ui.")
+
+
+# =====================================================================================
+# UI HELPERS (Safe UI updates and dialogs)
+# =====================================================================================
+
+def poll_ui_queue(app: "AppUI") -> None:
+    """Lấy và thực thi các hàm cập nhật UI từ hàng đợi một cách an toàn."""
+    try:
+        while True:
+            callback = app.ui_queue.get_nowait()
+            callback()
+    except Exception:
+        pass
+    app.root.after(100, lambda: poll_ui_queue(app))
+
+
+def enqueue(app: "AppUI", callback: Callable[[], Any]) -> None:
+    """Thêm một hàm callback vào hàng đợi UI."""
+    app.ui_queue.put(callback)
+
+
+def show_message(
+    title: str, message: str, parent: tk.Tk | tk.Widget | None = None
+) -> None:
+    """Hiển thị một hộp thoại thông báo thông tin."""
+    from tkinter import messagebox
+    messagebox.showinfo(title, message, parent=parent) # type: ignore
+
+
+def ask_confirmation(title: str, message: str) -> bool:
+    """Hiển thị hộp thoại xác nhận và trả về lựa chọn của người dùng."""
+    from tkinter import messagebox
+    return messagebox.askyesno(title, message)
+
+
+def toggle_controls_state(app: "AppUI", state: str) -> None:
+    """Bật hoặc tắt các điều khiển chính trên giao diện."""
+    if app.stop_btn:
+        app.stop_btn.config(state="normal" if state == "disabled" else "disabled")
+    
+    # Duyệt qua tất cả các widget con của root và thay đổi trạng thái
+    # trừ các widget không nên bị vô hiệu hóa (như nút Stop)
+    widgets_to_disable: List[tk.Widget] = []
+    
+    # Hàm đệ quy để thu thập widget
+    def collect_widgets(parent: tk.Misc):
+        for widget in parent.winfo_children():
+            # Không vô hiệu hóa nút Stop hoặc thanh cuộn, v.v.
+            if widget != app.stop_btn and isinstance(widget, (ttk.Button, ttk.Checkbutton, ttk.Entry, ttk.Combobox, ttk.Spinbox, tk.Text, tk.Listbox)):
+                 widgets_to_disable.append(widget)
+            # Đệ quy vào các container
+            if isinstance(widget, (ttk.Frame, ttk.LabelFrame, ttk.Notebook)):
+                collect_widgets(widget)
+
+    collect_widgets(app.root)
+    
+    for widget in widgets_to_disable:
+        try:
+            widget.config(state=state) # type: ignore
+        except tk.TclError:
+            # Một số widget không có thuộc tính 'state'
+            pass
+
+
+def show_json_popup(parent: tk.Tk | tk.Widget, title: str, data: dict) -> None:
+    """Hiển thị một cửa sổ popup với nội dung JSON được định dạng."""
+    import json
+    popup = tk.Toplevel(parent)
+    popup.title(title)
+    popup.geometry("600x500")
+    text = ScrolledText(popup, wrap="word")
+    text.pack(expand=True, fill="both")
+    formatted_json = json.dumps(data, indent=2, ensure_ascii=False)
+    text.insert("1.0", formatted_json)
+    text.config(state="disabled")

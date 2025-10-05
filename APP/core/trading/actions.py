@@ -24,7 +24,7 @@ def execute_trade_action(
     app: AppUI, combined_text: str, mt5_ctx: dict[str, Any], cfg: RunConfig
 ) -> bool:
     """Phân tích, đánh giá và đặt lệnh dựa trên phân tích chuyên sâu của AI."""
-    if not cfg.auto_trade_enabled or mt5 is None:
+    if not cfg.auto_trade.enabled or mt5 is None:
         return False
 
     ai_analysis = report_parser.extract_json_block_prefer(combined_text)
@@ -46,7 +46,8 @@ def execute_trade_action(
     )
 
     if not lots or lots <= 0:
-        ui_builder.enqueue_ui_update(app, "update_status_bar", "Lỗi tính toán khối lượng.")
+        # Sửa lỗi: Thay thế hàm không tồn tại bằng cách gọi phương thức trên app qua queue
+        app.ui_queue.put(lambda: app.ui_status("Lỗi tính toán khối lượng."))
         return False
 
     reqs = mt5_service.build_trade_requests(
@@ -62,8 +63,8 @@ def execute_trade_action(
         info=mt5_ctx.get("info", {})
     )
 
-    if cfg.auto_trade_dry_run:
-        ui_builder.enqueue_ui_update(app, "update_status_bar", f"DRY-RUN ({grade}): Lệnh đã được ghi log.")
+    if cfg.auto_trade.dry_run:
+        app.ui_queue.put(lambda: app.ui_status(f"DRY-RUN ({grade}): Lệnh đã được ghi log."))
         log_handler.log_trade(
             run_config=cfg,
             trade_data={"stage": "dry-run", "grade": grade, "requests": reqs},
@@ -75,10 +76,10 @@ def execute_trade_action(
         res = mt5_service.order_send_smart(req)
         if not res or res.retcode != mt5.TRADE_RETCODE_DONE:
             has_errors = True
-            ui_builder.enqueue_ui_update(app, "update_status_bar", f"Lỗi gửi lệnh: {getattr(res, 'comment', 'Không rõ')}")
+            app.ui_queue.put(lambda: app.ui_status(f"Lỗi gửi lệnh: {getattr(res, 'comment', 'Không rõ')}"))
     
     if not has_errors:
-        ui_builder.enqueue_ui_update(app, "update_status_bar", f"Đã đặt lệnh cho setup hạng {grade}.")
+        app.ui_queue.put(lambda: app.ui_status(f"Đã đặt lệnh cho setup hạng {grade}."))
         return True
         
     return False
@@ -121,7 +122,8 @@ def manage_existing_trades(
             if new_sl == "entry":
                 new_sl = pos.get("price_open")
             elif new_sl in ["last_swing_low_m5", "last_swing_high_m5"]:
-                tf_code = mt5.TIMEFRAME_M5
+                tf_code = mt5.TIMEFRAME_M5 if mt5 else None
+                if not tf_code: continue
                 bars_to_check = 20 # Có thể đưa vào config
                 low, high = mt5_service.get_last_swing_low_high(pos["symbol"], tf_code, bars_to_check)
                 
@@ -141,6 +143,6 @@ def manage_existing_trades(
                 action_taken = True
                 
     if action_taken:
-        ui_builder.enqueue_ui_update(app, "update_status_bar", "Đã thực hiện hành động quản lý lệnh.")
+        app.ui_queue.put(lambda: app.ui_status("Đã thực hiện hành động quản lý lệnh."))
 
     return action_taken

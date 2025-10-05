@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Dict, Any, List
+from typing import TYPE_CHECKING, Dict, Any, List, Optional
 
 if TYPE_CHECKING:
     from APP.configs.app_config import RunConfig
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 def select_prompt(
     app: "AppUI",
     cfg: "RunConfig",
-    safe_mt5_data: "SafeData",
+    safe_mt5_data: Optional["SafeData"],
     prompt_no_entry: str,
     prompt_entry_run: str,
 ) -> str:
@@ -22,11 +22,15 @@ def select_prompt(
     """
     # Logic đơn giản: nếu không có vị thế nào đang mở, sử dụng prompt "no entry".
     # Ngược lại, sử dụng prompt "entry run".
-    if safe_mt5_data.positions_total == 0:
+    if not safe_mt5_data:
+        return prompt_no_entry
+    positions = safe_mt5_data.get("positions", [])
+    positions_total = len(positions) if positions else 0
+    if positions_total == 0:
         logger.debug("Không có vị thế nào, chọn prompt 'no entry'.")
         return prompt_no_entry
     else:
-        logger.debug(f"Có {safe_mt5_data.positions_total} vị thế, chọn prompt 'entry run'.")
+        logger.debug(f"Có {positions_total} vị thế, chọn prompt 'entry run'.")
         return prompt_entry_run
 
 def construct_prompt(

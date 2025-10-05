@@ -44,8 +44,8 @@ class JsonSaver:
             config: The RunConfig object containing all settings for the current run.
         """
         self.config: RunConfig = config
-        self.reports_dir: Path | None = workspace_config.get_reports_dir(self.config.folder)
-        logger.debug(f"JsonSaver được khởi tạo cho workspace: {self.config.folder}")
+        self.reports_dir: Path | None = workspace_config.get_reports_dir(self.config.folder.folder)
+        logger.debug(f"JsonSaver được khởi tạo cho workspace: {self.config.folder.folder}")
 
     def _log_proposed_trade(self, report_text: str, report_path: Path, context_obj: dict[str, Any]) -> None:
         """
@@ -67,8 +67,8 @@ class JsonSaver:
                         "session": inner_ctx.get("session"),
                         "trend_checklist": inner_ctx.get("trend_checklist", {}).get("trend"),
                         "volatility_regime": (inner_ctx.get("environment_flags") or {}).get("volatility_regime"),
-                        "trend_regime": (inner_ctx.get("environment_flags") or {}).get("trend_regime"),
-                    }
+                    "trend_regime": (inner_ctx.get("environment_flags") or {}).get("trend_regime"),
+                }
 
                 trade_log_payload = {
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -77,7 +77,7 @@ class JsonSaver:
                     "setup": setup,
                     "context_snapshot": ctx_snapshot
                 }
-                log_handler.log_trade(trade_log_payload, folder_override=self.config.folder)
+                log_handler.log_trade(run_config=self.config, trade_data=trade_log_payload)
                 logger.debug("Đã log proposed trade.")
         except Exception as e:
             logger.warning(f"Lỗi khi log proposed trade cho backtesting: {e}")
@@ -108,7 +108,7 @@ class JsonSaver:
         data_to_save = initial_data.copy()
 
         # Extract all valid JSON blocks from the report text
-        found_blocks = report_parser.extract_all_json_blocks(report_text)
+        found_blocks = report_parser.extract_json_block_prefer(report_text)
         if found_blocks:
             if "blocks" in data_to_save and isinstance(data_to_save.get("blocks"), list):
                 data_to_save["blocks"].extend(found_blocks)
@@ -141,6 +141,10 @@ class JsonSaver:
         """
         Adds final metadata and writes the report data to a JSON file.
         """
+        if not self.reports_dir:
+            logger.error("Không thể ghi file vì thư mục reports chưa được thiết lập.")
+            return None
+            
         if "cycle" not in report_data:
             report_data["cycle"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if "images_tf_map" not in report_data:
@@ -152,7 +156,7 @@ class JsonSaver:
         try:
             out_path.write_text(json.dumps(report_data, ensure_ascii=False, indent=2), encoding="utf-8")
             logger.info(f"Đã lưu file JSON báo cáo thành công tại: {out_path.name}")
-            general_utils.cleanup_old_files(self.reports_dir, "ctx_*.json", 10)
+            general_utils.cleanup_old_files(self.reports_dir, "ctx_*.json", self.config.folder.max_files)
             return out_path
         except Exception as e:
             logger.exception(f"LỖI NGHIÊM TRỌNG khi lưu JSON cuối cùng vào {out_path.name}")
@@ -168,8 +172,8 @@ class JsonSaver:
         Orchestrates the saving of the full analysis report as a JSON file.
         """
         logger.debug("Bắt đầu quá trình lưu báo cáo JSON.")
-        if not self.reports_dir:
-            logger.error("Không thể xác định thư mục Reports để lưu .json.")
+        if not self.reports_dir or not self.reports_dir.is_dir():
+            logger.error("Không thể xác định thư mục Reports hoặc thư mục không tồn tại để lưu .json.")
             return None
 
         # Stage 1: Build initial data from context

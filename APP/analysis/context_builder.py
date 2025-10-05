@@ -13,7 +13,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, cast
 
 # TODO: Tích hợp backtester và vectorizer vào cấu trúc APP
 # from . import backtester
@@ -356,7 +356,14 @@ def coordinate_context_building(
     context_block = f"\n\n[CONTEXT_COMPOSED]\n{composed_json}" if composed_json else ""
 
     # 3. Lấy và làm giàu dữ liệu MT5 thời gian thực
-    safe_mt5_data = mt5_service.build_mt5_context(plan=plan, cfg=cfg) if cfg.mt5.enabled else None
+    safe_mt5_data_untyped = (
+        mt5_service.get_market_data(
+            cfg=cfg.mt5, plan=plan, return_json=False
+        )
+        if cfg.mt5.enabled
+        else None
+    )
+    safe_mt5_data: Optional[SafeData] = cast(Optional[SafeData], safe_mt5_data_untyped)
 
     if safe_mt5_data and safe_mt5_data.raw:
         logger.debug("Dữ liệu MT5 có sẵn, bắt đầu làm giàu với tin tức.")

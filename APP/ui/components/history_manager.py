@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
     from APP.ui.app_ui import AppUI
@@ -40,20 +40,17 @@ class HistoryManager:
     # --- Private Helper Methods (Refactored) ---
 
     def _refresh_file_list(
-        self, listbox: tk.Listbox, file_glob: str, target_attr: str
+        self, listbox: Optional[tk.Listbox], file_glob: str, target_attr: str
     ) -> None:
         """
         Hàm chung để làm mới danh sách tệp trên một Listbox cụ thể.
-
-        Args:
-            listbox (tk.Listbox): Widget Listbox cần cập nhật.
-            file_glob (str): Mẫu glob để tìm kiếm tệp (ví dụ: "report_*.md").
-            target_attr (str): Tên thuộc tính trên `app` để lưu danh sách tệp (ví dụ: "_history_files").
         """
         self.logger.debug(f"Bắt đầu làm mới danh sách cho mẫu: {file_glob}")
+        if not listbox:
+            return
         try:
             listbox.delete(0, "end")
-            reports_dir = workspace_config.get_reports_dir()
+            reports_dir = workspace_config.get_reports_dir(self.app.folder_path.get())
             if not reports_dir or not reports_dir.exists():
                 self.logger.warning(f"Thư mục báo cáo không tồn tại, không thể làm mới {target_attr}.")
                 setattr(self.app, target_attr, [])
@@ -67,26 +64,25 @@ class HistoryManager:
         except Exception as e:
             self.logger.error(f"Lỗi khi làm mới danh sách tệp ({file_glob}): {e}", exc_info=True)
             ui_builder.show_message(
-                title="Lỗi", message=f"Không thể làm mới danh sách tệp:\n{e}"
+                "Lỗi", f"Không thể làm mới danh sách tệp:\n{e}"
             )
 
-    def _preview_selected_file(self, listbox: tk.Listbox, file_list_attr: str, file_type: str) -> None:
+    def _preview_selected_file(self, listbox: Optional[tk.Listbox], file_list_attr: str, file_type: str) -> None:
         """
         Hàm chung để hiển thị nội dung của tệp được chọn.
-
-        Args:
-            listbox (tk.Listbox): Widget Listbox chứa lựa chọn.
-            file_list_attr (str): Tên thuộc tính trên `app` chứa danh sách tệp.
-            file_type (str): Loại tệp để hiển thị trong thanh trạng thái (ví dụ: "Báo cáo").
         """
         self.logger.debug(f"Bắt đầu xem trước tệp loại: {file_type}")
+        if not listbox or not self.app.detail_text:
+            return
         file_path = None
         try:
             sel = listbox.curselection()
             if not sel:
                 return
 
-            file_list = getattr(self.app, file_list_attr)
+            file_list = getattr(self.app, file_list_attr, [])
+            if not file_list or sel[0] >= len(file_list):
+                return
             file_path = file_list[sel[0]]
             content = file_path.read_text(encoding="utf-8", errors="ignore")
 
@@ -95,7 +91,7 @@ class HistoryManager:
             self.app.detail_text.insert("1.0", content)
             self.app.detail_text.config(state="disabled")
 
-            ui_builder.update_status_bar(self.app.status_bar, f"Đang xem {file_type}: {file_path.name}")
+            self.app.ui_status(f"Đang xem {file_type}: {file_path.name}")
             self.logger.debug(f"Đã hiển thị xem trước cho: {file_path.name}")
         except IndexError:
             self.logger.warning(f"Lựa chọn không hợp lệ cho {file_type}, có thể danh sách đã thay đổi.")
@@ -104,26 +100,24 @@ class HistoryManager:
             if file_path:
                 error_msg += f" '{file_path.name}'"
             self.logger.error(f"{error_msg}: {e}", exc_info=True)
-            ui_builder.show_message(title="Lỗi", message=f"Không thể xem trước tệp:\n{e}")
+            ui_builder.show_message("Lỗi", f"Không thể xem trước tệp:\n{e}")
 
-    def _delete_selected_file(self, listbox: tk.Listbox, file_list_attr: str, refresh_func: callable, file_type: str) -> None:
+    def _delete_selected_file(self, listbox: Optional[tk.Listbox], file_list_attr: str, refresh_func: Callable[[], None], file_type: str) -> None:
         """
         Hàm chung để xóa tệp được chọn.
-
-        Args:
-            listbox (tk.Listbox): Widget Listbox chứa lựa chọn.
-            file_list_attr (str): Tên thuộc tính trên `app` chứa danh sách tệp.
-            refresh_func (callable): Hàm để gọi để làm mới danh sách sau khi xóa.
-            file_type (str): Loại tệp để hiển thị trong thông báo.
         """
         self.logger.debug(f"Bắt đầu xóa tệp loại: {file_type}")
+        if not listbox or not self.app.detail_text:
+            return
         file_path = None
         try:
             sel = listbox.curselection()
             if not sel:
                 return
 
-            file_list = getattr(self.app, file_list_attr)
+            file_list = getattr(self.app, file_list_attr, [])
+            if not file_list or sel[0] >= len(file_list):
+                return
             file_path = file_list[sel[0]]
 
             if ui_builder.ask_confirmation(
@@ -134,14 +128,14 @@ class HistoryManager:
                 self.app.detail_text.config(state="normal")
                 self.app.detail_text.delete("1.0", "end")
                 self.app.detail_text.config(state="disabled")
-                ui_builder.update_status_bar(self.app.status_bar, f"Đã xóa {file_type}: {file_path.name}")
+                self.app.ui_status(f"Đã xóa {file_type}: {file_path.name}")
                 self.logger.info(f"Đã xóa {file_type}: {file_path.name}")
         except Exception as e:
             error_msg = f"Lỗi khi xóa {file_type}"
             if file_path:
                 error_msg += f" '{file_path.name}'"
             self.logger.error(f"{error_msg}: {e}", exc_info=True)
-            ui_builder.show_message(title="Lỗi", message=f"Không thể xóa tệp:\n{e}")
+            ui_builder.show_message("Lỗi", f"Không thể xóa tệp:\n{e}")
 
     # --- Public Methods for MD Reports ---
 
@@ -156,20 +150,29 @@ class HistoryManager:
     def open_history_selected(self) -> None:
         """Mở báo cáo lịch sử được chọn bằng ứng dụng mặc định."""
         self.logger.debug("Bắt đầu mở tệp báo cáo được chọn.")
+        if not self.app.history_list:
+            return
         file_path = None
         try:
             sel = self.app.history_list.curselection()
             if not sel:
                 return
-            file_path = self.app._history_files[sel[0]]
-            general_utils.open_path(file_path)
+            file_list = getattr(self.app, "_history_files", [])
+            if not file_list or sel[0] >= len(file_list):
+                return
+            file_path = file_list[sel[0]]
+            
+            # Mở file bằng os.startfile để tương thích tốt hơn trên Windows
+            import os
+            os.startfile(file_path)
+            
             self.logger.debug(f"Đã yêu cầu mở tệp: {file_path}")
         except Exception as e:
             error_msg = "Lỗi khi mở báo cáo"
             if file_path:
                 error_msg += f" '{file_path.name}'"
             self.logger.error(f"{error_msg}: {e}", exc_info=True)
-            ui_builder.show_message(title="Lỗi", message=f"Không thể mở tệp:\n{e}")
+            ui_builder.show_message("Lỗi", f"Không thể mở tệp:\n{e}")
 
     def delete_history_selected(self) -> None:
         """Xóa báo cáo lịch sử được chọn."""
@@ -181,31 +184,45 @@ class HistoryManager:
         """Mở thư mục chứa các báo cáo và tệp ngữ cảnh."""
         self.logger.debug("Bắt đầu mở thư mục báo cáo.")
         try:
-            reports_dir = workspace_config.get_reports_dir()
+            reports_dir = workspace_config.get_reports_dir(self.app.folder_path.get())
             if reports_dir and reports_dir.exists():
-                general_utils.open_path(reports_dir)
+                # Mở thư mục bằng os.startfile
+                import os
+                os.startfile(reports_dir)
                 self.logger.debug(f"Đã yêu cầu mở thư mục: {reports_dir}")
             else:
                 self.logger.warning("Thư mục báo cáo không tồn tại.")
-                ui_builder.show_message(title="Thông báo", message="Thư mục báo cáo không tồn tại.")
+                ui_builder.show_message("Thông báo", "Thư mục báo cáo không tồn tại.")
         except Exception as e:
             self.logger.error(f"Lỗi khi mở thư mục báo cáo: {e}", exc_info=True)
             ui_builder.show_message(
-                title="Lỗi", message=f"Không thể mở thư mục báo cáo:\n{e}"
+                "Lỗi", f"Không thể mở thư mục báo cáo:\n{e}"
             )
 
     # --- Public Methods for JSON Context Files ---
 
     def refresh_json_list(self) -> None:
         """Làm mới danh sách các tệp JSON ngữ cảnh (ctx_*.json) và hiển thị trên UI."""
-        self._refresh_file_list(self.app.json_list, "ctx_*.json", "json_files")
+        self._refresh_file_list(self.app.json_list, "ctx_*.json", "_json_files")
 
     def preview_json_selected(self) -> None:
         """Hiển thị nội dung của tệp JSON được chọn."""
-        self._preview_selected_file(self.app.json_list, "json_files", "JSON")
+        self._preview_selected_file(self.app.json_list, "_json_files", "JSON")
+
+    def load_json_selected(self) -> None:
+        """Tải và áp dụng cấu hình từ tệp JSON được chọn."""
+        self.logger.debug("Bắt đầu tải cấu hình từ tệp JSON được chọn.")
+        # Placeholder for future implementation
+        ui_builder.show_message("Thông báo", "Chức năng tải cấu hình từ JSON chưa được cài đặt.")
 
     def delete_json_selected(self) -> None:
         """Xóa tệp JSON được chọn."""
         self._delete_selected_file(
-            self.app.json_list, "json_files", self.refresh_json_list, "JSON"
+            self.app.json_list, "_json_files", self.refresh_json_list, "JSON"
         )
+
+    def open_json_folder(self) -> None:
+        """Mở thư mục chứa các tệp JSON."""
+        self.logger.debug("Bắt đầu mở thư mục JSON.")
+        # Re-use the same folder as reports
+        self.open_reports_folder()

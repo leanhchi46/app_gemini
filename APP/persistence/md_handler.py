@@ -74,7 +74,7 @@ class MdSaver:
         """
         logger.debug("Bắt đầu lưu báo cáo Markdown.")
         try:
-            reports_dir = workspace_config.get_reports_dir(cfg.symbol)
+            reports_dir = workspace_config.get_reports_dir(cfg.mt5.symbol)
             if not reports_dir:
                 logger.error("Không thể xác định thư mục Reports để lưu file .md.")
                 return None
@@ -91,8 +91,8 @@ class MdSaver:
             # Dọn dẹp các file .md cũ, sử dụng giá trị từ config
             general_utils.cleanup_old_files(
                 directory=reports_dir,
-                pattern="report_*.md",
-                max_files=cfg.persistence.max_md_reports
+                pattern="*.md",
+                keep_n=cfg.persistence.max_md_reports,
             )
             
             logger.debug("Kết thúc việc lưu báo cáo Markdown.")

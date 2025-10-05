@@ -47,11 +47,11 @@ class UploadCache:
     def load() -> Dict[str, Any]:
         """Tải cache upload từ file JSON."""
         logger.debug("Đang thử tải cache upload.")
-        if not FILES.UPLOAD_CACHE_JSON.exists():
+        if not PATHS.UPLOAD_CACHE_JSON.exists():
             logger.debug("File cache upload không tồn tại. Trả về cache rỗng.")
             return {}
         try:
-            with open(FILES.UPLOAD_CACHE_JSON, "r", encoding="utf-8") as f:
+            with open(PATHS.UPLOAD_CACHE_JSON, "r", encoding="utf-8") as f:
                 cache_data = json.load(f)
             logger.debug(f"Đã tải cache upload với {len(cache_data)} mục.")
             return cache_data
@@ -64,7 +64,7 @@ class UploadCache:
         """Lưu cache upload vào file JSON."""
         logger.debug(f"Đang lưu cache upload với {len(cache)} mục.")
         try:
-            with open(FILES.UPLOAD_CACHE_JSON, "w", encoding="utf-8") as f:
+            with open(PATHS.UPLOAD_CACHE_JSON, "w", encoding="utf-8") as f:
                 json.dump(cache, f, ensure_ascii=False, indent=2)
             logger.debug("Đã lưu cache upload thành công.")
         except IOError as e:
@@ -245,7 +245,7 @@ def upload_image_to_gemini(
     
     try:
         mime_type, _ = mimetypes.guess_type(image_path)
-        uploaded_file = genai.upload_file(
+        uploaded_file = genai.files.upload(
             path=image_path,
             mime_type=mime_type or "application/octet-stream",
             display_name=display_name,
@@ -257,7 +257,7 @@ def upload_image_to_gemini(
         delay = 0.6
         while time.monotonic() - start_time < timeout:
             time.sleep(delay)
-            file_status = genai.get_file(uploaded_file.name)
+            file_status = genai.files.get(uploaded_file.name)
             state_name = getattr(getattr(file_status, "state", None), "name", "UNKNOWN")
             logger.debug(f"Kiểm tra trạng thái tệp cho '{display_name}': {state_name}. Thời gian đã trôi qua: {time.monotonic() - start_time:.1f}s")
 
@@ -267,7 +267,7 @@ def upload_image_to_gemini(
             if state_name == "FAILED":
                 logger.error(f"Tải lên không thành công cho '{display_name}'. Trạng thái là FAILED.")
                 try:
-                    genai.delete_file(uploaded_file.name)
+                    genai.files.delete(uploaded_file.name)
                     logger.debug(f"Đã xóa cấu phần tệp không thành công: {uploaded_file.name}")
                 except Exception as del_e:
                     logger.warning(f"Không thể xóa cấu phần tệp không thành công: {del_e}")

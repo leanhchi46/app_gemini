@@ -30,6 +30,7 @@ class Paths:
 
     # Thư mục gốc của ứng dụng trong thư mục home của người dùng
     APP_DIR: Path = Path.home() / ".gemini_folder_analyze"
+    PROMPTS_DIR: Path = Path.cwd() / "APP" / "prompts"
 
     # Các file cấu hình và cache quan trọng
     WORKSPACE_JSON: Path = APP_DIR / "workspace.json"

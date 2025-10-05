@@ -303,7 +303,7 @@ def parse_mt5_data_to_report(safe_mt5_data: SafeData) -> str:
             # Chuyển đổi chuỗi ISO thành đối tượng datetime và lấy tên múi giờ
             dt_obj = datetime.fromisoformat(broker_time_iso.replace("Z", "+00:00"))
             if dt_obj.tzinfo:
-                broker_tz_str = dt_obj.tzinfo.key
+                broker_tz_str = dt_obj.tzinfo.tzname(None) or broker_tz_str
         except (ValueError, AttributeError):
             logger.warning(f"Không thể phân tích múi giờ từ broker_time: {broker_time_iso}")
 

@@ -125,6 +125,8 @@ class PromptManager:
         """
         logger.debug("Bắt đầu định dạng lại prompt area.")
         try:
+            if not self.app.prompt_nb:
+                return
             selected_tab_index = self.app.prompt_nb.index(self.app.prompt_nb.select())
             if selected_tab_index == 0:
                 widget = self.app.prompt_no_entry_text
@@ -133,14 +135,15 @@ class PromptManager:
                 widget = self.app.prompt_entry_run_text
                 logger.debug("Định dạng lại tab 'Entry/Run'.")
 
-            raw = widget.get("1.0", "end")
-            pretty = self._normalize_prompt_text(raw)
-            widget.delete("1.0", "end")
-            widget.insert("1.0", pretty)
-            ui_builder.show_status_message(self.app, "Đã định dạng lại prompt.")
+            if widget:
+                raw = widget.get("1.0", "end")
+                pretty = self._normalize_prompt_text(raw)
+                widget.delete("1.0", "end")
+                widget.insert("1.0", pretty)
+                self.app.ui_status("Đã định dạng lại prompt.")
             logger.debug("Định dạng lại prompt area thành công.")
         except Exception as e:
-            ui_builder.show_message_box("Lỗi định dạng prompt", f"Đã xảy ra lỗi: {e}", "error")
+            ui_builder.show_message(title="Lỗi định dạng prompt", message=f"Đã xảy ra lỗi: {e}")
             logger.exception("Lỗi khi định dạng lại prompt area.")
 
     def load_prompts_from_disk(self, silent: bool = False) -> None:
@@ -157,6 +160,8 @@ class PromptManager:
         }
         loaded_count = 0
         for key, (path, widget) in files_to_load.items():
+            if not widget:
+                continue
             try:
                 if path.exists():
                     raw = path.read_text(encoding="utf-8", errors="ignore")
@@ -171,11 +176,11 @@ class PromptManager:
                     logger.warning(f"Không tìm thấy file prompt: {path.name}")
             except Exception as e:
                 if not silent:
-                    ui_builder.show_message_box(f"Lỗi tải {path.name}", f"Đã xảy ra lỗi: {e}", "error")
+                    ui_builder.show_message(title=f"Lỗi tải {path.name}", message=f"Đã xảy ra lỗi: {e}")
                 logger.exception(f"Lỗi khi tải prompt từ file '{path.name}'.")
 
         if loaded_count > 0 and not silent:
-            ui_builder.show_status_message(self.app, f"Đã tải {loaded_count} prompt từ file.")
+            self.app.ui_status(f"Đã tải {loaded_count} prompt từ file.")
         logger.debug("Kết thúc tải prompts từ đĩa.")
 
     def save_current_prompt_to_disk(self) -> None:
@@ -184,6 +189,8 @@ class PromptManager:
         """
         logger.debug("Bắt đầu lưu prompt hiện tại vào đĩa.")
         try:
+            if not self.app.prompt_nb:
+                return
             selected_tab_index = self.app.prompt_nb.index(self.app.prompt_nb.select())
             if selected_tab_index == 0:
                 widget = self.app.prompt_no_entry_text
@@ -194,12 +201,13 @@ class PromptManager:
                 path = self.prompt_entry_run_path
                 logger.debug("Lưu prompt từ tab 'Entry/Run'.")
 
-            content = widget.get("1.0", "end-1c")  # -1c để bỏ qua newline cuối cùng
-            path.write_text(content, encoding="utf-8")
-            ui_builder.show_message_box("Lưu thành công", f"Đã lưu prompt vào {path.name}", "info")
+            if widget:
+                content = widget.get("1.0", "end-1c")  # -1c để bỏ qua newline cuối cùng
+                path.write_text(content, encoding="utf-8")
+                ui_builder.show_message(title="Lưu thành công", message=f"Đã lưu prompt vào {path.name}")
             logger.info(f"Đã lưu prompt thành công vào: {path.name}")
         except Exception as e:
-            ui_builder.show_message_box("Lỗi lưu file", f"Đã xảy ra lỗi: {e}", "error")
+            ui_builder.show_message(title="Lỗi lưu file", message=f"Đã xảy ra lỗi: {e}")
             logger.exception("Lỗi khi lưu prompt vào file.")
 
     def get_prompts(self) -> dict[str, str]:
@@ -210,8 +218,14 @@ class PromptManager:
             Một dictionary chứa prompt 'no_entry' và 'entry_run'.
         """
         logger.debug("Đang lấy nội dung prompts từ UI.")
-        no_entry_prompt = self.app.prompt_no_entry_text.get("1.0", "end-1c")
-        entry_run_prompt = self.app.prompt_entry_run_text.get("1.0", "end-1c")
+        no_entry_prompt = ""
+        if self.app.prompt_no_entry_text:
+            no_entry_prompt = self.app.prompt_no_entry_text.get("1.0", "end-1c")
+        
+        entry_run_prompt = ""
+        if self.app.prompt_entry_run_text:
+            entry_run_prompt = self.app.prompt_entry_run_text.get("1.0", "end-1c")
+
         return {
             "no_entry": no_entry_prompt,
             "entry_run": entry_run_prompt,

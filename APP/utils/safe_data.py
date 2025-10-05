@@ -50,6 +50,31 @@ class SafeData:
         logger.debug(f"Get top-level key '{key}': {result}")
         return result
 
+    def get_nested(self, key_path: str, default: Any = None) -> Any:
+        """
+        Truy cập an toàn một giá trị lồng nhau bằng cách sử dụng một chuỗi đường dẫn.
+        Ví dụ: "volatility.ATR.M5"
+        """
+        keys = key_path.split('.')
+        value = self._data
+        for key in keys:
+            if isinstance(value, dict):
+                value = value.get(key)
+            else:
+                return default
+        return value if value is not None else default
+
+    def to_json(self, indent: Optional[int] = None) -> str:
+        """
+        Chuyển đổi dữ liệu nội bộ thành một chuỗi JSON.
+        """
+        import json
+        try:
+            return json.dumps(self._data, indent=indent, ensure_ascii=False)
+        except TypeError:
+            # Fallback for non-serializable objects, though this should be rare
+            return str(self._data)
+
     def get_tick_value(self, key: str, default: Any = None) -> Any:
         """
         Truy cập an toàn một giá trị từ từ điển 'tick'.

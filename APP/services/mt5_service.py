@@ -7,10 +7,13 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from statistics import median
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional, Sequence, cast
 from zoneinfo import ZoneInfo
 
-import MetaTrader5 as mt5
+import MetaTrader5 as mt5_lib
+
+# Assign mt5_lib to a new variable typed as Any to suppress pyright errors
+mt5: Any = mt5_lib
 
 from APP.analysis import ict_analyzer
 from APP.analysis.ict_analyzer import LiquidityLevel
@@ -121,6 +124,29 @@ def pip_size_from_info(info: dict | Any) -> float:
     result = point * ppp if point else 0.0
     logger.debug(f"Kết thúc pip_size_from_info. Point: {point}, PPP: {ppp}, Pip Size: {result}")
     return result
+
+
+def points_to_pips(points: float, info: dict | Any) -> float | None:
+    """Chuyển đổi giá trị từ point sang pip."""
+    ppp = points_per_pip_from_info(info)
+    if ppp == 0:
+        return None
+    return points / ppp
+
+
+def get_spread_pips(info: dict | Any, tick: dict | Any) -> float | None:
+    """Lấy spread hiện tại và chuyển đổi sang pip."""
+    spread_points = info_get(info, "spread_current")
+    if spread_points is None:
+        # Fallback for brokers that don't provide spread in symbol_info
+        bid = info_get(tick, "bid", 0.0)
+        ask = info_get(tick, "ask", 0.0)
+        point = info_get(info, "point", 0.0)
+        if bid > 0 and ask > 0 and point > 0:
+            spread_points = (ask - bid) / point
+        else:
+            return None
+    return points_to_pips(float(spread_points), info)
 
 
 def info_get(info: dict | Any, key: str, default: Any = None) -> Any:
@@ -316,7 +342,7 @@ def vwap_from_rates(rates: Sequence[dict] | None) -> float | None:
     return result
 
 
-def adr_stats(symbol: str, n: int = 20) -> dict[str, float] | None:
+def adr_stats(symbol: str, n: int = 20) -> dict[str, float | None] | None:
     """Average Daily Range stats for last n days (d5/d10/d20)."""
     logger.debug(f"Bắt đầu adr_stats cho symbol: {symbol}, n: {n}")
     if mt5 is None:
@@ -334,7 +360,7 @@ def adr_stats(symbol: str, n: int = 20) -> dict[str, float] | None:
     def _avg(m: int) -> float | None:
         return sum(ranges[-m:]) / max(1, m) if len(ranges) >= m else None
 
-    result = {"d5": _avg(5), "d10": _avg(10), "d20": _avg(20)}  # type: ignore[return-value]
+    result = {"d5": _avg(5), "d10": _avg(10), "d20": _avg(20)}
     logger.debug(f"Kết thúc adr_stats. Kết quả: {result}")
     return result
 
@@ -418,6 +444,45 @@ def session_ranges_today(m1_rates: Sequence[dict] | None) -> dict[str, dict]:
     result = _killzone_ranges_vn(d=None)
     logger.debug("Kết thúc session_ranges_today.")
     return result
+
+
+def get_active_killzone(d: datetime, target_tz: str | None) -> tuple[bool, str | None]:
+    """
+    Kiểm tra xem thời gian đã cho có nằm trong bất kỳ killzone nào không.
+    Trả về (is_in_zone, zone_name).
+    """
+    logger.debug(f"Bắt đầu get_active_killzone cho {d} với timezone {target_tz}")
+    try:
+        tz = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
+        # Nếu d không có timezone, gán timezone cho nó
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=tz)
+        else:
+            d = d.astimezone(tz)
+        
+        now_hhmm = d.strftime("%H:%M")
+        
+        kills = _killzone_ranges_vn(d=d)
+        
+        order = ["asia", "london", "newyork_am", "newyork_pm"]
+        for k in order:
+            kz = kills.get(k)
+            if not kz:
+                continue
+            st, ed = kz["start"], kz["end"]
+            if st > ed:  # Xử lý các phiên qua đêm như NY PM
+                if now_hhmm >= st or now_hhmm < ed:
+                    logger.debug(f"Đang trong killzone {k}")
+                    return True, k
+            elif st <= now_hhmm < ed:
+                logger.debug(f"Đang trong killzone {k}")
+                return True, k
+                
+        logger.debug("Không trong killzone nào.")
+        return False, None
+    except Exception:
+        logger.exception("Lỗi khi xác định killzone đang hoạt động.")
+        return False, None
 
 
 def _series_from_mt5(symbol: str, tf_code: int, bars: int) -> list[dict]:
@@ -504,13 +569,13 @@ def _nearby_key_levels(
     return out
 
 
-def build_mt5_context(
-    symbol: str,
+def get_market_data(
     cfg: "MT5Config",
     *,
     return_json: bool = False,
     plan: dict | None = None,
-) -> SafeData:
+) -> SafeData | str:
+    symbol = cfg.symbol
     """
     Fetches MT5 data + computes helpers used by the app.
     Returns a JSON string (default) containing a single object with key MT5_DATA.
@@ -700,9 +765,13 @@ def build_mt5_context(
     if daily:
         hi = daily.get("high")
         lo = daily.get("low")
-        eq50 = (hi + lo) / 2.0 if (hi and lo) else None
-        daily["eq50"] = eq50
-        daily["midnight_open"] = midnight_open
+        eq50_val: Optional[float] = None
+        if hi is not None and lo is not None:
+            eq50_val = (float(hi) + float(lo)) / 2.0
+        daily.update({
+            "eq50": eq50_val,
+            "midnight_open": midnight_open
+        })
         logger.debug(f"Đã enrich daily data: {daily}")
 
     # Sessions and VWAPs
@@ -770,7 +839,7 @@ def build_mt5_context(
 
     # ADR and day position
     adr = adr_stats(symbol, n=20)
-    # day_open = daily.get("open") if daily else None # Biến này không được sử dụng
+    # day_open = daily.get("open") if daily else None
     prev_close = None
     try:
         d1_prev_close_arr = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, 1)
@@ -881,7 +950,7 @@ def build_mt5_context(
             if (a > 0 and b > 0)
             else None
         )
-    atr_norm = {"spread_as_pct_of_atr_m5": None}
+    atr_norm: dict[str, float | None] = {"spread_as_pct_of_atr_m5": None}
     if spread_points and atr_m5_now and atr_m5_now > 0 and getattr(info, "point", None):
         atr_norm["spread_as_pct_of_atr_m5"] = (
             spread_points / (atr_m5_now / (getattr(info, "point", 0.01) or 0.01))
@@ -891,6 +960,7 @@ def build_mt5_context(
     # Risk block from plan (optional, minimal)
     risk_model = None
     rr_projection = None
+    ppp = points_per_pip_from_info(info_obj)
     if plan and info and ppp and (val := value_per_point(symbol, info)):
         try:
             entry = plan.get("entry")
@@ -1023,6 +1093,18 @@ def build_mt5_context(
     return safe_data_obj
 
 
+def is_connected() -> bool:
+    """Kiểm tra xem kết nối MT5 có đang hoạt động hay không."""
+    if mt5 is None:
+        return False
+    try:
+        # Lấy thông tin terminal để kiểm tra kết nối
+        info = mt5.terminal_info()
+        return info is not None
+    except Exception:
+        return False
+
+
 # ------------------------------
 # Trading action helpers
 # ------------------------------
@@ -1040,7 +1122,7 @@ def calculate_lots(
     Tính toán khối lượng giao dịch dựa trên rủi ro.
     """
     logger.debug(f"Bắt đầu calculate_lots cho {symbol} với risk_multiplier={risk_multiplier}")
-    if not all([symbol, entry_price, sl_price, info, account]):
+    if not all([entry_price, sl_price, info, account]):
         logger.error("Thiếu thông tin đầu vào để tính toán lots.")
         return None
 
@@ -1213,7 +1295,7 @@ def order_send_smart(request: dict[str, Any], retries: int = 3, delay: float = 0
     return None
 
 
-def close_position_partial(ticket: int, percentage: float) -> bool:
+def close_position_partial(ticket: int, percentage: float) -> bool | None:
     """Đóng một phần vị thế."""
     logger.debug(f"Bắt đầu close_position_partial cho ticket {ticket}, percentage {percentage}")
     pos = mt5.positions_get(ticket=ticket)
@@ -1243,7 +1325,9 @@ def close_position_partial(ticket: int, percentage: float) -> bool:
     }
     
     result = order_send_smart(request)
-    return result and result.retcode == mt5.TRADE_RETCODE_DONE
+    if result:
+        return result.retcode == mt5.TRADE_RETCODE_DONE
+    return False
 
 
 def get_last_swing_low_high(symbol: str, timeframe: int, bars: int, pivot_strength: int = 2) -> tuple[float | None, float | None]:
@@ -1288,7 +1372,7 @@ def get_last_swing_low_high(symbol: str, timeframe: int, bars: int, pivot_streng
     return last_swing_low, last_swing_high
 
 
-def modify_position(ticket: int, sl: float | None = None, tp: float | None = None) -> bool:
+def modify_position(ticket: int, sl: float | None = None, tp: float | None = None) -> bool | None:
     """Sửa đổi Stop Loss và/hoặc Take Profit cho một vị thế."""
     logger.debug(f"Bắt đầu modify_position cho ticket {ticket} với SL={sl}, TP={tp}")
     pos = mt5.positions_get(ticket=ticket)
@@ -1307,4 +1391,6 @@ def modify_position(ticket: int, sl: float | None = None, tp: float | None = Non
     }
     
     result = order_send_smart(request)
-    return result and result.retcode == mt5.TRADE_RETCODE_DONE
+    if result:
+        return result.retcode == mt5.TRADE_RETCODE_DONE
+    return False

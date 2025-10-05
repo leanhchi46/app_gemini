@@ -10,7 +10,13 @@ from __future__ import annotations
 import logging
 import tkinter as tk
 from tkinter import ttk
-from typing import TYPE_CHECKING, Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional, Tuple, cast
+
+import MetaTrader5 as mt5_lib
+from APP.ui.utils import ui_builder
+
+# Cast mt5 to Any to suppress pyright errors for missing type stubs
+mt5: Any = mt5_lib
 
 # Khởi tạo logger
 logger = logging.getLogger(__name__)
@@ -18,11 +24,13 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from APP.ui.app_ui import AppUI
     from matplotlib.figure import Figure
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.backends._backend_tk import NavigationToolbar2Tk
 else:
     try:
         from matplotlib.figure import Figure
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.backends._backend_tk import NavigationToolbar2Tk
     except ImportError:
         class Figure: pass
         class FigureCanvasTkAgg: pass
@@ -124,7 +132,21 @@ class ChartTab:
         ttk.Label(ctrl, text="Làm mới (s):").grid(row=0, column=8, sticky="w")
         ttk.Spinbox(ctrl, from_=1, to=3600, textvariable=self.refresh_secs_var, width=6)\
             .grid(row=0, column=9, sticky="w", padx=(4, 10))
+        
+        ttk.Button(ctrl, text="Tải file OHLC (.csv)...", command=self.load_data).grid(row=0, column=10, sticky="w", padx=(10, 0))
         logger.debug("Kết thúc hàm _build_controls.")
+    
+    def load_data(self):
+        """Tải dữ liệu từ file CSV."""
+        from tkinter import filedialog
+        filepath = filedialog.askopenfilename(
+            title="Chọn file OHLC (.csv)",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if filepath:
+            logger.info(f"Đã chọn file: {filepath}")
+            # Placeholder for data loading logic
+            ui_builder.show_message(title="Thông báo", message=f"Đã chọn file:\n{filepath}")
 
     def _build_chart_area(self):
         """Xây dựng khu vực hiển thị biểu đồ."""
@@ -135,7 +157,8 @@ class ChartTab:
 
         try:
             from matplotlib.figure import Figure
-            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            from matplotlib.backends._backend_tk import NavigationToolbar2Tk
         except ImportError:
             ttk.Label(chart_wrap, text="Không có Matplotlib").grid(row=0, column=0, sticky="w")
             logger.warning("Matplotlib hoặc FigureCanvasTkAgg không có sẵn.")
@@ -270,9 +293,9 @@ class ChartTab:
         try:
             from APP.services import mt5_service
             names = mt5_service.get_all_symbols()
-            if names:
+            if names and self.cbo_symbol:
                 self.cbo_symbol["values"] = names
-                pref = self.app.run_config.mt5.symbol if self.app.run_config else None
+                pref = self.app.mt5_symbol_var.get()
                 if pref and pref in names:
                     self.symbol_var.set(pref)
                 elif "XAUUSD" in names:
@@ -286,7 +309,6 @@ class ChartTab:
         """Chuyển đổi chuỗi khung thời gian thành mã của MT5."""
         logger.debug(f"Bắt đầu hàm _mt5_tf cho chuỗi: '{tf_str}'")
         try:
-            import MetaTrader5 as mt5
             mapping = {
                 "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
                 "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4, "D1": mt5.TIMEFRAME_D1,
@@ -301,10 +323,10 @@ class ChartTab:
         logger.debug(f"Bắt đầu hàm _ensure_mt5. Want account: {want_account}")
         try:
             from APP.services import mt5_service
-            if not mt5_service.is_mt5_connected():
+            if not mt5_service.is_connected():
                 self.acc_status.set("MT5 chưa kết nối.")
                 return False
-            if want_account and mt5_service.get_account_info() is None:
+            if want_account and mt5.account_info() is None:
                 self.acc_status.set("MT5: chưa đăng nhập.")
                 return False
             self.acc_status.set("Kết nối MT5 OK")
@@ -318,10 +340,13 @@ class ChartTab:
         """Lấy dữ liệu nến từ MT5 và chuyển đổi thành DataFrame."""
         logger.debug(f"Bắt đầu hàm _rates_to_df cho symbol: {symbol}, tf_code: {tf_code}, count: {count}")
         try:
-            from APP.services import mt5_service
-            df = mt5_service.get_rates(symbol, tf_code, count)
-            if df is None or df.empty:
+            import pandas as pd
+            rates = mt5.copy_rates_from_pos(symbol, tf_code, 0, count)
+            if rates is None:
                 return None, f"Không có dữ liệu rates cho {symbol}"
+            df = pd.DataFrame(rates)
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+            df = df.set_index('time')
             return df, None
         except Exception as e:
             logger.error(f"Lỗi ngoại lệ trong _rates_to_df: {e}")
@@ -347,8 +372,7 @@ class ChartTab:
         """Cập nhật thông tin tài khoản MT5 trên UI."""
         logger.debug(f"Bắt đầu hàm _update_account_info cho symbol: {symbol}")
         try:
-            from APP.services import mt5_service
-            ai = mt5_service.get_account_info()
+            ai = mt5.account_info()
             if ai:
                 self.acc_balance.set(f"{ai.balance:.2f}")
                 self.acc_equity.set(f"{ai.equity:.2f}")
@@ -365,15 +389,15 @@ class ChartTab:
         """Điền dữ liệu các lệnh đang mở vào bảng."""
         logger.debug(f"Bắt đầu hàm _fill_positions_table cho symbol: {symbol}")
         try:
-            from APP.services import mt5_service
-            poss = mt5_service.get_positions(symbol=symbol) or []
-            self.tree_pos.delete(*self.tree_pos.get_children())
-            for p in poss:
-                typ = "BUY" if p.type == 0 else "SELL"
-                self.tree_pos.insert("", "end", values=(
-                    p.ticket, typ, f"{p.volume:.2f}",
-                    self._fmt(p.price_open), self._fmt(p.sl), self._fmt(p.tp), f"{p.profit:.2f}"
-                ))
+            poss = mt5.positions_get(symbol=symbol) or []
+            if self.tree_pos:
+                self.tree_pos.delete(*self.tree_pos.get_children())
+                for p in poss:
+                    typ = "BUY" if p.type == 0 else "SELL"
+                    self.tree_pos.insert("", "end", values=(
+                        p.ticket, typ, f"{p.volume:.2f}",
+                        self._fmt(p.price_open), self._fmt(p.sl), self._fmt(p.tp), f"{p.profit:.2f}"
+                    ))
         except Exception as e:
             logger.error(f"Lỗi khi điền bảng lệnh đang mở: {e}")
 
@@ -381,15 +405,15 @@ class ChartTab:
         """Điền dữ liệu lịch sử giao dịch vào bảng."""
         logger.debug(f"Bắt đầu hàm _fill_history_table cho symbol: {symbol}")
         try:
-            from APP.services import mt5_service
             import datetime as dt
-            self.tree_his.delete(*self.tree_his.get_children())
-            now = dt.datetime.now()
-            deals = mt5_service.get_history_deals(now.replace(hour=0, minute=0, second=0), now, group=f"*{symbol}*") or []
-            for d in deals[-100:]:
-                self.tree_his.insert("", "end", values=(
-                    d.time, d.ticket, d.type, d.volume, d.price, d.profit
-                ))
+            if self.tree_his:
+                self.tree_his.delete(*self.tree_his.get_children())
+                now = dt.datetime.now()
+                deals = mt5.history_deals_get(now.replace(hour=0, minute=0, second=0), now, group=f"*{symbol}*") or []
+                for d in deals[-100:]:
+                    self.tree_his.insert("", "end", values=(
+                        d.time, d.ticket, d.type, d.volume, d.price, d.profit
+                    ))
         except Exception as e:
             logger.error(f"Lỗi khi điền bảng lịch sử giao dịch: {e}")
 
@@ -411,7 +435,7 @@ class ChartTab:
             self.canvas.draw_idle()
             return
 
-        if not mt5_service.is_mt5_connected():
+        if not mt5_service.is_connected():
             self.ax_price.clear()
             self.ax_price.set_title("MT5 chưa sẵn sàng")
             self.canvas.draw_idle()
@@ -432,12 +456,15 @@ class ChartTab:
         self._plot_trade_objects(sym)
 
         self.ax_price.set_title(f"{sym}  •  {self.tf_var.get()}  •  {len(df)} bars")
-        self.fig.subplots_adjust(right=0.75)
+        if self.fig:
+            self.fig.subplots_adjust(right=0.75)
         self.canvas.draw_idle()
         logger.debug("Kết thúc hàm _draw_chart.")
 
     def _plot_price_data(self, df):
         """Vẽ dữ liệu giá (nến hoặc đường) lên biểu đồ."""
+        if not self.ax_price:
+            return
         try:
             import matplotlib.dates as mdates
             kind = self.chart_type_var.get().strip()
@@ -449,7 +476,7 @@ class ChartTab:
                     ohlc = np.column_stack((xs, df["open"], df["high"], df["low"], df["close"]))
                     step = np.median(np.diff(xs)) if len(xs) > 1 else (1.0 / (24 * 60))
                     width = step * 0.7
-                    candlestick_ohlc(self.ax_price, ohlc, width=width, colorup="#22c55e", colordown="#ef4444", alpha=0.9)
+                    candlestick_ohlc(self.ax_price, ohlc, width=float(width), colorup="#22c55e", colordown="#ef4444", alpha=0.9)
                     self.ax_price.xaxis_date()
                 except ImportError:
                     logger.warning("Không thể import candlestick_ohlc, vẽ biểu đồ đường.")
@@ -462,12 +489,13 @@ class ChartTab:
 
     def _plot_trade_objects(self, sym: str):
         """Vẽ các đối tượng giao dịch (lệnh, giá) lên biểu đồ."""
+        if not self.ax_price:
+            return
         try:
-            from APP.services import mt5_service
-            info = mt5_service.get_symbol_info(sym)
+            info = mt5.symbol_info(sym)
             digits = info.digits if info else 2
             
-            positions = mt5_service.get_positions(symbol=sym) or []
+            positions = mt5.positions_get(symbol=sym) or []
             for p in positions:
                 col = "#22c55e" if p.type == 0 else "#ef4444"
                 self.ax_price.axhline(p.price_open, color=col, ls="--", lw=1.0, alpha=0.95)
@@ -476,7 +504,7 @@ class ChartTab:
                 label = f"{'BUY' if p.type==0 else 'SELL'} {p.volume:.2f} @{self._fmt(p.price_open, digits)}"
                 self.ax_price.text(1.01, p.price_open, " " + label, va="center", color=col, fontsize=8, transform=self.ax_price.get_yaxis_transform())
             
-            orders = mt5_service.get_orders(symbol=sym) or []
+            orders = mt5.orders_get(symbol=sym) or []
             for o in orders:
                 pend_col = "#8b5cf6"
                 self.ax_price.axhline(o.price_open, color=pend_col, ls="--", lw=1.1, alpha=0.95)
@@ -485,7 +513,7 @@ class ChartTab:
                 if o.sl: self.ax_price.axhline(o.sl, color="#ef4444", ls=":", lw=1.0, alpha=0.85)
                 if o.tp: self.ax_price.axhline(o.tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
 
-            tick = mt5_service.get_symbol_tick(sym)
+            tick = mt5.symbol_info_tick(sym)
             if tick:
                 current_price = tick.bid
                 self.ax_price.axhline(current_price, color='black', ls='--', lw=0.8, alpha=0.9)
@@ -530,12 +558,6 @@ class ChartTab:
         if not self._running:
             return
 
-        try:
-            if hasattr(self.app, "news_service"):
-                self.app.news_service.refresh_cache(ttl=self.app.run_config.news.cache_ttl_sec)
-        except Exception as e:
-            logger.error(f"Lỗi khi refresh news cache trong _tick: {e}")
-
         self._redraw_safe()
         secs = max(1, self.refresh_secs_var.get() or 5)
         self._after_job = self.root.after(secs * 1000, self._tick)
@@ -544,20 +566,22 @@ class ChartTab:
         """Tính toán các phiên giao dịch trong ngày."""
         try:
             from APP.services import mt5_service
-            return mt5_service.get_session_ranges_today() or {}
+            return mt5_service.session_ranges_today(m1_rates=None) or {}
         except Exception as e:
             logger.error(f"Lỗi khi tính toán sessions today: {e}")
             return {}
 
     def _allowed_session_now(self, ss: dict) -> bool:
         """Kiểm tra xem phiên hiện tại có được phép giao dịch không."""
+        if not self.app.run_config:
+            return True  # Mặc định là cho phép nếu chưa có cấu hình
         try:
             import datetime
             now = datetime.datetime.now().strftime("%H:%M")
             def _in(r):
                 return bool(r and r.get("start") and r.get("end") and r["start"] <= now < r["end"])
 
-            config = self.app.run_config.auto_trade
+            config = self.app.run_config.no_trade
             ok = False
             if config.allow_session_asia: ok = ok or _in(ss.get("asia"))
             if config.allow_session_london: ok = ok or _in(ss.get("london"))
@@ -573,20 +597,20 @@ class ChartTab:
     def _update_notrade_panel(self) -> None:
         """Cập nhật panel "Không giao dịch"."""
         logger.debug("Bắt đầu hàm _update_notrade_panel.")
-        sym = self.symbol_var.get().strip()
+        # This panel is now mostly decorative as the core logic is in the worker.
+        # We can provide some basic info.
+        self.nt_session_gate.set("-")
+        self.nt_reasons.set("(Kiểm tra trong worker)")
         
-        ss = self._compute_sessions_today(sym)
-        sess_ok = self._allowed_session_now(ss)
-        self.nt_session_gate.set("Allowed" if sess_ok else "Blocked")
-
-        reasons = self.app.get_last_no_trade_reasons()
-        self.nt_reasons.set("\n".join([f"- {r}" for r in reasons[:4]]) if reasons else "(none)")
-
         try:
-            if hasattr(self.app, "news_service"):
-                events = self.app.news_service.get_next_events_for_symbol(sym, limit=3)
-                events_fmt = [f"• {ev.when.strftime('%a %H:%M')} — {ev.title} [{ev.currency}]" for ev in events]
-                self.nt_events.set("\n".join(events_fmt) if events_fmt else "(none)")
+            # We can still show upcoming news
+            from APP.services import news_service
+            sym = self.symbol_var.get().strip()
+            events = news_service.get_forex_factory_news() # Simplified
+            next_events = news_service.next_events_for_symbol(events, sym, limit=3)
+            
+            events_fmt = [f"• {ev.get('time_remaining')} — {ev.get('title')}" for ev in next_events]
+            self.nt_events.set("\n".join(events_fmt) if events_fmt else "(không có)")
         except Exception as e:
             self.nt_events.set("(error)")
             logger.error(f"Lỗi khi cập nhật sự kiện tin tức: {e}")

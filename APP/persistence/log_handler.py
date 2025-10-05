@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -65,7 +66,7 @@ def setup_logging(config: Optional[LoggingConfig] = None) -> None:
         logging.basicConfig(
             level=logging.DEBUG,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            handlers=[rotating_handler, logging.StreamHandler(os.sys.stdout)],
+            handlers=[rotating_handler, logging.StreamHandler(sys.stdout)],
         )
         logger.info(
             f"Đã cấu hình logging xoay vòng. File log: {log_file}, "
@@ -100,7 +101,7 @@ def log_trade(
     )
     try:
         # Sử dụng workspace_config để lấy đúng thư mục reports
-        reports_dir = workspace_config.get_reports_dir(run_config.workspace_name)
+        reports_dir = workspace_config.get_reports_dir(run_config.folder.folder)
         if folder_override:
             target_dir = reports_dir / folder_override
         else:

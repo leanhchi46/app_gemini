@@ -51,7 +51,7 @@ def _handle_api_exception(
 
 
 def stream_gemini_response(
-    model: genai.GenerativeModel,
+    model: Any,
     parts: List[Any],
     tries: int = 5,
     base_delay: float = 2.0,
@@ -97,7 +97,7 @@ def stream_gemini_response(
 
 
 def gemini_api_call(
-    model: genai.GenerativeModel,
+    model: Any,
     parts: List[Any],
     tries: int = 5,
     base_delay: float = 2.0,
@@ -129,7 +129,11 @@ def gemini_api_call(
                 parts, request_options={"timeout": REQUEST_TIMEOUT}
             )
             logger.info(f"Lần thử {i+1}: Gọi Gemini API thành công.")
-            return getattr(response, "text", "")
+            # Cải tiến: Thay vì dùng getattr, truy cập trực tiếp vào parts để an toàn hơn
+            # và tương thích với các phiên bản API trong tương lai.
+            if response and response.parts:
+                return "".join(part.text for part in response.parts if hasattr(part, "text"))
+            return ""
         except (exceptions.ResourceExhausted, Exception) as e:
             last_exception = e
             _handle_api_exception(e, attempt=i, tries=tries, base_delay=base_delay)
