@@ -31,12 +31,21 @@ def get_workspace_dir() -> Path:
 def get_reports_dir(base_folder: str | Path, symbol: str) -> Path:
     """
     Lấy đường dẫn đến thư mục "Reports" cho một symbol cụ thể, tạo nó nếu chưa tồn tại.
-    Thư mục Reports được giả định là một thư mục con trực tiếp của base_folder.
+    
+    Logic chuẩn: `base_folder / symbol / "Reports"`.
     """
-    # Sửa lỗi logic: Thư mục `base_folder` do người dùng chọn (ví dụ: .../XAUUSD)
-    # đã chứa symbol. Thư mục Reports nằm trực tiếp bên trong nó.
-    # Tham số `symbol` được giữ lại để tương thích nhưng không còn được sử dụng để xây dựng đường dẫn.
-    reports_dir = Path(base_folder) / "Reports"
+    if not base_folder or not symbol:
+        logger.warning("Base folder hoặc symbol rỗng, không thể xác định thư mục reports.")
+        # Trả về một đường dẫn tạm thời trong thư mục làm việc để tránh lỗi
+        fallback_dir = Path.cwd() / "temp_reports"
+        fallback_dir.mkdir(exist_ok=True)
+        return fallback_dir
+
+    base_path = Path(base_folder)
+    # Chuẩn hóa symbol: loại bỏ các ký tự không hợp lệ cho tên thư mục
+    safe_symbol = "".join(c for c in symbol if c.isalnum() or c in ('-', '_')).rstrip()
+    
+    reports_dir = base_path / safe_symbol / "Reports"
     try:
         reports_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:

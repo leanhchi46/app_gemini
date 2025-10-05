@@ -56,10 +56,13 @@ class HistoryManager:
                 setattr(self.app, target_attr, [])
                 return
 
-            # Logic đã được sửa: chỉ phụ thuộc vào base_folder.
-            reports_dir = workspace_config.get_reports_dir(base_folder, "")
-            if not reports_dir.exists():
-                self.logger.warning(f"Thư mục báo cáo không tồn tại tại '{reports_dir}', không thể làm mới {target_attr}.")
+            # Logic được chuẩn hóa: phụ thuộc vào base_folder và symbol hiện tại.
+            symbol = self.app.mt5_symbol_var.get()
+            reports_dir = workspace_config.get_reports_dir(base_folder, symbol)
+            
+            # Sử dụng is_dir() để kiểm tra chính xác hơn
+            if not reports_dir.is_dir():
+                self.logger.warning(f"Thư mục báo cáo không tồn tại tại '{reports_dir}' cho symbol '{symbol}', không thể làm mới {target_attr}.")
                 setattr(self.app, target_attr, [])
                 return
 
@@ -202,9 +205,10 @@ class HistoryManager:
                 ui_builder.show_message("Thông báo", "Vui lòng chọn thư mục ảnh trước.")
                 return
 
-            # Đồng bộ logic: Không còn phụ thuộc vào symbol, nhất quán với `_refresh_file_list`.
-            reports_dir = workspace_config.get_reports_dir(base_folder, "")
-            if reports_dir.exists():
+            # Logic đã được chuẩn hóa: Sử dụng symbol hiện tại.
+            symbol = self.app.mt5_symbol_var.get()
+            reports_dir = workspace_config.get_reports_dir(base_folder, symbol)
+            if reports_dir.is_dir():
                 import os
                 os.startfile(reports_dir)
                 self.logger.debug(f"Đã yêu cầu mở thư mục: {reports_dir}")

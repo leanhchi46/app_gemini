@@ -720,9 +720,9 @@ class AppUI:
         self.ui_status("Đang dừng...")
 
     def choose_folder(self):
-        """Mở hộp thoại cho người dùng chọn thư mục chứa ảnh."""
+        """Mở hộp thoại cho người dùng chọn thư mục."""
         logger.debug("Mở hộp thoại chọn thư mục.")
-        folder = filedialog.askdirectory(title="Chọn thư mục chứa ảnh")
+        folder = filedialog.askdirectory(title="Chọn thư mục gốc chứa các Symbol (ví dụ: .../MQL5/Files/Screenshots)")
         if not folder:
             logger.debug("Người dùng đã hủy chọn thư mục.")
             return
@@ -784,6 +784,15 @@ class AppUI:
             msg = f"Đã nạp {count} ảnh. Sẵn sàng." if count else "Không tìm thấy ảnh phù hợp."
             ui_builder.enqueue(self, lambda: self.ui_status(msg))
             logger.info(f"Luồng quét đã hoàn tất, tìm thấy {count} file.")
+
+            # Cải tiến logic: Tự động đoán và cập nhật symbol sau khi quét file
+            # Điều này sẽ kích hoạt trace _on_symbol_changed và làm mới danh sách báo cáo
+            if self.results:
+                first_name = self.results[0].get("name", "")
+                guessed_symbol = general_utils.extract_symbol_from_filename(first_name)
+                if guessed_symbol and guessed_symbol != self.mt5_symbol_var.get():
+                    logger.info(f"Tự động đoán symbol từ tên file: {guessed_symbol}")
+                    ui_builder.enqueue(self, lambda: self.mt5_symbol_var.set(guessed_symbol))
 
         except Exception:
             logger.exception(f"Lỗi trong luồng quét thư mục {folder}.")
