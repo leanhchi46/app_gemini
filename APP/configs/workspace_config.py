@@ -45,7 +45,8 @@ def get_reports_dir(base_folder: str | Path, symbol: str) -> Path:
     # Chuẩn hóa symbol: loại bỏ các ký tự không hợp lệ cho tên thư mục
     safe_symbol = "".join(c for c in symbol if c.isalnum() or c in ('-', '_')).rstrip()
     
-    reports_dir = base_path / safe_symbol / "Reports"
+    # Sử dụng .resolve() để tạo một đường dẫn tuyệt đối, chuẩn hóa, tránh các lỗi tiềm ẩn
+    reports_dir = (base_path / safe_symbol / "Reports").resolve()
     try:
         reports_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:

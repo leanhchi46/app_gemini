@@ -203,11 +203,8 @@ class AppUI:
         # Load initial data through managers
         self.prompt_manager.load_prompts_from_disk()
 
-        # Cải tiến: Đảm bảo danh sách tệp được làm mới sau khi mọi thứ đã được tải
-        # Điều này khắc phục trường hợp UI không hiển thị danh sách tệp khi khởi động
-        logger.info("Thực hiện làm mới danh sách báo cáo và JSON lần cuối khi khởi động.")
-        self.history_manager.refresh_history_list()
-        self.history_manager.refresh_json_list()
+        # Xóa bỏ làm mới tự động khi khởi động để tránh race condition.
+        # Việc làm mới sẽ được thực hiện sau khi người dùng chọn thư mục hoặc tải workspace.
 
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
         logger.debug("AppUI đã khởi tạo xong.")
@@ -720,7 +717,7 @@ class AppUI:
         self.ui_status("Đang dừng...")
 
     def choose_folder(self):
-        """Mở hộp thoại cho người dùng chọn thư mục."""
+        """Mở hộp thoại cho người dùng chọn thư mục chứa ảnh."""
         logger.debug("Mở hộp thoại chọn thư mục.")
         folder = filedialog.askdirectory(title="Chọn thư mục gốc chứa các Symbol (ví dụ: .../MQL5/Files/Screenshots)")
         if not folder:
@@ -729,11 +726,6 @@ class AppUI:
         self.folder_path.set(folder)
         self._load_files(folder)
         logger.info(f"Đã chọn thư mục: {folder}")
-
-        # Cải tiến: Sau khi chọn thư mục mới, làm mới danh sách báo cáo
-        logger.debug("Làm mới danh sách báo cáo sau khi chọn thư mục mới.")
-        self.history_manager.refresh_history_list()
-        self.history_manager.refresh_json_list()
 
     def _load_files(self, folder: str):
         """
@@ -785,14 +777,14 @@ class AppUI:
             ui_builder.enqueue(self, lambda: self.ui_status(msg))
             logger.info(f"Luồng quét đã hoàn tất, tìm thấy {count} file.")
 
-            # Cải tiến logic: Tự động đoán và cập nhật symbol sau khi quét file
-            # Điều này sẽ kích hoạt trace _on_symbol_changed và làm mới danh sách báo cáo
-            if self.results:
-                first_name = self.results[0].get("name", "")
-                guessed_symbol = general_utils.extract_symbol_from_filename(first_name)
-                if guessed_symbol and guessed_symbol != self.mt5_symbol_var.get():
-                    logger.info(f"Tự động đoán symbol từ tên file: {guessed_symbol}")
-                    ui_builder.enqueue(self, lambda: self.mt5_symbol_var.set(guessed_symbol))
+            # Logic cuối cùng: Sau khi quét file, luôn làm mới danh sách
+            # báo cáo và context dựa trên symbol hiện tại trong UI.
+            def refresh_lists():
+                """Hàm helper để làm mới cả hai danh sách từ UI thread."""
+                self.history_manager.refresh_history_list()
+                self.history_manager.refresh_json_list()
+
+            ui_builder.enqueue(self, refresh_lists)
 
         except Exception:
             logger.exception(f"Lỗi trong luồng quét thư mục {folder}.")

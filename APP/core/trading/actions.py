@@ -34,9 +34,13 @@ def execute_trade_action(
         logger.debug(f"Không có setup chất lượng cao (Grade: {grade}). Bỏ qua.")
         return False
 
-    risk_multiplier = plan.get("risk_multiplier", 0.0)
+    try:
+        risk_multiplier = float(plan.get("risk_multiplier", 0.0))
+    except (ValueError, TypeError):
+        risk_multiplier = 0.0
+
     if risk_multiplier <= 0:
-        logger.warning(f"Risk multiplier không hợp lệ ({risk_multiplier}). Bỏ qua.")
+        logger.warning(f"Risk multiplier không hợp lệ hoặc bằng 0 ({risk_multiplier}). Bỏ qua.")
         return False
 
     lots = mt5_service.calculate_lots(

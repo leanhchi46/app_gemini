@@ -93,10 +93,20 @@ def deobfuscate_text(b64_text: str, salt: str) -> str:
         b64_text += "=" * (-len(b64_text) % 4)
         encrypted = base64.b64decode(b64_text.encode("utf-8"))
         decrypted = _xor_bytes(encrypted, key * (len(encrypted) // len(key) + 1))
-        result = decrypted.decode("utf-8")
+        # Sử dụng errors='replace' để xử lý các byte không hợp lệ,
+        # tránh crash và trả về một chuỗi có thể kiểm tra được.
+        result = decrypted.decode("utf-8", errors="replace")
+        # Kiểm tra xem kết quả có chứa ký tự thay thế không (U+FFFD),
+        # điều này cho thấy có lỗi giải mã.
+        if "\ufffd" in result:
+            logger.warning(
+                "Giải mã text tạo ra các ký tự không hợp lệ. "
+                "Khóa hoặc dữ liệu có thể bị hỏng. Trả về chuỗi rỗng."
+            )
+            return ""
         logger.debug("Đã deobfuscate text thành công.")
         return result
-    except (ValueError, TypeError, binascii.Error, UnicodeDecodeError) as e:
+    except (ValueError, TypeError, binascii.Error) as e:
         logger.warning(f"Lỗi khi deobfuscate text: {e}. Trả về chuỗi rỗng.")
         # Return empty string if the key is corrupted or invalid
         return ""
@@ -131,9 +141,9 @@ def cleanup_old_files(directory: Path, pattern: str, keep_n: int) -> None:
         f"Bắt đầu cleanup_old_files trong thư mục: {directory}, "
         f"pattern: {pattern}, giữ lại: {keep_n} file."
     )
-    if not directory or not directory.is_dir() or keep_n <= 0:
+    if not directory or not directory.is_dir() or keep_n < 0:
         logger.warning(
-            "Điều kiện cleanup không hợp lệ (directory trống/không tồn tại, hoặc keep_n <= 0)."
+            "Điều kiện cleanup không hợp lệ (directory trống/không tồn tại, hoặc keep_n < 0)."
         )
         return
     try:

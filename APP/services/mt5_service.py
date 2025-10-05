@@ -1263,7 +1263,7 @@ def order_send_smart(request: dict[str, Any], retries: int = 3, delay: float = 0
         mt5.TRADE_RETCODE_REQUOTE,
         mt5.TRADE_RETCODE_PRICE_OFF,
         mt5.TRADE_RETCODE_CONNECTION,
-        mt5.TRADE_RETCODE_SERVER_BUSY,
+        mt5.TRADE_RETCODE_TIMEOUT,  # Thay thế cho SERVER_BUSY
     }
 
     for attempt in range(retries):
