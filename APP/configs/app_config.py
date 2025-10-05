@@ -37,6 +37,8 @@ class ContextConfig:
     create_ctx_json: bool
     prefer_ctx_json: bool
     ctx_json_n: int
+    remember_context: bool
+    n_reports: int
 
 
 @dataclass(frozen=True)

@@ -310,8 +310,18 @@ def _create_concept_value_table(data: SafeData) -> str:
     add_row("Symbol", data.get('symbol'))
     add_row("Killzone Hiện tại", data.get('killzone_active', "Không có"))
     add_row("Chế độ Biến động", data.get('volatility_regime', "Không rõ"))
-    add_row("H1 Order Flow", data.get('ict_patterns', {}).get('mss_h1', {}).get('type', "Không rõ"))
-    add_row("M15 Structure", data.get('ict_patterns', {}).get('mss_m15', {}).get('type', "Không rõ"))
+    ict_patterns = data.get('ict_patterns', {})
+    
+    # Xử lý an toàn cho mss_h1, có thể là None
+    mss_h1 = ict_patterns.get('mss_h1')
+    h1_order_flow = mss_h1.get('type', "Không rõ") if isinstance(mss_h1, dict) else "Không rõ"
+    add_row("H1 Order Flow", h1_order_flow)
+
+    # Xử lý an toàn cho mss_m15, có thể là None
+    mss_m15 = ict_patterns.get('mss_m15')
+    m15_structure = mss_m15.get('type', "Không rõ") if isinstance(mss_m15, dict) else "Không rõ"
+    add_row("M15 Structure", m15_structure)
+
     add_row("Trong Cửa sổ Tin tức", data.get('news_analysis', {}).get('is_in_news_window'))
     
     upcoming = data.get('news_analysis', {}).get('upcoming_events', [])

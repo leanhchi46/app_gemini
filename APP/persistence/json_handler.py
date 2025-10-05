@@ -44,7 +44,9 @@ class JsonSaver:
             config: The RunConfig object containing all settings for the current run.
         """
         self.config: RunConfig = config
-        self.reports_dir: Path | None = workspace_config.get_reports_dir(self.config.folder.folder)
+        self.reports_dir: Path | None = workspace_config.get_reports_dir(
+            base_folder=self.config.folder.folder, symbol=self.config.mt5.symbol
+        )
         logger.debug(f"JsonSaver được khởi tạo cho workspace: {self.config.folder.folder}")
 
     def _log_proposed_trade(self, report_text: str, report_path: Path, context_obj: dict[str, Any]) -> None:

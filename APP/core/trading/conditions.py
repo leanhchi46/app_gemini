@@ -288,10 +288,15 @@ def handle_early_exit(
     from APP.services import telegram_service
 
     logger.info(f"Thoát sớm. Giai đoạn: {stage}, Lý do: {reason}")
-    worker.app.ui_status(f"Dừng: {reason}")
 
     # Đặt văn bản báo cáo cuối cùng để khối finally có thể lưu lại
-    worker.combined_text = f"Dừng sớm: {reason}."
+    report_text = f"Dừng sớm: {reason}."
+    worker.combined_text = report_text
+
+    # Cập nhật giao diện người dùng với lý do dừng
+    # Cả thanh trạng thái (chỉ dòng đầu) và vùng hiển thị chi tiết (toàn bộ)
+    worker.app.ui_queue.put(lambda: worker.app.ui_status(f"Dừng: {reason.splitlines()[0]}"))
+    worker.app.ui_queue.put(lambda: worker.app.ui_detail_replace(report_text))
     if worker.context_block:
         worker.combined_text += f"\n\n--- NGỮ CẢNH ---\n{worker.context_block}"
 

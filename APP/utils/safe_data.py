@@ -75,6 +75,12 @@ class SafeData:
             # Fallback for non-serializable objects, though this should be rare
             return str(self._data)
 
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Trả về một bản sao của từ điển dữ liệu nội bộ.
+        """
+        return self._data.copy()
+
     def get_tick_value(self, key: str, default: Any = None) -> Any:
         """
         Truy cập an toàn một giá trị từ từ điển 'tick'.

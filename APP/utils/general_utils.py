@@ -15,6 +15,7 @@ import logging
 import os
 import platform
 import re
+from datetime import timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -161,3 +162,38 @@ def extract_symbol_from_filename(filename: str) -> str | None:
         return match.group(1)
     logger.debug(f"Không tìm thấy symbol nào trong '{filename}'.")
     return None
+
+
+def format_timedelta(td: timedelta) -> str:
+    """
+    Định dạng một đối tượng timedelta thành một chuỗi dễ đọc.
+
+    Ví dụ: 2 days, 5 hours -> "2d 5h", 30 minutes -> "30m"
+
+    Args:
+        td: Đối tượng timedelta cần định dạng.
+
+    Returns:
+        Chuỗi đã được định dạng.
+    """
+    parts = []
+    total_seconds = int(td.total_seconds())
+    
+    if total_seconds < 0:
+        return "đã qua"
+
+    days = total_seconds // 86400
+    hours = (total_seconds % 86400) // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0 and days == 0: # Chỉ hiển thị phút nếu không có ngày
+        parts.append(f"{minutes}m")
+    if not parts and seconds > 0: # Chỉ hiển thị giây nếu không có gì khác
+        parts.append(f"{seconds}s")
+    
+    return " ".join(parts) if parts else "bây giờ"

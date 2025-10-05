@@ -50,9 +50,16 @@ class HistoryManager:
             return
         try:
             listbox.delete(0, "end")
-            reports_dir = workspace_config.get_reports_dir(self.app.folder_path.get())
-            if not reports_dir or not reports_dir.exists():
-                self.logger.warning(f"Thư mục báo cáo không tồn tại, không thể làm mới {target_attr}.")
+            base_folder = self.app.folder_path.get()
+            symbol = self.app.mt5_symbol_var.get()
+            if not base_folder or not symbol:
+                self.logger.warning("Thư mục gốc hoặc symbol chưa được đặt, không thể làm mới danh sách.")
+                setattr(self.app, target_attr, [])
+                return
+
+            reports_dir = workspace_config.get_reports_dir(base_folder, symbol)
+            if not reports_dir.exists():
+                self.logger.warning(f"Thư mục báo cáo không tồn tại tại '{reports_dir}', không thể làm mới {target_attr}.")
                 setattr(self.app, target_attr, [])
                 return
 
@@ -184,14 +191,19 @@ class HistoryManager:
         """Mở thư mục chứa các báo cáo và tệp ngữ cảnh."""
         self.logger.debug("Bắt đầu mở thư mục báo cáo.")
         try:
-            reports_dir = workspace_config.get_reports_dir(self.app.folder_path.get())
-            if reports_dir and reports_dir.exists():
-                # Mở thư mục bằng os.startfile
+            base_folder = self.app.folder_path.get()
+            symbol = self.app.mt5_symbol_var.get()
+            if not base_folder or not symbol:
+                ui_builder.show_message("Thông báo", "Vui lòng chọn thư mục ảnh và nhập symbol trước.")
+                return
+
+            reports_dir = workspace_config.get_reports_dir(base_folder, symbol)
+            if reports_dir.exists():
                 import os
                 os.startfile(reports_dir)
                 self.logger.debug(f"Đã yêu cầu mở thư mục: {reports_dir}")
             else:
-                self.logger.warning("Thư mục báo cáo không tồn tại.")
+                self.logger.warning(f"Thư mục báo cáo không tồn tại tại: {reports_dir}")
                 ui_builder.show_message("Thông báo", "Thư mục báo cáo không tồn tại.")
         except Exception as e:
             self.logger.error(f"Lỗi khi mở thư mục báo cáo: {e}", exc_info=True)

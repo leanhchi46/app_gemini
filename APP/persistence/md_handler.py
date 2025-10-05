@@ -74,10 +74,15 @@ class MdSaver:
         """
         logger.debug("Bắt đầu lưu báo cáo Markdown.")
         try:
-            reports_dir = workspace_config.get_reports_dir(cfg.mt5.symbol)
+            reports_dir = workspace_config.get_reports_dir(
+                base_folder=cfg.folder.folder, symbol=cfg.mt5.symbol
+            )
             if not reports_dir:
                 logger.error("Không thể xác định thư mục Reports để lưu file .md.")
                 return None
+
+            # Đảm bảo thư mục tồn tại trước khi ghi file
+            reports_dir.mkdir(parents=True, exist_ok=True)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_path = reports_dir / f"report_{timestamp}.md"

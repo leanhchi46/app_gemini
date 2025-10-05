@@ -101,7 +101,9 @@ def log_trade(
     )
     try:
         # Sử dụng workspace_config để lấy đúng thư mục reports
-        reports_dir = workspace_config.get_reports_dir(run_config.folder.folder)
+        reports_dir = workspace_config.get_reports_dir(
+            base_folder=run_config.folder.folder, symbol=run_config.mt5.symbol
+        )
         if folder_override:
             target_dir = reports_dir / folder_override
         else:

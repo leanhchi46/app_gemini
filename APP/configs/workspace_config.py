@@ -28,13 +28,14 @@ def get_workspace_dir() -> Path:
     return PATHS.APP_DIR
 
 
-def get_reports_dir(base_folder: str | Path) -> Path:
+def get_reports_dir(base_folder: str | Path, symbol: str) -> Path:
     """
-    Lấy đường dẫn đến thư mục "Reports" bên trong một thư mục gốc, tạo nó nếu chưa tồn tại.
+    Lấy đường dẫn đến thư mục "Reports" cho một symbol cụ thể, tạo nó nếu chưa tồn tại.
     """
-    reports_dir = Path(base_folder) / "Reports"
+    # Đường dẫn bây giờ sẽ là base_folder/SYMBOL/Reports
+    reports_dir = Path(base_folder) / symbol / "Reports"
     try:
-        reports_dir.mkdir(exist_ok=True)
+        reports_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         logger.error(f"Không thể tạo thư mục reports tại '{reports_dir}': {e}")
     return reports_dir
@@ -62,14 +63,15 @@ def load_config_from_file(workspace_path: str | Path | None = None) -> dict[str,
         logger.debug("Đã đọc và parse file JSON thành công.")
 
         # Giải mã các thông tin nhạy cảm nếu có
-        if "telegram_token_enc" in data:
-            data["telegram_token"] = deobfuscate_text(data["telegram_token_enc"])
+        if "telegram" in data and "token_enc" in data["telegram"]:
+            token_enc = data["telegram"]["token_enc"]
+            if token_enc:
+                data["telegram"]["token"] = deobfuscate_text(token_enc)
 
         logger.info("Tải cấu hình từ file thành công.")
         return data
     except json.JSONDecodeError as e:
         logger.error(f"Lỗi giải mã JSON từ file '{config_path}': {e}. File có thể bị hỏng.")
-        # Trong tương lai, có thể thêm logic thông báo cho người dùng tại đây.
         return {}
     except Exception as e:
         logger.error(f"Lỗi không xác định khi đọc file cấu hình '{config_path}': {e}")
@@ -83,14 +85,16 @@ def save_config_to_file(config_data: dict[str, Any]):
     """
     logger.debug("Bắt đầu lưu cấu hình vào file.")
 
-    # Tạo một bản sao để tránh thay đổi dictionary gốc
-    data_to_save = config_data.copy()
+    # Tạo một bản sao sâu để tránh thay đổi dictionary gốc
+    data_to_save = json.loads(json.dumps(config_data))
 
-    # Mã hóa các thông tin nhạy cảm
-    if "telegram_token" in data_to_save:
-        token = data_to_save["telegram_token"]
-        data_to_save["telegram_token_enc"] = obfuscate_text(token) if token else ""
-        del data_to_save["telegram_token"]  # Xóa key gốc để không lưu vào file
+    # Mã hóa các thông tin nhạy cảm trong đúng mục của nó
+    if "telegram" in data_to_save and "token" in data_to_save["telegram"]:
+        token = data_to_save["telegram"]["token"]
+        if token:
+            data_to_save["telegram"]["token_enc"] = obfuscate_text(token)
+        # Luôn xóa key gốc để không lưu vào file
+        del data_to_save["telegram"]["token"]
 
     try:
         PATHS.WORKSPACE_JSON.write_text(

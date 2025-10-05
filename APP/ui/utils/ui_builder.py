@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple
 
 if TYPE_CHECKING:
     from APP.ui.app_ui import AppUI
-    from APP.ui.components.chart_tab import ChartTab
+
+from APP.ui.components.chart_tab import ChartTab
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,8 @@ def _build_top_frame(app: "AppUI") -> None:
     ttk.Label(config_frame, text="Model:").grid(row=0, column=0, sticky="w")
     app.model_combo = ttk.Combobox(config_frame, textvariable=app.model_var, state="readonly", width=40)
     app.model_combo.grid(row=0, column=1, sticky="w", padx=6)
-    app._update_model_list_in_ui()
+    # Sửa lỗi: Gọi hàm cấu hình API đúng, hàm này đã bị đổi tên trong app_ui.py
+    # app._configure_gemini_api_and_update_ui() # Hàm này được gọi ở cuối __init__ của AppUI rồi.
     ttk.Label(config_frame, text="Thư mục ảnh:").grid(row=0, column=2, sticky="w", padx=(10, 0))
     app.folder_label = ttk.Entry(config_frame, textvariable=app.folder_path, state="readonly")
     app.folder_label.grid(row=0, column=3, sticky="ew", padx=6)
@@ -253,19 +255,38 @@ def _build_prompt_tab(app: "AppUI") -> None:
         setattr(app, f"prompt_{key}_text", text_widget)
 
 
-def _build_opts_run(app: "AppUI", parent: ttk.Notebook) -> None:
-    """Xây dựng tab Options -> Run."""
+def _build_opts_general(app: "AppUI", parent: ttk.Notebook) -> None:
+    """Xây dựng tab Options -> General."""
     tab = ttk.Frame(parent, padding=8)
-    parent.add(tab, text="Run")
-    card1 = ttk.LabelFrame(tab, text="Upload & Giới hạn", padding=8)
+    parent.add(tab, text="General")
+    
+    # Cột trái
+    left_col = ttk.Frame(tab)
+    left_col.pack(side="left", fill="both", expand=True, padx=(0, 5))
+
+    card1 = ttk.LabelFrame(left_col, text="Run & File", padding=8)
     card1.pack(fill="x", pady=(0, 8))
-    ttk.Checkbutton(card1, text="Xoá file trên Gemini sau khi phân tích", variable=app.delete_after_var).pack(anchor="w")
     _create_labeled_spinbox(card1, "Giới hạn số ảnh (0=vô hạn):", app.max_files_var, 0, 1000, width=8).pack(anchor="w", pady=(4,0))
-    card2 = ttk.LabelFrame(tab, text="Tăng tốc & Cache", padding=8)
+    ttk.Checkbutton(card1, text="Chỉ gọi model nếu bộ ảnh không đổi", variable=app.only_generate_if_changed_var).pack(anchor="w", pady=4)
+    _create_labeled_spinbox(card1, "Số báo cáo .md tối đa:", app.persistence_max_md_reports_var, 0, 1000, width=6).pack(anchor="w", pady=(4,0))
+
+    card2 = ttk.LabelFrame(left_col, text="API & Upload", padding=8)
     card2.pack(fill="x")
-    _create_labeled_spinbox(card2, "Số luồng upload song song:", app.upload_workers_var, 1, 16, width=6).pack(anchor="w")
+    _create_labeled_spinbox(card2, "Số lần thử lại API:", app.api_tries_var, 1, 10, width=6).pack(anchor="w")
+    _create_labeled_spinbox(card2, "Thời gian chờ API (giây):", app.api_delay_var, 0.5, 30, increment=0.5, width=6).pack(anchor="w", pady=(4,0))
+    _create_labeled_spinbox(card2, "Số luồng upload song song:", app.upload_workers_var, 1, 16, width=6).pack(anchor="w", pady=(4,0))
     ttk.Checkbutton(card2, text="Bật cache ảnh (tái dùng file đã upload)", variable=app.cache_enabled_var).pack(anchor="w", pady=(4,0))
-    ttk.Checkbutton(card2, text="Chỉ gọi model nếu bộ ảnh không đổi", variable=app.only_generate_if_changed_var).pack(anchor="w")
+    ttk.Checkbutton(card2, text="Xoá file trên Gemini sau khi phân tích", variable=app.delete_after_var).pack(anchor="w", pady=4)
+
+    # Cột phải
+    right_col = ttk.Frame(tab)
+    right_col.pack(side="left", fill="both", expand=True, padx=(5, 0))
+
+    card3 = ttk.LabelFrame(right_col, text="Xử lý ảnh", padding=8)
+    card3.pack(fill="x", pady=(0, 8))
+    ttk.Checkbutton(card3, text="Tối ưu hóa ảnh (lossless)", variable=app.optimize_lossless_var).pack(anchor="w")
+    _create_labeled_spinbox(card3, "Chiều rộng tối đa:", app.image_max_width_var, 200, 4096, width=8).pack(anchor="w", pady=(4,0))
+    _create_labeled_spinbox(card3, "Chất lượng JPEG:", app.image_jpeg_quality_var, 10, 100, width=8).pack(anchor="w", pady=(4,0))
 
 
 def _build_opts_context(app: "AppUI", parent: ttk.Notebook) -> None:
@@ -289,12 +310,30 @@ def _build_opts_telegram(app: "AppUI", parent: ttk.Notebook) -> None:
     tab = ttk.Frame(parent, padding=8)
     parent.add(tab, text="Telegram")
     tab.columnconfigure(1, weight=1)
-    ttk.Checkbutton(tab, text="Bật thông báo khi có setup xác suất cao", variable=app.telegram_enabled_var).grid(row=0, column=0, columnspan=3, sticky="w")
-    ttk.Label(tab, text="Bot Token:").grid(row=1, column=0, sticky="w", pady=6)
-    tk.Entry(tab, textvariable=app.telegram_token_var, show="*", width=48).grid(row=1, column=1, sticky="ew", padx=6, pady=6)
-    ttk.Label(tab, text="Chat ID:").grid(row=2, column=0, sticky="w", pady=6)
-    tk.Entry(tab, textvariable=app.telegram_chat_id_var, width=24).grid(row=2, column=1, sticky="w", padx=6, pady=6)
-    ttk.Button(tab, text="Gửi thử", command=app._telegram_test).grid(row=2, column=2, sticky="e", padx=8, pady=6)
+
+    card1 = ttk.LabelFrame(tab, text="Cài đặt chính", padding=8)
+    card1.pack(fill="x", pady=(0, 8), expand=True, anchor="n")
+    card1.columnconfigure(1, weight=1)
+
+    ttk.Checkbutton(card1, text="Bật thông báo Telegram", variable=app.telegram_enabled_var).grid(row=0, column=0, columnspan=3, sticky="w")
+    ttk.Label(card1, text="Bot Token:").grid(row=1, column=0, sticky="w", pady=6)
+    tk.Entry(card1, textvariable=app.telegram_token_var, show="*", width=48).grid(row=1, column=1, sticky="ew", padx=6, pady=6)
+    ttk.Label(card1, text="Chat ID:").grid(row=2, column=0, sticky="w", pady=6)
+    tk.Entry(card1, textvariable=app.telegram_chat_id_var, width=24).grid(row=2, column=1, sticky="w", padx=6, pady=6)
+    ttk.Button(card1, text="Gửi thử", command=app._telegram_test).grid(row=2, column=2, sticky="e", padx=8, pady=6)
+
+    card2 = ttk.LabelFrame(tab, text="Cài đặt nâng cao", padding=8)
+    card2.pack(fill="x", expand=True, anchor="n")
+    card2.columnconfigure(1, weight=1)
+
+    ttk.Checkbutton(card2, text="Thông báo khi phân tích dừng sớm (No-Run/No-Trade)", variable=app.telegram_notify_early_exit_var).grid(row=0, column=0, columnspan=2, sticky="w")
+    ttk.Checkbutton(card2, text="Bỏ qua xác thực SSL (không khuyến khích)", variable=app.telegram_skip_verify_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
+    
+    ca_path_frame = ttk.Frame(card2)
+    ca_path_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=4)
+    ca_path_frame.columnconfigure(1, weight=1)
+    ttk.Label(ca_path_frame, text="Đường dẫn CA Bundle (tùy chọn):").grid(row=0, column=0, sticky="w")
+    ttk.Entry(ca_path_frame, textvariable=app.telegram_ca_path_var).grid(row=0, column=1, sticky="ew", padx=6)
 
 
 def _build_opts_mt5(app: "AppUI", parent: ttk.Notebook) -> None:
@@ -325,14 +364,144 @@ def _build_opts_mt5(app: "AppUI", parent: ttk.Notebook) -> None:
     ttk.Label(tab, textvariable=app.mt5_status_var, foreground="#555").grid(row=5, column=0, columnspan=3, sticky="w", pady=6)
 
 
-def _build_opts_norun(app: "AppUI", parent: ttk.Notebook) -> None:
-    """Xây dựng tab Options -> No Run."""
+def _build_opts_conditions(app: "AppUI", parent: ttk.Notebook) -> None:
+    """Xây dựng tab Options -> Conditions."""
     tab = ttk.Frame(parent, padding=8)
-    parent.add(tab, text="No Run")
-    card = ttk.LabelFrame(tab, text="Điều kiện không chạy phân tích tự động", padding=8)
-    card.pack(fill="x")
-    ttk.Checkbutton(card, text="Không chạy vào Thứ 7 và Chủ Nhật", variable=app.no_run_weekend_enabled_var).pack(anchor="w")
-    ttk.Checkbutton(card, text="Chỉ chạy trong thời gian Kill Zone", variable=app.norun_killzone_var).pack(anchor="w", pady=4)
+    parent.add(tab, text="Conditions")
+
+    # Chia thành 2 cột
+    left_col = ttk.Frame(tab)
+    left_col.pack(side="left", fill="both", expand=True, padx=(0, 5), anchor="n")
+    right_col = ttk.Frame(tab)
+    right_col.pack(side="left", fill="both", expand=True, padx=(5, 0), anchor="n")
+    
+    # --- CỘT TRÁI ---
+    # --- NO RUN ---
+    card1 = ttk.LabelFrame(left_col, text="Điều kiện không chạy phân tích (No-Run)", padding=8)
+    card1.pack(fill="x", pady=(0, 8))
+    card1.columnconfigure(1, weight=1)
+
+    ttk.Checkbutton(card1, text="Không chạy vào Thứ 7 và Chủ Nhật", variable=app.no_run_weekend_enabled_var).grid(row=0, column=0, columnspan=2, sticky="w")
+    ttk.Checkbutton(card1, text="Chỉ chạy trong thời gian Kill Zone", variable=app.norun_killzone_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
+    ttk.Checkbutton(card1, text="Không chạy vào ngày lễ", variable=app.no_run_holiday_check_var).grid(row=2, column=0, columnspan=2, sticky="w")
+    
+    holiday_frame = ttk.Frame(card1)
+    holiday_frame.grid(row=3, column=0, columnspan=2, sticky="w", pady=(2,0), padx=(20, 0))
+    ttk.Label(holiday_frame, text="Mã quốc gia cho ngày lễ:").pack(side="left")
+    ttk.Entry(holiday_frame, textvariable=app.no_run_holiday_country_var, width=8).pack(side="left", padx=6)
+
+    tz_frame = ttk.Frame(card1)
+    tz_frame.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6,0))
+    ttk.Label(tz_frame, text="Múi giờ (Timezone):").pack(side="left")
+    ttk.Entry(tz_frame, textvariable=app.no_run_timezone_var, width=25).pack(side="left", padx=6)
+
+    # --- NEWS ---
+    card3 = ttk.LabelFrame(left_col, text="Chặn giao dịch theo tin tức (News)", padding=8)
+    card3.pack(fill="x")
+    
+    ttk.Checkbutton(card3, text="Bật chặn giao dịch khi có tin tức quan trọng", variable=app.news_block_enabled_var).pack(anchor="w")
+    
+    separator_news = ttk.Separator(card3, orient="horizontal")
+    separator_news.pack(fill="x", pady=8, padx=2)
+
+    _create_labeled_spinbox(card3, "Chặn trước khi tin ra (phút):", app.trade_news_block_before_min_var, 0, 120, width=8).pack(anchor="w", pady=4)
+    _create_labeled_spinbox(card3, "Chặn sau khi tin ra (phút):", app.trade_news_block_after_min_var, 0, 120, width=8).pack(anchor="w", pady=4)
+    _create_labeled_spinbox(card3, "Thời gian cache tin tức (giây):", app.news_cache_ttl_var, 60, 3600, width=8).pack(anchor="w", pady=4)
+
+    # --- CỘT PHẢI ---
+    # --- NO TRADE ---
+    card2 = ttk.LabelFrame(right_col, text="Điều kiện không vào lệnh (No-Trade)", padding=8)
+    card2.pack(fill="x", pady=(0, 8))
+    
+    ttk.Checkbutton(card2, text="Bật kiểm tra điều kiện No-Trade", variable=app.no_trade_enabled_var).pack(anchor="w")
+    
+    separator = ttk.Separator(card2, orient="horizontal")
+    separator.pack(fill="x", pady=8, padx=2)
+
+    _create_labeled_spinbox(card2, "Spread tối đa (pips):", app.nt_spread_max_pips_var, 0.1, 100.0, increment=0.1, width=8).pack(anchor="w", pady=4)
+    _create_labeled_spinbox(card2, "ATR M5 tối thiểu (pips):", app.nt_min_atr_m5_pips_var, 0.0, 100.0, increment=0.1, width=8).pack(anchor="w", pady=4)
+    _create_labeled_spinbox(card2, "Khoảng cách tối thiểu tới Key Level (pips):", app.trade_min_dist_keylvl_pips_var, 0.0, 100.0, increment=0.5, width=8).pack(anchor="w", pady=4)
+
+    session_frame = ttk.LabelFrame(card2, text="Phiên giao dịch được phép", padding=6)
+    session_frame.pack(fill="x", pady=8, anchor="w")
+    ttk.Checkbutton(session_frame, text="Phiên Á (Asia)", variable=app.trade_allow_session_asia_var).pack(anchor="w")
+    ttk.Checkbutton(session_frame, text="Phiên Âu (London)", variable=app.trade_allow_session_london_var).pack(anchor="w")
+    ttk.Checkbutton(session_frame, text="Phiên Mỹ (New York)", variable=app.trade_allow_session_ny_var).pack(anchor="w")
+
+
+def _build_opts_autotrade(app: "AppUI", parent: ttk.Notebook) -> None:
+    """Xây dựng tab Options -> Trading -> Auto Trade."""
+    tab = ttk.Frame(parent, padding=8)
+    parent.add(tab, text="Auto Trade")
+    
+    # Chia thành 2 cột
+    left_col = ttk.Frame(tab)
+    left_col.pack(side="left", fill="both", expand=True, padx=(0, 5))
+    right_col = ttk.Frame(tab)
+    right_col.pack(side="left", fill="both", expand=True, padx=(5, 0))
+
+    # --- Cột Trái ---
+    card1 = ttk.LabelFrame(left_col, text="Kích hoạt & Chế độ", padding=8)
+    card1.pack(fill="x", pady=(0, 8))
+    ttk.Checkbutton(card1, text="Bật tự động giao dịch", variable=app.auto_trade_enabled_var).pack(anchor="w")
+    ttk.Checkbutton(card1, text="Chế độ Dry Run (chỉ ghi log, không vào lệnh thật)", variable=app.auto_trade_dry_run_var).pack(anchor="w", pady=4)
+    ttk.Checkbutton(card1, text="Tuân thủ nghiêm ngặt xu hướng (Strict Bias)", variable=app.trade_strict_bias_var).pack(anchor="w")
+
+    card2 = ttk.LabelFrame(left_col, text="Quản lý Rủi ro", padding=8)
+    card2.pack(fill="x", pady=(0, 8))
+    
+    size_mode_frame = ttk.Frame(card2)
+    size_mode_frame.pack(anchor="w")
+    ttk.Label(size_mode_frame, text="Chế độ kích thước lệnh:").pack(side="left")
+    ttk.Combobox(size_mode_frame, textvariable=app.trade_size_mode_var, values=["risk_percent"], state="readonly", width=15).pack(side="left", padx=6)
+    
+    _create_labeled_spinbox(card2, "Rủi ro/lệnh (% tài khoản):", app.trade_equity_risk_pct_var, 0.01, 100.0, increment=0.01, width=8).pack(anchor="w", pady=4)
+    _create_labeled_spinbox(card2, "Tỷ lệ chốt lời TP1 (%):", app.trade_split_tp1_pct_var, 0, 100, width=8).pack(anchor="w", pady=4)
+    _create_labeled_spinbox(card2, "Tỷ lệ R:R tối thiểu cho TP2:", app.trade_min_rr_tp2_var, 0.1, 20.0, increment=0.1, width=8).pack(anchor="w", pady=4)
+
+    # --- Cột Phải ---
+    card3 = ttk.LabelFrame(right_col, text="Thông số Lệnh", padding=8)
+    card3.pack(fill="x", pady=(0, 8))
+    _create_labeled_spinbox(card3, "Magic Number:", app.trade_magic_var, 10000, 99999999, width=12).pack(anchor="w")
+    _create_labeled_spinbox(card3, "Trượt giá (Deviation):", app.trade_deviation_points_var, 0, 1000, width=12).pack(anchor="w", pady=4)
+    
+    comment_frame = ttk.Frame(card3)
+    comment_frame.pack(anchor="w", pady=4)
+    ttk.Label(comment_frame, text="Comment lệnh:").pack(side="left")
+    ttk.Entry(comment_frame, textvariable=app.trade_comment_prefix_var, width=15).pack(side="left", padx=6)
+
+    filling_type_frame = ttk.Frame(card3)
+    filling_type_frame.pack(anchor="w", pady=4)
+    ttk.Label(filling_type_frame, text="Loại khớp lệnh:").pack(side="left")
+    ttk.Combobox(filling_type_frame, textvariable=app.trade_filling_type_var, values=["FOK", "IOC"], state="readonly", width=12).pack(side="left", padx=6)
+
+    card4 = ttk.LabelFrame(right_col, text="Quản lý Lệnh Nâng cao", padding=8)
+    card4.pack(fill="x", pady=(0, 8))
+    ttk.Checkbutton(card4, text="Dời SL về Entry sau khi TP1", variable=app.trade_move_to_be_after_tp1_var).pack(anchor="w")
+    _create_labeled_spinbox(card4, "Trailing Stop (ATR multiplier, 0=tắt):", app.trade_trailing_atr_mult_var, 0.0, 10.0, increment=0.1, width=8).pack(anchor="w", pady=4)
+    ttk.Checkbutton(card4, text="Lệnh chờ động (Dynamic Pending)", variable=app.trade_dynamic_pending_var).pack(anchor="w", pady=4)
+    _create_labeled_spinbox(card4, "Thời gian chờ lệnh (phút):", app.trade_pending_ttl_min_var, 1, 1440, width=8).pack(anchor="w", pady=4)
+    _create_labeled_spinbox(card4, "Thời gian nghỉ giữa các lệnh (phút):", app.trade_cooldown_min_var, 0, 1440, width=8).pack(anchor="w", pady=4)
+
+
+
+
+def _build_opts_news(app: "AppUI", parent: ttk.Notebook) -> None:
+    """Xây dựng tab Options -> Trading -> News."""
+    tab = ttk.Frame(parent, padding=8)
+    parent.add(tab, text="News")
+
+    card = ttk.LabelFrame(tab, text="Chặn giao dịch theo tin tức", padding=8)
+    card.pack(fill="x", expand=True, anchor="n")
+    
+    ttk.Checkbutton(card, text="Bật chặn giao dịch khi có tin tức quan trọng", variable=app.news_block_enabled_var).pack(anchor="w")
+    
+    separator = ttk.Separator(card, orient="horizontal")
+    separator.pack(fill="x", pady=8, padx=2)
+
+    _create_labeled_spinbox(card, "Chặn trước khi tin ra (phút):", app.trade_news_block_before_min_var, 0, 120, width=8).pack(anchor="w", pady=4)
+    _create_labeled_spinbox(card, "Chặn sau khi tin ra (phút):", app.trade_news_block_after_min_var, 0, 120, width=8).pack(anchor="w", pady=4)
+    _create_labeled_spinbox(card, "Thời gian cache tin tức (giây):", app.news_cache_ttl_var, 60, 3600, width=8).pack(anchor="w", pady=4)
 
 
 def _build_options_tab(app: "AppUI") -> None:
@@ -346,11 +515,19 @@ def _build_options_tab(app: "AppUI") -> None:
     opts_nb = ttk.Notebook(tab)
     opts_nb.grid(row=0, column=0, sticky="nsew")
 
-    _build_opts_run(app, opts_nb)
+    # Xây dựng các tab theo cấu trúc logic mới
+    _build_opts_general(app, opts_nb)
     _build_opts_context(app, opts_nb)
-    _build_opts_telegram(app, opts_nb)
-    _build_opts_mt5(app, opts_nb)
-    _build_opts_norun(app, opts_nb)
+    _build_opts_conditions(app, opts_nb) # Gộp No-Run, No-Trade, News
+    _build_opts_autotrade(app, opts_nb)
+    
+    # Tab Services (chứa các tab con)
+    services_tab = ttk.Frame(opts_nb, padding=8)
+    opts_nb.add(services_tab, text="Services")
+    services_nb = ttk.Notebook(services_tab)
+    services_nb.pack(fill="both", expand=True)
+    _build_opts_mt5(app, services_nb)
+    _build_opts_telegram(app, services_nb)
 
 
 def build_ui(app: "AppUI") -> None:

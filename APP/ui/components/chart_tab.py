@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
+from datetime import datetime
 from tkinter import ttk
 from typing import TYPE_CHECKING, Any, Optional, Tuple, cast
 
@@ -606,11 +607,33 @@ class ChartTab:
             # We can still show upcoming news
             from APP.services import news_service
             sym = self.symbol_var.get().strip()
-            events = news_service.get_forex_factory_news() # Simplified
+            from APP.services import news_service
+            from APP.utils.general_utils import format_timedelta
+
+            # Sử dụng cache của app để tránh gọi API liên tục
+            ok, why, events, fetch_ts = news_service.within_news_window_cached(
+                symbol=sym,
+                minutes_before=0, # Chỉ cần lấy events, không cần check window
+                minutes_after=0,
+                cache_events=self.app.news_events,
+                cache_fetch_time=self.app.news_fetch_time,
+                ttl_sec=600 # Cache 10 phút
+            )
+            self.app.news_events = events
+            self.app.news_fetch_time = fetch_ts
+
             next_events = news_service.next_events_for_symbol(events, sym, limit=3)
             
-            events_fmt = [f"• {ev.get('time_remaining')} — {ev.get('title')}" for ev in next_events]
-            self.nt_events.set("\n".join(events_fmt) if events_fmt else "(không có)")
+            now = datetime.now().astimezone()
+            events_fmt = []
+            for ev in next_events:
+                remaining = ev['when'] - now
+                rem_str = format_timedelta(remaining)
+                title = ev.get('title', 'N/A')
+                curr = ev.get('curr', '')
+                events_fmt.append(f"• [{curr}] {title} (trong {rem_str})")
+
+            self.nt_events.set("\n".join(events_fmt) if events_fmt else "(không có sự kiện quan trọng)")
         except Exception as e:
             self.nt_events.set("(error)")
             logger.error(f"Lỗi khi cập nhật sự kiện tin tức: {e}")

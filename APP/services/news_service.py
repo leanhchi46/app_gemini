@@ -1,108 +1,120 @@
 # -*- coding: utf-8 -*-
 """
 Module để lấy và xử lý các tin tức kinh tế có tác động mạnh từ Forex Factory.
-Sử dụng Playwright để trích xuất dữ liệu JSON từ biến JavaScript của trang web.
+Sử dụng cloudscraper để vượt qua Cloudflare và regex để trích xuất dữ liệu.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from playwright.async_api import async_playwright
+import cloudscraper
+from bs4 import BeautifulSoup
 
 if TYPE_CHECKING:
     from APP.configs.app_config import RunConfig
 
 logger = logging.getLogger(__name__)
 
-
 # --- Constants ---
-BASE_URL = "https://www.forexfactory.com"
-# URL mới dựa trên phương pháp scraping
-FF_THISWEEK_URL = f"{BASE_URL}/calendar?week=this"
-FF_NEXTWEEK_URL = f"{BASE_URL}/calendar?week=next"
-
+FOREX_FACTORY_URL = "https://www.forexfactory.com/calendar"
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+}
+IMPACT_MAP = {"high": "Red", "medium": "Orange", "low": "Yellow"}
 EXCLUDED_EVENT_KEYWORDS = (
     "bank holiday", "holiday", "tentative", "all day",
     "daylight", "speaks", "speech",
 )
 
-
 # --- Core Scraping Logic ---
 
-async def _scrape_calendar_data(url: str) -> List[Dict[str, Any]]:
+def _fetch_forex_factory_html() -> Optional[str]:
     """
-    Sử dụng Playwright để truy cập URL và trích xuất dữ liệu lịch từ biến JS.
+    Lấy nội dung HTML từ lịch của Forex Factory.
+    Sử dụng cloudscraper để xử lý các biện pháp bảo vệ của Cloudflare.
     """
-    logger.info(f"🌐 Đang scrape dữ liệu từ: {url}")
-    days_array: List[Dict[str, Any]] = []
-    
+    logger.info("🌐 Đang lấy dữ liệu tin tức từ Forex Factory...")
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            )
-            page = await context.new_page()
-            
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            
-            # Trích xuất dữ liệu từ biến JavaScript `calendarComponentStates`
-            data = await page.evaluate(
-                """() => {
-                    if (typeof window.calendarComponentStates === 'undefined') { return []; }
-                    return (window.calendarComponentStates[1]?.days || window.calendarComponentStates[0]?.days || []);
-                }"""
-            )
-            days_array = data or []
-            
-            await browser.close()
-            logger.info(f"✅ Trích xuất thành công {len(days_array)} ngày dữ liệu.")
-            return days_array
+        scraper = cloudscraper.create_scraper()
+        response = scraper.get(FOREX_FACTORY_URL, headers=DEFAULT_HEADERS, timeout=20)
+        response.raise_for_status()
+        logger.info("✅ Lấy thành công HTML từ Forex Factory.")
+        return response.text
     except Exception:
-        logger.error(f"⚠️ Lỗi nghiêm trọng khi scraping {url}", exc_info=True)
-        return []
-
+        logger.error("⚠️ Lỗi không xác định khi lấy dữ liệu từ Forex Factory", exc_info=True)
+        return None
 
 # --- Data Parsing and Normalization ---
 
-def _parse_scraped_data(days_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _parse_html_data(html: str) -> List[Dict[str, Any]]:
     """
-    Phân tích dữ liệu thô từ scraping và chuyển đổi thành định dạng chuẩn.
+    Phân tích HTML từ Forex Factory để trích xuất các sự kiện tin tức.
     """
-    all_events: List[Dict[str, Any]] = []
-    for day in days_data:
-        for event in day.get("events", []):
+    soup = BeautifulSoup(html, "html.parser")
+    events: List[Dict[str, Any]] = []
+    
+    table = soup.find("table", class_="calendar__table")
+    if not table:
+        logger.error("Không tìm thấy bảng lịch trên trang Forex Factory.")
+        return events
+
+    rows = table.find_all("tr", class_="calendar__row")
+    current_date = None
+
+    for row in rows:
+        # Cập nhật ngày hiện tại
+        date_cell = row.find("td", class_="calendar__date")
+        if date_cell and "date" in date_cell.text.lower():
+            date_text = " ".join(date_cell.text.strip().split()[1:])
             try:
-                impact = event.get("impact", "").lower()
-                if "high" not in impact and "red" not in impact:
-                    continue
-
-                title = event.get("title", "").strip()
-                if not title or any(k in title.lower() for k in EXCLUDED_EVENT_KEYWORDS):
-                    continue
-
-                timestamp = event.get("datetime")
-                if not isinstance(timestamp, int) or timestamp <= 0:
-                    continue
-                
-                # Chuyển đổi timestamp sang datetime object có múi giờ
-                dt_utc = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-
-                all_events.append({
-                    "when": dt_utc.astimezone(), # Chuyển sang múi giờ địa phương
-                    "title": title,
-                    "curr": event.get("currency", "").strip().upper() or None,
-                })
-            except Exception:
-                logger.warning(f"Lỗi khi parse event: {event}", exc_info=True)
+                current_date = datetime.strptime(f"{date_text} {datetime.now().year}", "%b %d %Y").date()
+            except ValueError:
+                logger.warning(f"Không thể phân tích ngày: {date_text}")
                 continue
-    return all_events
+        
+        if not current_date:
+            continue
+
+        # Bỏ qua các hàng không phải là sự kiện
+        if not row.find("td", class_="calendar__impact"):
+            continue
+
+        try:
+            impact_cell = row.find("td", class_="calendar__impact")
+            impact_title = impact_cell.find("span").get("title", "").lower()
+            if "high" not in impact_title:
+                continue
+
+            title = row.find("td", class_="calendar__event").text.strip()
+            if not title or any(k in title.lower() for k in EXCLUDED_EVENT_KEYWORDS):
+                continue
+
+            time_str = row.find("td", class_="calendar__time").text.strip()
+            if not time_str or "all-day" in time_str.lower():
+                continue
+            
+            # Chuyển đổi thời gian
+            event_time = datetime.strptime(time_str, "%I:%M%p").time()
+            dt_local = datetime.combine(current_date, event_time)
+            # Giả sử thời gian từ FF là giờ New York (ET), cần chuyển sang UTC rồi sang local
+            # Đây là một giả định đơn giản, thực tế cần xử lý múi giờ phức tạp hơn
+            dt_utc = dt_local.astimezone(timezone.utc)
+
+            events.append({
+                "when": dt_utc.astimezone(), # Chuyển sang múi giờ địa phương
+                "title": title,
+                "curr": row.find("td", class_="calendar__currency").text.strip().upper() or None,
+            })
+        except Exception:
+            logger.warning(f"Lỗi khi parse một hàng sự kiện từ Forex Factory", exc_info=True)
+            continue
+            
+    return events
 
 
 def _dedup_and_sort_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -119,40 +131,24 @@ def _dedup_and_sort_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 # --- Main Public Function ---
 
-async def get_forex_factory_news_async() -> List[Dict[str, Any]]:
+def get_forex_factory_news() -> List[Dict[str, Any]]:
     """
-    Hàm bất đồng bộ chính để lấy, phân tích và xử lý tin tức.
+    Hàm chính để lấy, phân tích và xử lý tin tức từ Forex Factory.
     """
-    logger.debug("Bắt đầu quy trình lấy tin tức (async).")
+    logger.debug("Bắt đầu quy trình lấy tin tức bằng Forex Factory.")
     
-    # Chạy song song 2 tác vụ scraping
-    tasks = [
-        _scrape_calendar_data(FF_THISWEEK_URL),
-        _scrape_calendar_data(FF_NEXTWEEK_URL),
-    ]
-    results = await asyncio.gather(*tasks)
-    
-    raw_data = results[0] + results[1]
-    parsed_events = _parse_scraped_data(raw_data)
+    html_content = _fetch_forex_factory_html()
+    if not html_content:
+        return []
+        
+    parsed_events = _parse_html_data(html_content)
     final_events = _dedup_and_sort_events(parsed_events)
     
     logger.info(f"Hoàn tất lấy tin tức, tìm thấy {len(final_events)} sự kiện có tác động mạnh.")
     return final_events
 
-def get_forex_factory_news() -> List[Dict[str, Any]]:
-    """
-    Hàm đồng bộ (wrapper) để tương thích với code hiện tại.
-    """
-    try:
-        # Chạy vòng lặp sự kiện asyncio nếu nó chưa chạy
-        loop = asyncio.get_running_loop()
-        return loop.run_until_complete(get_forex_factory_news_async())
-    except RuntimeError:
-        # Nếu không có vòng lặp nào đang chạy, tạo một cái mới
-        return asyncio.run(get_forex_factory_news_async())
 
-
-# --- Utility and Logic Functions (Largely Unchanged) ---
+# --- Utility and Logic Functions ---
 
 def symbol_currencies(sym: str) -> set[str]:
     """Phân tích một symbol giao dịch để tìm các tiền tệ liên quan."""

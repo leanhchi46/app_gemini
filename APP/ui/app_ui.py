@@ -19,8 +19,8 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
-import google.generativeai as genai
 from dotenv import load_dotenv
+from google.api_core import exceptions
 
 from APP.configs import workspace_config
 from APP.configs.app_config import (ApiConfig, AutoTradeConfig, ContextConfig,
@@ -31,7 +31,7 @@ from APP.configs.app_config import (ApiConfig, AutoTradeConfig, ContextConfig,
 from APP.configs.constants import FILES, MODELS, PATHS
 from APP.core.analysis_worker import AnalysisWorker
 from APP.persistence import log_handler, md_handler
-from APP.services import mt5_service, news_service
+from APP.services import gemini_service, mt5_service, news_service
 from APP.ui.components.chart_tab import ChartTab
 from APP.ui.components.history_manager import HistoryManager
 from APP.ui.components.prompt_manager import PromptManager
@@ -71,6 +71,8 @@ class AppUI:
         self.ff_cache_events_local: Optional[List[Dict[str, Any]]] = None
         self.config_path: Optional[Path] = None
         self.is_shutting_down: bool = False
+        self.news_events: Optional[List[Dict[str, Any]]] = None
+        self.news_fetch_time: Optional[float] = None
 
         # Component Managers (initialized below)
         self.history_manager: HistoryManager
@@ -117,6 +119,10 @@ class AppUI:
         self.cache_enabled_var: tk.BooleanVar
         self.optimize_lossless_var: tk.BooleanVar
         self.only_generate_if_changed_var: tk.BooleanVar
+        self.image_max_width_var: tk.IntVar
+        self.image_jpeg_quality_var: tk.IntVar
+        self.api_tries_var: tk.IntVar
+        self.api_delay_var: tk.DoubleVar
         self.auto_trade_enabled_var: tk.BooleanVar
         self.trade_strict_bias_var: tk.BooleanVar
         self.trade_size_mode_var: tk.StringVar
@@ -133,6 +139,7 @@ class AppUI:
         self.auto_trade_dry_run_var: tk.BooleanVar
         self.trade_move_to_be_after_tp1_var: tk.BooleanVar
         self.trade_trailing_atr_mult_var: tk.DoubleVar
+        self.trade_filling_type_var: tk.StringVar
         self.trade_allow_session_asia_var: tk.BooleanVar
         self.trade_allow_session_london_var: tk.BooleanVar
         self.trade_allow_session_ny_var: tk.BooleanVar
@@ -179,13 +186,14 @@ class AppUI:
         # Initialize Tkinter variables
         self._init_tk_variables()
 
-        # Build the UI layout
-        ui_builder.build_ui(self)
-
-        # Initialize component managers
+        # Initialize component managers BEFORE building the UI
+        # This is crucial because the UI builder needs access to these managers.
         self.history_manager = HistoryManager(self)
         self.prompt_manager = PromptManager(self)
         self.timeframe_detector = TimeframeDetector()
+
+        # Build the UI layout
+        ui_builder.build_ui(self)
 
         # Post-UI setup
         self._configure_gemini_api_and_update_ui()
@@ -285,6 +293,8 @@ class AppUI:
         self.no_run_weekend_enabled_var = tk.BooleanVar(value=True)
         self.norun_killzone_var = tk.BooleanVar(value=True)
         self.no_run_holiday_check_var = tk.BooleanVar(value=True)
+        self.no_run_holiday_country_var = tk.StringVar(value="US")
+        self.no_run_timezone_var = tk.StringVar(value="Asia/Ho_Chi_Minh")
         self.no_trade_enabled_var = tk.BooleanVar(value=True)
         self.nt_spread_max_pips_var = tk.DoubleVar(value=2.5)
         self.nt_min_atr_m5_pips_var = tk.DoubleVar(value=3.0)
@@ -294,6 +304,12 @@ class AppUI:
         self.cache_enabled_var = tk.BooleanVar(value=True)
         self.optimize_lossless_var = tk.BooleanVar(value=False)
         self.only_generate_if_changed_var = tk.BooleanVar(value=False)
+
+        # Image Processing & API
+        self.image_max_width_var = tk.IntVar(value=1600)
+        self.image_jpeg_quality_var = tk.IntVar(value=85)
+        self.api_tries_var = tk.IntVar(value=5)
+        self.api_delay_var = tk.DoubleVar(value=2.0)
 
         # Auto-Trade
         self.auto_trade_enabled_var = tk.BooleanVar(value=False)
@@ -312,6 +328,7 @@ class AppUI:
         self.auto_trade_dry_run_var = tk.BooleanVar(value=False)
         self.trade_move_to_be_after_tp1_var = tk.BooleanVar(value=True)
         self.trade_trailing_atr_mult_var = tk.DoubleVar(value=0.5)
+        self.trade_filling_type_var = tk.StringVar(value="IOC")
         self.trade_allow_session_asia_var = tk.BooleanVar(value=True)
         self.trade_allow_session_london_var = tk.BooleanVar(value=True)
         self.trade_allow_session_ny_var = tk.BooleanVar(value=True)
@@ -347,11 +364,21 @@ class AppUI:
                 "cache_enabled": self.cache_enabled_var.get(),
                 "optimize_lossless": self.optimize_lossless_var.get(),
             },
+            "image_processing": {
+                "max_width": self.image_max_width_var.get(),
+                "jpeg_quality": self.image_jpeg_quality_var.get(),
+            },
+            "api": {
+                "tries": self.api_tries_var.get(),
+                "delay": self.api_delay_var.get(),
+            },
             "context": {
                 "ctx_limit": self.context_limit_chars_var.get(),
                 "create_ctx_json": self.create_ctx_json_var.get(),
                 "prefer_ctx_json": self.prefer_ctx_json_var.get(),
                 "ctx_json_n": self.ctx_json_n_var.get(),
+                "remember_context": self.remember_context_var.get(),
+                "n_reports": self.context_n_reports_var.get(),
             },
             "telegram": {
                 "enabled": self.telegram_enabled_var.get(),
@@ -374,6 +401,8 @@ class AppUI:
                 "weekend_enabled": self.no_run_weekend_enabled_var.get(),
                 "killzone_enabled": self.norun_killzone_var.get(),
                 "holiday_check_enabled": self.no_run_holiday_check_var.get(),
+                "holiday_check_country": self.no_run_holiday_country_var.get(),
+                "timezone": self.no_run_timezone_var.get(),
             },
             "no_trade": {
                 "enabled": self.no_trade_enabled_var.get(),
@@ -401,6 +430,7 @@ class AppUI:
                 "dry_run": self.auto_trade_dry_run_var.get(),
                 "move_to_be_after_tp1": self.trade_move_to_be_after_tp1_var.get(),
                 "trailing_atr_mult": self.trade_trailing_atr_mult_var.get(),
+                "filling_type": self.trade_filling_type_var.get(),
             },
             "news": {
                 "block_enabled": self.news_block_enabled_var.get(),
@@ -416,6 +446,8 @@ class AppUI:
                 "auto_load_prompt_txt": self.auto_load_prompt_txt_var.get(),
             },
             "model": self.model_var.get(),
+            "autorun": self.autorun_var.get(),
+            "autorun_secs": self.autorun_seconds_var.get(),
         }
 
     def apply_config(self, config_data: dict):
@@ -450,15 +482,29 @@ class AppUI:
         self.cache_enabled_var.set(get_nested(upload_cfg, ["cache_enabled"], True))
         self.optimize_lossless_var.set(get_nested(upload_cfg, ["optimize_lossless"], False))
 
+        image_cfg = config_data.get("image_processing", {})
+        self.image_max_width_var.set(get_nested(image_cfg, ["max_width"], 1600))
+        self.image_jpeg_quality_var.set(get_nested(image_cfg, ["jpeg_quality"], 85))
+
+        api_cfg = config_data.get("api", {})
+        self.api_tries_var.set(get_nested(api_cfg, ["tries"], 5))
+        self.api_delay_var.set(get_nested(api_cfg, ["delay"], 2.0))
+
         context_cfg = config_data.get("context", {})
         self.context_limit_chars_var.set(get_nested(context_cfg, ["ctx_limit"], 2000))
         self.create_ctx_json_var.set(get_nested(context_cfg, ["create_ctx_json"], True))
         self.prefer_ctx_json_var.set(get_nested(context_cfg, ["prefer_ctx_json"], True))
         self.ctx_json_n_var.set(get_nested(context_cfg, ["ctx_json_n"], 5))
+        self.remember_context_var.set(get_nested(context_cfg, ["remember_context"], True))
+        self.context_n_reports_var.set(get_nested(context_cfg, ["n_reports"], 1))
 
         telegram_cfg = config_data.get("telegram", {})
         self.telegram_enabled_var.set(get_nested(telegram_cfg, ["enabled"], False))
-        self.telegram_token_var.set(get_nested(telegram_cfg, ["token"], ""))
+        # Sửa lỗi: Ưu tiên giải mã token đã mã hóa nếu có
+        decrypted_token = ""
+        if "token_enc" in telegram_cfg:
+            decrypted_token = general_utils.deobfuscate_text(telegram_cfg["token_enc"])
+        self.telegram_token_var.set(decrypted_token or get_nested(telegram_cfg, ["token"], ""))
         self.telegram_chat_id_var.set(get_nested(telegram_cfg, ["chat_id"], ""))
         self.telegram_skip_verify_var.set(get_nested(telegram_cfg, ["skip_verify"], False))
         self.telegram_ca_path_var.set(get_nested(telegram_cfg, ["ca_path"], ""))
@@ -477,6 +523,8 @@ class AppUI:
         self.no_run_weekend_enabled_var.set(get_nested(no_run_cfg, ["weekend_enabled"], True))
         self.norun_killzone_var.set(get_nested(no_run_cfg, ["killzone_enabled"], True))
         self.no_run_holiday_check_var.set(get_nested(no_run_cfg, ["holiday_check_enabled"], True))
+        self.no_run_holiday_country_var.set(get_nested(no_run_cfg, ["holiday_check_country"], "US"))
+        self.no_run_timezone_var.set(get_nested(no_run_cfg, ["timezone"], "Asia/Ho_Chi_Minh"))
 
         no_trade_cfg = config_data.get("no_trade", {})
         self.no_trade_enabled_var.set(get_nested(no_trade_cfg, ["enabled"], True))
@@ -503,6 +551,7 @@ class AppUI:
         self.auto_trade_dry_run_var.set(get_nested(auto_trade_cfg, ["dry_run"], False))
         self.trade_move_to_be_after_tp1_var.set(get_nested(auto_trade_cfg, ["move_to_be_after_tp1"], True))
         self.trade_trailing_atr_mult_var.set(get_nested(auto_trade_cfg, ["trailing_atr_mult"], 0.5))
+        self.trade_filling_type_var.set(get_nested(auto_trade_cfg, ["filling_type"], "IOC"))
 
         news_cfg = config_data.get("news", {})
         self.news_block_enabled_var.set(get_nested(news_cfg, ["block_enabled"], True))
@@ -549,14 +598,22 @@ class AppUI:
                 cache_enabled=self.cache_enabled_var.get(),
                 optimize_lossless=self.optimize_lossless_var.get(),
             ),
-            image_processing=ImageProcessingConfig(),
+            image_processing=ImageProcessingConfig(
+                max_width=self.image_max_width_var.get(),
+                jpeg_quality=self.image_jpeg_quality_var.get(),
+            ),
             context=ContextConfig(
                 ctx_limit=self.context_limit_chars_var.get(),
                 create_ctx_json=self.create_ctx_json_var.get(),
                 prefer_ctx_json=self.prefer_ctx_json_var.get(),
                 ctx_json_n=self.ctx_json_n_var.get(),
+                remember_context=self.remember_context_var.get(),
+                n_reports=self.context_n_reports_var.get(),
             ),
-            api=ApiConfig(),
+            api=ApiConfig(
+                tries=self.api_tries_var.get(),
+                delay=self.api_delay_var.get(),
+            ),
             telegram=TelegramConfig(
                 enabled=self.telegram_enabled_var.get(),
                 token=self.telegram_token_var.get(),
@@ -577,6 +634,8 @@ class AppUI:
                 weekend_enabled=self.no_run_weekend_enabled_var.get(),
                 killzone_enabled=self.norun_killzone_var.get(),
                 holiday_check_enabled=self.no_run_holiday_check_var.get(),
+                holiday_check_country=self.no_run_holiday_country_var.get(),
+                timezone=self.no_run_timezone_var.get(),
             ),
             no_trade=NoTradeConfig(
                 enabled=self.no_trade_enabled_var.get(),
@@ -604,6 +663,7 @@ class AppUI:
                 dry_run=self.auto_trade_dry_run_var.get(),
                 move_to_be_after_tp1=self.trade_move_to_be_after_tp1_var.get(),
                 trailing_atr_mult=self.trade_trailing_atr_mult_var.get(),
+                filling_type=self.trade_filling_type_var.get(),
             ),
             news=NewsConfig(
                 block_enabled=self.news_block_enabled_var.get(),
@@ -787,11 +847,44 @@ class AppUI:
 
     # --- UI Callbacks and Helpers ---
     def _on_tree_select(self, _evt: tk.Event):
-        """Xử lý sự kiện khi người dùng chọn một hàng trong bảng."""
-        if self.combined_report_text.strip():
-            self.ui_detail_replace(self.combined_report_text)
-        else:
-            self.ui_detail_replace("Chưa có báo cáo. Hãy bấm 'Bắt đầu'.")
+        """
+        Xử lý sự kiện khi người dùng chọn một hàng trong bảng.
+        Hiển thị báo cáo chi tiết cho mục được chọn.
+        """
+        if not self.tree:
+            return
+        selection = self.tree.selection()
+        if not selection:
+            # Khi không có gì được chọn, hiển thị báo cáo tổng hợp nếu có
+            if self.combined_report_text.strip():
+                self.ui_detail_replace(self.combined_report_text)
+            else:
+                self.ui_detail_replace("Báo cáo tổng hợp sẽ hiển thị tại đây.")
+            return
+
+        try:
+            selected_iid = selection[0]
+            item_index = int(selected_iid)
+            if 0 <= item_index < len(self.results):
+                item_data = self.results[item_index]
+                report_text = item_data.get("text", "").strip()
+                if report_text:
+                    # Hiển thị báo cáo chi tiết của file được chọn
+                    self.ui_detail_replace(report_text)
+                else:
+                    # Nếu file được chọn chưa có báo cáo, hiển thị báo cáo tổng hợp làm fallback
+                    if self.combined_report_text.strip():
+                        self.ui_detail_replace(
+                            f"Chưa có báo cáo chi tiết cho tệp này.\n\n"
+                            f"--- BÁO CÁO TỔNG HỢP ---\n{self.combined_report_text}"
+                        )
+                    else:
+                        self.ui_detail_replace("Chưa có báo cáo cho tệp này. Hãy bấm 'Bắt đầu'.")
+            else:
+                logger.warning(f"Chỉ mục treeview không hợp lệ: {item_index}")
+        except (ValueError, IndexError) as e:
+            logger.error(f"Lỗi khi xử lý lựa chọn treeview: {e}")
+            self.ui_detail_replace("Lỗi khi hiển thị chi tiết báo cáo.")
 
     def _toggle_api_visibility(self):
         """Chuyển đổi trạng thái hiển thị của ô nhập API key."""
@@ -799,39 +892,59 @@ class AppUI:
             self.api_entry.configure(show="" if self.api_entry.cget("show") == "*" else "*")
 
     def _configure_gemini_api_and_update_ui(self):
-        """Cấu hình Gemini API và cập nhật danh sách model trên UI."""
+        """
+        Sử dụng gemini_service để lấy danh sách model và cập nhật UI.
+        Hàm này được gọi mỗi khi API key thay đổi.
+        """
         api_key = self.api_key_var.get()
         if not api_key:
             self.ui_status("Vui lòng nhập Google AI API Key.")
+            if self.model_combo:
+                self.model_combo["values"] = []
             return
-        try:
-            genai.configure(api_key=api_key) # type: ignore
-            logger.info("Đã cấu hình Gemini API thành công.")
-            threading.Thread(target=self._update_model_list_in_ui, daemon=True).start()
-        except Exception as e:
-            logger.error(f"Lỗi cấu hình Gemini API: {e}")
-            self.ui_status(f"Lỗi API: {e}")
 
-    def _update_model_list_in_ui(self):
-        """Lấy danh sách model từ Gemini và cập nhật combobox."""
-        logger.debug("Bắt đầu cập nhật danh sách mô hình AI.")
+        # Chạy trong luồng riêng để không làm treo UI
+        threading.Thread(target=self._update_model_list_worker, args=(api_key,), daemon=True).start()
+
+    def _update_model_list_worker(self, api_key: str):
+        """
+        Worker chạy trong luồng nền để lấy danh sách model và cập nhật UI.
+        """
+        logger.debug("Bắt đầu worker cập nhật danh sách mô hình AI.")
+        self.ui_queue.put(lambda: self.ui_status("Đang xác thực API key và lấy model..."))
         try:
-            available_models = [m.name for m in genai.list_models() if "generateContent" in m.supported_generation_methods] # type: ignore
-            if available_models and self.model_combo:
-                def update_combo():
-                    if not self.model_combo: return
-                    self.model_combo['values'] = available_models
+            # Gọi hàm mới từ service
+            available_models = gemini_service.configure_and_get_models(api_key)
+
+            def update_ui_success():
+                if not self.model_combo:
+                    return
+                self.model_combo["values"] = available_models
+                if available_models:
+                    # Nếu model hiện tại không có trong danh sách mới, reset về mặc định
                     if self.model_var.get() not in available_models:
                         self.model_var.set(MODELS.DEFAULT_VISION)
                     self.ui_status("Đã cập nhật danh sách mô hình AI.")
-                ui_builder.enqueue(self, update_combo)
-                logger.info(f"Đã tìm thấy {len(available_models)} mô hình AI.")
-            else:
-                ui_builder.enqueue(self, lambda: self.ui_status("Không tìm thấy mô hình AI nào."))
-                logger.warning("Không tìm thấy mô hình AI khả dụng nào.")
+                else:
+                    self.ui_status("Không tìm thấy mô hình AI nào.")
+
+            self.ui_queue.put(update_ui_success)
+
+        except exceptions.PermissionDenied:
+            msg = "Lỗi API: Key không đủ quyền hoặc không hợp lệ."
+            logger.error("Lỗi quyền API khi liệt kê model.")
+
+            def update_ui_on_auth_error():
+                self.ui_status(msg)
+                if self.model_combo:
+                    # Cung cấp danh sách mặc định để người dùng vẫn có thể chọn
+                    self.model_combo["values"] = [MODELS.DEFAULT_VISION]
+                    self.model_var.set(MODELS.DEFAULT_VISION)
+
+            self.ui_queue.put(update_ui_on_auth_error)
         except Exception as e:
-            logger.error(f"Lỗi khi cập nhật danh sách mô hình AI: {e}")
-            ui_builder.enqueue(self, lambda: self.ui_status("Lỗi khi lấy danh sách mô hình."))
+            logger.error(f"Lỗi không xác định khi cập nhật danh sách mô hình: {e}")
+            self.ui_queue.put(lambda: self.ui_status("Lỗi khi lấy danh sách mô hình."))
 
     # --- UI Update Methods (Worker-Safe) ---
     def ui_status(self, message: str):

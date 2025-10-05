@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import google.generativeai as genai
-from google.generativeai.generative_models import GenerativeModel
 
 from APP.analysis import context_builder, image_processor
 from APP.core.trading import actions as trade_actions
@@ -97,15 +96,19 @@ class AnalysisWorker:
             self.app.ui_queue.put(self.app._finalize_stopped)
             raise SystemExit("Không có ảnh để phân tích.")
 
-        try:
-            self.model = GenerativeModel(model_name=self.model_name)
-            logger.debug(f"Model '{self.model_name}' được khởi tạo thành công.")
-        except Exception as e:
-            error_message = f"Không thể khởi tạo model '{self.model_name}': {e}"
-            # Sửa lỗi: Thay thế hàm không tồn tại bằng cách gọi phương thức trên app
+        api_key = self.app.api_key_var.get()
+        if not api_key:
+            self.app.ui_queue.put(lambda: self.app.show_error_message("Lỗi API", "API Key không được tìm thấy."))
+            self.app.ui_queue.put(self.app._finalize_stopped)
+            raise SystemExit("API Key không được tìm thấy.")
+
+        self.model = gemini_service.initialize_model(api_key=api_key, model_name=self.model_name)
+
+        if not self.model:
+            error_message = f"Không thể khởi tạo model '{self.model_name}'. Vui lòng kiểm tra API key và kết nối mạng."
             self.app.ui_queue.put(lambda: self.app.show_error_message("Lỗi Model", error_message))
             self.app.ui_queue.put(self.app._finalize_stopped)
-            raise SystemExit(f"Lỗi khởi tạo model: {e}")
+            raise SystemExit(f"Lỗi khởi tạo model: {self.model_name}")
 
     def _stage_2_build_context_and_check_conditions(self) -> None:
         """Giai đoạn 2: Xây dựng ngữ cảnh và kiểm tra các điều kiện."""

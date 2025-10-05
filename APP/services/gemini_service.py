@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import random
 import time
-from typing import Any, Generator, List
+from typing import Any, Generator, List, Optional
 
 import google.generativeai as genai
 from google.api_core import exceptions
@@ -13,6 +13,70 @@ logger = logging.getLogger(__name__)
 
 # Hằng số cho việc gọi API
 REQUEST_TIMEOUT: int = 1200
+
+
+def initialize_model(api_key: str, model_name: str) -> Optional[genai.GenerativeModel]:
+    """
+    Khởi tạo GenerativeModel với API key được cung cấp.
+
+    Args:
+        api_key: Khóa API của Google AI.
+        model_name: Tên của model cần khởi tạo.
+
+    Returns:
+        Một instance của GenerativeModel nếu thành công, ngược lại trả về None.
+    """
+    if not api_key:
+        logger.error("Không thể khởi tạo model: API key bị thiếu.")
+        return None
+    try:
+        # Cấu hình API key trước khi khởi tạo model.
+        # Đây là cách làm đúng và an toàn, thay vì gán trực tiếp vào client.
+        genai.configure(api_key=api_key)
+
+        # Khởi tạo model sau khi đã cấu hình.
+        model = genai.GenerativeModel(model_name=model_name)
+
+        logger.info(f"Đã khởi tạo model '{model_name}' thành công.")
+        return model
+    except exceptions.PermissionDenied as e:
+        # Bắt lỗi cụ thể hơn để cung cấp thông báo hữu ích
+        logger.error(f"Lỗi quyền API (PermissionDenied) khi khởi tạo model '{model_name}': {e}. Vui lòng kiểm tra API key.")
+        return None
+    except Exception as e:
+        logger.exception(f"Lỗi không mong muốn khi khởi tạo model '{model_name}': {e}")
+        return None
+
+
+def configure_and_get_models(api_key: str) -> List[str]:
+    """
+    Cấu hình API và lấy danh sách các model hỗ trợ 'generateContent'.
+
+    Args:
+        api_key: Khóa API của Google AI.
+
+    Returns:
+        Một danh sách tên các model khả dụng.
+    """
+    if not api_key:
+        logger.warning("API key bị thiếu, không thể lấy danh sách model.")
+        return []
+    try:
+        genai.configure(api_key=api_key)
+        available_models = [
+            m.name
+            for m in genai.list_models()
+            if "generateContent" in m.supported_generation_methods
+        ]
+        logger.info(f"Đã tìm thấy {len(available_models)} model khả dụng.")
+        return available_models
+    except exceptions.PermissionDenied as e:
+        logger.error(f"Lỗi quyền API (PermissionDenied): {e}. Vui lòng kiểm tra API key.")
+        # Ném lại lỗi để UI có thể xử lý cụ thể
+        raise
+    except Exception as e:
+        logger.exception(f"Lỗi không mong muốn khi lấy danh sách model: {e}")
+        return []
 
 
 def _handle_api_exception(
