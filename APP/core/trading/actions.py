@@ -11,7 +11,6 @@ except ImportError:
 from APP.analysis import report_parser
 from APP.persistence import log_handler
 from APP.services import mt5_service
-from APP.ui.utils import ui_builder
 
 if TYPE_CHECKING:
     from APP.configs.app_config import RunConfig
@@ -123,7 +122,8 @@ def manage_existing_trades(
                 new_sl = pos.get("price_open")
             elif new_sl in ["last_swing_low_m5", "last_swing_high_m5"]:
                 tf_code = mt5.TIMEFRAME_M5 if mt5 else None
-                if not tf_code: continue
+                if not tf_code:
+                    continue
                 bars_to_check = 20 # Có thể đưa vào config
                 low, high = mt5_service.get_last_swing_low_high(pos["symbol"], tf_code, bars_to_check)
                 

@@ -207,9 +207,11 @@ def find_order_blocks(rates: Sequence[dict], lookback: int = 100, mitigation_thr
     nearest_bearish = next((ob for ob in unmitigated_obs if ob.type == "Bearish"), None)
     
     results = []
-    if nearest_bullish: results.append(nearest_bullish)
-    if nearest_bearish: results.append(nearest_bearish)
-    
+    if nearest_bullish:
+        results.append(nearest_bullish)
+    if nearest_bearish:
+        results.append(nearest_bearish)
+
     return results
 
 def analyze_premium_discount(current_price: float, swing_highs: list[LiquidityLevel], swing_lows: list[LiquidityLevel]) -> TradingRange | None:
@@ -245,8 +247,8 @@ def find_market_structure_shift(rates: Sequence[dict], swing_highs: list[Liquidi
     if len(all_swings) < 4:
         return None
 
-    last_highs = sorted([s for s in all_swings if isinstance(s, LiquidityLevel) and any(s.price == h.price for h in swing_highs)], key=lambda x: x.bar_index, reverse=True)
-    last_lows = sorted([s for s in all_swings if isinstance(s, LiquidityLevel) and any(s.price == l.price for l in swing_lows)], key=lambda x: x.bar_index, reverse=True)
+    last_highs = sorted([s for s in all_swings if isinstance(s, LiquidityLevel) and any(s.price == high.price for high in swing_highs)], key=lambda x: x.bar_index, reverse=True)
+    last_lows = sorted([s for s in all_swings if isinstance(s, LiquidityLevel) and any(s.price == low.price for low in swing_lows)], key=lambda x: x.bar_index, reverse=True)
 
     if len(last_highs) < 2 or len(last_lows) < 2:
         return None

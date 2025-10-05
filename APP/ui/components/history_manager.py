@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 
 from APP.configs import workspace_config
 from APP.ui.utils import ui_builder
-from APP.utils import general_utils
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +50,14 @@ class HistoryManager:
         try:
             listbox.delete(0, "end")
             base_folder = self.app.folder_path.get()
-            symbol = self.app.mt5_symbol_var.get()
-            if not base_folder or not symbol:
-                self.logger.warning("Thư mục gốc hoặc symbol chưa được đặt, không thể làm mới danh sách.")
+
+            if not base_folder:
+                self.logger.warning("Thư mục gốc chưa được đặt, không thể làm mới danh sách.")
                 setattr(self.app, target_attr, [])
                 return
 
-            reports_dir = workspace_config.get_reports_dir(base_folder, symbol)
+            # Logic đã được sửa: chỉ phụ thuộc vào base_folder.
+            reports_dir = workspace_config.get_reports_dir(base_folder, "")
             if not reports_dir.exists():
                 self.logger.warning(f"Thư mục báo cáo không tồn tại tại '{reports_dir}', không thể làm mới {target_attr}.")
                 setattr(self.app, target_attr, [])
@@ -144,6 +144,35 @@ class HistoryManager:
             self.logger.error(f"{error_msg}: {e}", exc_info=True)
             ui_builder.show_message("Lỗi", f"Không thể xóa tệp:\n{e}")
 
+    def _open_selected_file(self, listbox: Optional[tk.Listbox], file_list_attr: str, file_type: str) -> None:
+        """
+        Hàm chung để mở tệp được chọn bằng ứng dụng mặc định của hệ điều hành.
+        """
+        self.logger.debug(f"Bắt đầu mở tệp loại: {file_type}")
+        if not listbox:
+            return
+        file_path = None
+        try:
+            sel = listbox.curselection()
+            if not sel:
+                return
+            file_list = getattr(self.app, file_list_attr, [])
+            if not file_list or sel[0] >= len(file_list):
+                return
+            file_path = file_list[sel[0]]
+
+            # Mở file bằng os.startfile để tương thích tốt hơn trên Windows
+            import os
+            os.startfile(file_path)
+
+            self.logger.debug(f"Đã yêu cầu mở tệp: {file_path}")
+        except Exception as e:
+            error_msg = f"Lỗi khi mở {file_type}"
+            if file_path:
+                error_msg += f" '{file_path.name}'"
+            self.logger.error(f"{error_msg}: {e}", exc_info=True)
+            ui_builder.show_message("Lỗi", f"Không thể mở tệp:\n{e}")
+
     # --- Public Methods for MD Reports ---
 
     def refresh_history_list(self) -> None:
@@ -156,30 +185,7 @@ class HistoryManager:
 
     def open_history_selected(self) -> None:
         """Mở báo cáo lịch sử được chọn bằng ứng dụng mặc định."""
-        self.logger.debug("Bắt đầu mở tệp báo cáo được chọn.")
-        if not self.app.history_list:
-            return
-        file_path = None
-        try:
-            sel = self.app.history_list.curselection()
-            if not sel:
-                return
-            file_list = getattr(self.app, "_history_files", [])
-            if not file_list or sel[0] >= len(file_list):
-                return
-            file_path = file_list[sel[0]]
-            
-            # Mở file bằng os.startfile để tương thích tốt hơn trên Windows
-            import os
-            os.startfile(file_path)
-            
-            self.logger.debug(f"Đã yêu cầu mở tệp: {file_path}")
-        except Exception as e:
-            error_msg = "Lỗi khi mở báo cáo"
-            if file_path:
-                error_msg += f" '{file_path.name}'"
-            self.logger.error(f"{error_msg}: {e}", exc_info=True)
-            ui_builder.show_message("Lỗi", f"Không thể mở tệp:\n{e}")
+        self._open_selected_file(self.app.history_list, "_history_files", "Báo cáo")
 
     def delete_history_selected(self) -> None:
         """Xóa báo cáo lịch sử được chọn."""
@@ -192,12 +198,12 @@ class HistoryManager:
         self.logger.debug("Bắt đầu mở thư mục báo cáo.")
         try:
             base_folder = self.app.folder_path.get()
-            symbol = self.app.mt5_symbol_var.get()
-            if not base_folder or not symbol:
-                ui_builder.show_message("Thông báo", "Vui lòng chọn thư mục ảnh và nhập symbol trước.")
+            if not base_folder:
+                ui_builder.show_message("Thông báo", "Vui lòng chọn thư mục ảnh trước.")
                 return
 
-            reports_dir = workspace_config.get_reports_dir(base_folder, symbol)
+            # Đồng bộ logic: Không còn phụ thuộc vào symbol, nhất quán với `_refresh_file_list`.
+            reports_dir = workspace_config.get_reports_dir(base_folder, "")
             if reports_dir.exists():
                 import os
                 os.startfile(reports_dir)
@@ -221,11 +227,9 @@ class HistoryManager:
         """Hiển thị nội dung của tệp JSON được chọn."""
         self._preview_selected_file(self.app.json_list, "_json_files", "JSON")
 
-    def load_json_selected(self) -> None:
-        """Tải và áp dụng cấu hình từ tệp JSON được chọn."""
-        self.logger.debug("Bắt đầu tải cấu hình từ tệp JSON được chọn.")
-        # Placeholder for future implementation
-        ui_builder.show_message("Thông báo", "Chức năng tải cấu hình từ JSON chưa được cài đặt.")
+    def open_json_selected(self) -> None:
+        """Mở tệp JSON được chọn bằng ứng dụng mặc định."""
+        self._open_selected_file(self.app.json_list, "_json_files", "JSON")
 
     def delete_json_selected(self) -> None:
         """Xóa tệp JSON được chọn."""

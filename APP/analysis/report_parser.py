@@ -170,9 +170,11 @@ def repair_json_string(s: str) -> str:
     """
     logger.debug("Bắt đầu sửa chuỗi JSON.")
     s = s.strip()
-    
-    if not s.startswith("{"): s = "{" + s
-    if not s.endswith("}"): s = s + "}"
+
+    if not s.startswith("{"):
+        s = "{" + s
+    if not s.endswith("}"):
+        s = s + "}"
 
     s = RE_REPAIR_TRAILING_COMMA.sub(r"\1", s)
     s = RE_REPAIR_UNQUOTED_KEYS.sub(r'\1"\2":', s)
@@ -198,14 +200,20 @@ def find_balanced_json_after(text: str, start_idx: int) -> Tuple[Optional[str], 
 
     for i in range(start_idx, len(text)):
         char = text[i]
-        if json_start == -1 and char == '{': json_start = i
+        if json_start == -1 and char == '{':
+            json_start = i
         if json_start != -1:
-            if char == '"' and not escape: in_string = not in_string
-            elif char == '\\': escape = not escape
-            else: escape = False
+            if char == '"' and not escape:
+                in_string = not in_string
+            elif char == '\\':
+                escape = not escape
+            else:
+                escape = False
             if not in_string:
-                if char == '{': brace_count += 1
-                elif char == '}': brace_count -= 1
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
             if brace_count == 0:
                 json_str = text[json_start : i + 1]
                 logger.debug(f"Tìm thấy khối JSON cân bằng dài {len(json_str)} ký tự.")
@@ -224,7 +232,8 @@ def extract_json_block_prefer(text: str) -> Dict[str, Any]:
     search_idx = 0
     while search_idx < len(text):
         start_brace = text.find('{', search_idx)
-        if start_brace == -1: break
+        if start_brace == -1:
+            break
         json_str, end_idx = find_balanced_json_after(text, start_brace)
         if json_str and end_idx:
             possible_blocks.append(json_str)
@@ -251,7 +260,8 @@ def extract_json_block_prefer(text: str) -> Dict[str, Any]:
 
 def _generate_positions_report(positions: List[Dict[str, Any]]) -> str:
     """Hàm phụ trợ: Tạo phần báo cáo cho các lệnh đang mở."""
-    if not positions: return ""
+    if not positions:
+        return ""
     header = "\n--- LỆNH ĐANG MỞ ---"
     lines = [
         f"- {'BUY' if p.get('type') == 0 else 'SELL'} {p.get('volume')} tại {p.get('price_open')} | SL: {p.get('sl')} | TP: {p.get('tp')} | PnL: {p.get('profit', 0.0):.2f}"
@@ -278,9 +288,11 @@ def _generate_key_levels_report(data: Dict[str, Any]) -> str:
 
 def _generate_ict_report(ict_patterns: Dict[str, Any]) -> str:
     """Hàm phụ trợ: Tạo phần báo cáo cho các mẫu hình ICT."""
-    if not ict_patterns: return ""
+    if not ict_patterns:
+        return ""
     lines = [f"- {p}: {v}" for p, v in ict_patterns.items() if v]
-    if not lines: return ""
+    if not lines:
+        return ""
     return "\n".join(["\n--- PHÂN TÍCH ICT ---"] + lines)
 
 

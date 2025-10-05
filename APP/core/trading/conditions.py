@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import holidays
 
-from APP.services import mt5_service, news_service, telegram_service
-from APP.ui.utils import ui_builder
+from APP.services import mt5_service, telegram_service
 
 if TYPE_CHECKING:
     from APP.configs.app_config import RunConfig
@@ -103,16 +102,14 @@ class NewsCondition(AbstractCondition):
     ) -> str | None:
         if not safe_mt5_data:
             return "Không có dữ liệu MT5 để kiểm tra tin tức."
-        news_events = kwargs.get("news_events")
-        if cfg.news.block_enabled and news_events:
-            is_in_window, news_reason = news_service.is_within_news_window(
-                events=news_events,
-                symbol=cfg.mt5.symbol,
-                minutes_before=cfg.news.block_before_min,
-                minutes_after=cfg.news.block_after_min,
-            )
-            if is_in_window:
-                return f"Tin tức quan trọng: {news_reason}"
+        
+        if cfg.news.block_enabled:
+            news_analysis = safe_mt5_data.get("news_analysis", {})
+            is_in_window = news_analysis.get("is_in_news_window", False)
+            reason = news_analysis.get("reason")
+
+            if is_in_window and reason:
+                return f"Tin tức quan trọng: {reason}"
         return None
 
 
@@ -229,8 +226,7 @@ class KeyLevelCondition(AbstractCondition):
 
 def check_no_trade_conditions(
     safe_mt5_data: Optional[SafeData],
-    cfg: RunConfig,
-    news_events: list[dict[str, Any]] | None,
+    cfg: RunConfig
 ) -> list[str]:
     """
     Đánh giá các điều kiện NO-TRADE bằng cách sử dụng Strategy Pattern.
@@ -259,7 +255,7 @@ def check_no_trade_conditions(
     reasons: list[str] = []
     for condition in conditions:
         reason = condition.check(
-            safe_mt5_data, cfg, news_events=news_events
+            safe_mt5_data, cfg
         )
         if reason:
             reasons.append(reason)
@@ -285,7 +281,6 @@ def handle_early_exit(
     của worker.
     """
     from APP.persistence import log_handler
-    from APP.services import telegram_service
 
     logger.info(f"Thoát sớm. Giai đoạn: {stage}, Lý do: {reason}")
 

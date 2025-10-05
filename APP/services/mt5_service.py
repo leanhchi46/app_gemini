@@ -7,17 +7,18 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from statistics import median
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional, Sequence, cast
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 import MetaTrader5 as mt5_lib
 
-# Assign mt5_lib to a new variable typed as Any to suppress pyright errors
-mt5: Any = mt5_lib
-
 from APP.analysis import ict_analyzer
 from APP.analysis.ict_analyzer import LiquidityLevel
 from APP.utils.safe_data import SafeData
+
+# Assign mt5_lib to a new variable typed as Any to suppress pyright errors
+mt5: Any = mt5_lib
+
 
 logger = logging.getLogger(__name__)
 
@@ -190,18 +191,19 @@ def value_per_point(symbol: str, info_obj: Any | None = None) -> float | None:
         logger.warning("MetaTrader5 module not installed, cannot get value_per_point.")
         return None
     try:
-        info_obj = info_obj or mt5.symbol_info(symbol)
-        if not info_obj:
+        # Nếu không có info_obj, lấy từ MT5. Nếu có, nó có thể là dict hoặc object.
+        effective_info = info_obj if info_obj is not None else mt5.symbol_info(symbol)
+        if not effective_info:
             logger.warning(f"Không tìm thấy thông tin symbol cho {symbol}.")
             return None
 
-        point = float(getattr(info_obj, "point", 0.0) or 0.0)
+        point = float(info_get(effective_info, "point", 0.0) or 0.0)
         if point <= 0:
             logger.debug("Point size <= 0, không thể tính value_per_point.")
             return None
 
-        tick_value = float(getattr(info_obj, "trade_tick_value", 0.0) or 0.0)
-        tick_size = float(getattr(info_obj, "trade_tick_size", 0.0) or 0.0)
+        tick_value = float(info_get(effective_info, "trade_tick_value", 0.0) or 0.0)
+        tick_size = float(info_get(effective_info, "trade_tick_size", 0.0) or 0.0)
         if tick_value > 0 and tick_size > 0:
             result = tick_value * (point / tick_size)
             logger.debug(f"Tính value_per_point từ tick_value/tick_size: {result}")
@@ -226,7 +228,7 @@ def value_per_point(symbol: str, info_obj: Any | None = None) -> float | None:
             logger.debug(f"Lỗi khi tính value_per_point từ order_calc_profit: {e}")
             pass
 
-        csize = float(getattr(info_obj, "trade_contract_size", 0.0) or 0.0)
+        csize = float(info_get(effective_info, "contract_size", 0.0) or 0.0)
         if csize > 0:
             result = csize * point
             logger.debug(f"Tính value_per_point từ contract_size: {result}")
@@ -992,7 +994,7 @@ def get_market_data(
             swing_lows: list[LiquidityLevel] = liquidity_data.get("swing_lows_SSL", [])
             ict_patterns[f"liquidity_{tf_key}"] = {
                 "swing_highs_BSL": [asdict(h) for h in swing_highs],
-                "swing_lows_SSL": [asdict(l) for l in swing_lows],
+                "swing_lows_SSL": [asdict(low) for low in swing_lows],
             }
 
             # 2. Các mẫu hình ICT khác
@@ -1014,7 +1016,7 @@ def get_market_data(
             
             logger.debug(f"Đã hoàn thành phân tích ICT cho timeframe {tf_name}.")
 
-    except Exception as e:
+    except Exception:
         logger.exception("Lỗi nghiêm trọng trong quá trình phân tích ICT.")
         ict_patterns = {}
 

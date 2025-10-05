@@ -11,10 +11,9 @@ import logging
 import tkinter as tk
 from datetime import datetime
 from tkinter import ttk
-from typing import TYPE_CHECKING, Any, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 import MetaTrader5 as mt5_lib
-from APP.ui.utils import ui_builder
 
 # Cast mt5 to Any to suppress pyright errors for missing type stubs
 mt5: Any = mt5_lib
@@ -33,9 +32,12 @@ else:
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         from matplotlib.backends._backend_tk import NavigationToolbar2Tk
     except ImportError:
-        class Figure: pass
-        class FigureCanvasTkAgg: pass
-        class NavigationToolbar2Tk: pass
+        class Figure:
+            pass
+        class FigureCanvasTkAgg:
+            pass
+        class NavigationToolbar2Tk:
+            pass
 
 
 class ChartTab:
@@ -140,6 +142,9 @@ class ChartTab:
     def load_data(self):
         """Tải dữ liệu từ file CSV."""
         from tkinter import filedialog
+        # Di chuyển import vào đây để tránh circular import
+        from APP.ui.utils import ui_builder
+
         filepath = filedialog.askopenfilename(
             title="Chọn file OHLC (.csv)",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
@@ -500,8 +505,10 @@ class ChartTab:
             for p in positions:
                 col = "#22c55e" if p.type == 0 else "#ef4444"
                 self.ax_price.axhline(p.price_open, color=col, ls="--", lw=1.0, alpha=0.95)
-                if p.sl: self.ax_price.axhline(p.sl, color="#ef4444", ls=":", lw=1.0, alpha=0.85)
-                if p.tp: self.ax_price.axhline(p.tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
+                if p.sl:
+                    self.ax_price.axhline(p.sl, color="#ef4444", ls=":", lw=1.0, alpha=0.85)
+                if p.tp:
+                    self.ax_price.axhline(p.tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
                 label = f"{'BUY' if p.type==0 else 'SELL'} {p.volume:.2f} @{self._fmt(p.price_open, digits)}"
                 self.ax_price.text(1.01, p.price_open, " " + label, va="center", color=col, fontsize=8, transform=self.ax_price.get_yaxis_transform())
             
@@ -509,19 +516,14 @@ class ChartTab:
             for o in orders:
                 pend_col = "#8b5cf6"
                 self.ax_price.axhline(o.price_open, color=pend_col, ls="--", lw=1.1, alpha=0.95)
+                # Sửa lỗi pyright: Di chuyển logic sử dụng 'o' và 'pend_col' vào trong vòng lặp
                 txt = f"PEND {o.type_description} {o.volume_current:.2f} @{self._fmt(o.price_open, digits)}"
                 self.ax_price.text(1.01, o.price_open, " " + txt, va="center", color=pend_col, fontsize=8, transform=self.ax_price.get_yaxis_transform())
-                if o.sl: self.ax_price.axhline(o.sl, color="#ef4444", ls=":", lw=1.0, alpha=0.85)
-                if o.tp: self.ax_price.axhline(o.tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
+                if o.sl:
+                    self.ax_price.axhline(o.sl, color="#ef4444", ls=":", lw=1.0, alpha=0.85)
+                if o.tp:
+                    self.ax_price.axhline(o.tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
 
-            tick = mt5.symbol_info_tick(sym)
-            if tick:
-                current_price = tick.bid
-                self.ax_price.axhline(current_price, color='black', ls='--', lw=0.8, alpha=0.9)
-                self.ax_price.text(1.01, current_price, f" {self._fmt(current_price, digits)}",
-                                   va="center", color='black', fontsize=8,
-                                   bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', boxstyle='round,pad=0.1'),
-                                   transform=self.ax_price.get_yaxis_transform())
         except Exception as e:
             logger.error(f"Lỗi khi vẽ các đối tượng giao dịch: {e}")
 
@@ -537,7 +539,8 @@ class ChartTab:
                     self.ax_price.clear()
                     self.ax_price.set_title(f"Chart error: {e}")
                     self.canvas.draw_idle()
-            except Exception: pass
+            except Exception:
+                pass
 
         sym = self.symbol_var.get().strip()
         try:
@@ -584,10 +587,13 @@ class ChartTab:
 
             config = self.app.run_config.no_trade
             ok = False
-            if config.allow_session_asia: ok = ok or _in(ss.get("asia"))
-            if config.allow_session_london: ok = ok or _in(ss.get("london"))
-            if config.allow_session_ny: ok = ok or _in(ss.get("newyork_am")) or _in(ss.get("newyork_pm"))
-            
+            if config.allow_session_asia:
+                ok = ok or _in(ss.get("asia"))
+            if config.allow_session_london:
+                ok = ok or _in(ss.get("london"))
+            if config.allow_session_ny:
+                ok = ok or _in(ss.get("newyork_am")) or _in(ss.get("newyork_pm"))
+
             if not any([config.allow_session_asia, config.allow_session_london, config.allow_session_ny]):
                 return True
             return ok
@@ -607,7 +613,6 @@ class ChartTab:
             # We can still show upcoming news
             from APP.services import news_service
             sym = self.symbol_var.get().strip()
-            from APP.services import news_service
             from APP.utils.general_utils import format_timedelta
 
             # Sử dụng cache của app để tránh gọi API liên tục

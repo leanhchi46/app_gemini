@@ -31,9 +31,12 @@ def get_workspace_dir() -> Path:
 def get_reports_dir(base_folder: str | Path, symbol: str) -> Path:
     """
     Lấy đường dẫn đến thư mục "Reports" cho một symbol cụ thể, tạo nó nếu chưa tồn tại.
+    Thư mục Reports được giả định là một thư mục con trực tiếp của base_folder.
     """
-    # Đường dẫn bây giờ sẽ là base_folder/SYMBOL/Reports
-    reports_dir = Path(base_folder) / symbol / "Reports"
+    # Sửa lỗi logic: Thư mục `base_folder` do người dùng chọn (ví dụ: .../XAUUSD)
+    # đã chứa symbol. Thư mục Reports nằm trực tiếp bên trong nó.
+    # Tham số `symbol` được giữ lại để tương thích nhưng không còn được sử dụng để xây dựng đường dẫn.
+    reports_dir = Path(base_folder) / "Reports"
     try:
         reports_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -66,7 +69,7 @@ def load_config_from_file(workspace_path: str | Path | None = None) -> dict[str,
         if "telegram" in data and "token_enc" in data["telegram"]:
             token_enc = data["telegram"]["token_enc"]
             if token_enc:
-                data["telegram"]["token"] = deobfuscate_text(token_enc)
+                data["telegram"]["token"] = deobfuscate_text(token_enc, "telegram_token_salt")
 
         logger.info("Tải cấu hình từ file thành công.")
         return data
@@ -92,7 +95,7 @@ def save_config_to_file(config_data: dict[str, Any]):
     if "telegram" in data_to_save and "token" in data_to_save["telegram"]:
         token = data_to_save["telegram"]["token"]
         if token:
-            data_to_save["telegram"]["token_enc"] = obfuscate_text(token)
+            data_to_save["telegram"]["token_enc"] = obfuscate_text(token, "telegram_token_salt")
         # Luôn xóa key gốc để không lưu vào file
         del data_to_save["telegram"]["token"]
 

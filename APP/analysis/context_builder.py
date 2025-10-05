@@ -13,7 +13,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
 
 # TODO: Tích hợp backtester và vectorizer vào cấu trúc APP
 # from . import backtester
@@ -284,7 +284,8 @@ def build_context_from_reports(
         if "recent_history_summary" in slim_ctx:
             slim_ctx.pop("recent_history_summary")
             text = to_json(composed)
-            if len(text) <= budget_chars: return text, plan
+            if len(text) <= budget_chars:
+                return text, plan
         # Thêm các bước làm gọn khác nếu cần
     except Exception:
         logger.exception("Lỗi trong quá trình làm gọn ngữ cảnh.")
@@ -305,7 +306,8 @@ def _create_concept_value_table(data: SafeData) -> str:
     table = "| Khái niệm (Concept) | Giá trị (Value) |\n|---|---|\n"
     def add_row(concept: str, value: Any):
         nonlocal table
-        if value is not None and value != "": table += f"| {concept} | {value} |\n"
+        if value is not None and value != "":
+            table += f"| {concept} | {value} |\n"
 
     add_row("Symbol", data.get('symbol'))
     add_row("Killzone Hiện tại", data.get('killzone_active', "Không có"))
@@ -377,15 +379,22 @@ def coordinate_context_building(
 
     if safe_mt5_data and safe_mt5_data.raw:
         logger.debug("Dữ liệu MT5 có sẵn, bắt đầu làm giàu với tin tức.")
-        # Làm giàu với phân tích tin tức
+        # Làm giàu với phân tích tin tức bằng cơ chế cache
         try:
-            news_events = news_service.get_forex_factory_news()
-            is_in_window, reason = news_service.is_within_news_window(
-                events=news_events, symbol=cfg.mt5.symbol,
-                minutes_before=cfg.news.block_before_min, minutes_after=cfg.news.block_after_min,
+            is_in_window, reason, updated_events, updated_fetch_time = news_service.within_news_window_cached(
+                symbol=cfg.mt5.symbol,
+                minutes_before=cfg.news.block_before_min,
+                minutes_after=cfg.news.block_after_min,
+                cache_events=app.news_events,
+                cache_fetch_time=app.news_fetch_time,
+                ttl_sec=cfg.news.cache_ttl_sec,
             )
+            # Cập nhật lại cache trên app
+            app.news_events = updated_events
+            app.news_fetch_time = updated_fetch_time
+
             upcoming = news_service.next_events_for_symbol(
-                events=news_events, symbol=cfg.mt5.symbol, limit=3
+                events=updated_events, symbol=cfg.mt5.symbol, limit=3
             )
             safe_mt5_data.raw["news_analysis"] = {
                 "is_in_news_window": is_in_window, "reason": reason, "upcoming_events": upcoming

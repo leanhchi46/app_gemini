@@ -5,7 +5,10 @@ import random
 import time
 from typing import Any, Generator, List, Optional
 
-import google.generativeai as genai
+# Sửa lỗi pyright bằng cách import từ các submodule cụ thể theo gợi ý
+from google.generativeai.client import configure
+from google.generativeai.generative_models import GenerativeModel
+from google.generativeai.models import list_models
 from google.api_core import exceptions
 
 # Khởi tạo logger cho service này
@@ -15,7 +18,7 @@ logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT: int = 1200
 
 
-def initialize_model(api_key: str, model_name: str) -> Optional[genai.GenerativeModel]:
+def initialize_model(api_key: str, model_name: str) -> Optional[GenerativeModel]:
     """
     Khởi tạo GenerativeModel với API key được cung cấp.
 
@@ -32,10 +35,10 @@ def initialize_model(api_key: str, model_name: str) -> Optional[genai.Generative
     try:
         # Cấu hình API key trước khi khởi tạo model.
         # Đây là cách làm đúng và an toàn, thay vì gán trực tiếp vào client.
-        genai.configure(api_key=api_key)
+        configure(api_key=api_key)
 
         # Khởi tạo model sau khi đã cấu hình.
-        model = genai.GenerativeModel(model_name=model_name)
+        model = GenerativeModel(model_name=model_name)
 
         logger.info(f"Đã khởi tạo model '{model_name}' thành công.")
         return model
@@ -62,10 +65,10 @@ def configure_and_get_models(api_key: str) -> List[str]:
         logger.warning("API key bị thiếu, không thể lấy danh sách model.")
         return []
     try:
-        genai.configure(api_key=api_key)
+        configure(api_key=api_key)
         available_models = [
             m.name
-            for m in genai.list_models()
+            for m in list_models()
             if "generateContent" in m.supported_generation_methods
         ]
         logger.info(f"Đã tìm thấy {len(available_models)} model khả dụng.")

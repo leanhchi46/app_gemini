@@ -27,7 +27,6 @@ except ImportError:  # pragma: no cover - optional dependency
     certifi = None  # type: ignore
 
 from APP.utils.general_utils import tg_html_escape
-from APP.configs.app_config import TelegramConfig
 
 if TYPE_CHECKING:
     from APP.configs.app_config import RunConfig

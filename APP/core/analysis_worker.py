@@ -4,7 +4,7 @@ import logging
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import google.generativeai as genai
 
@@ -15,7 +15,6 @@ from APP.persistence import md_handler
 from APP.persistence.json_handler import JsonSaver
 from APP.services import gemini_service
 from APP.analysis import prompt_builder
-from APP.ui.utils import ui_builder
 from APP.utils.safe_data import SafeData
 
 if TYPE_CHECKING:
@@ -128,7 +127,7 @@ class AnalysisWorker:
 
         # Kiểm tra điều kiện NO-TRADE ngay sau khi có context
         no_trade_reasons = trade_conditions.check_no_trade_conditions(
-            self.safe_mt5_data, self.cfg, getattr(self.app, "ff_cache_events_local", None)
+            self.safe_mt5_data, self.cfg
         )
         if no_trade_reasons:
             reason_str = "\n- ".join(no_trade_reasons)
@@ -305,7 +304,7 @@ class AnalysisWorker:
 
             self.app.combined_report_text = self.combined_text
             # Tái cấu trúc: Sử dụng lớp MdSaver chuyên dụng
-            saved_path = md_handler.MdSaver.save_report(self.combined_text, self.cfg)
+            md_handler.MdSaver.save_report(self.combined_text, self.cfg)
             try:
                 # Tái cấu trúc: Sử dụng lớp JsonSaver chuyên dụng
                 json_saver = JsonSaver(config=self.cfg)

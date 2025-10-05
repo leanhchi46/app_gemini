@@ -16,7 +16,7 @@ import cloudscraper
 from bs4 import BeautifulSoup
 
 if TYPE_CHECKING:
-    from APP.configs.app_config import RunConfig
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -69,12 +69,18 @@ def _parse_html_data(html: str) -> List[Dict[str, Any]]:
     for row in rows:
         # Cập nhật ngày hiện tại
         date_cell = row.find("td", class_="calendar__date")
-        if date_cell and "date" in date_cell.text.lower():
-            date_text = " ".join(date_cell.text.strip().split()[1:])
+        # SỬA LỖI: Chỉ cần có class 'calendar__date' là đủ, không cần kiểm tra text.
+        if date_cell:
+            date_text = " ".join(date_cell.text.strip().split()) # Lấy toàn bộ text như "Mon Oct 6"
             try:
-                current_date = datetime.strptime(f"{date_text} {datetime.now().year}", "%b %d %Y").date()
-            except ValueError:
-                logger.warning(f"Không thể phân tích ngày: {date_text}")
+                # Cố gắng parse ngày từ text, bỏ qua các từ như "Mon", "Tue"
+                date_parts = date_text.split()
+                if len(date_parts) >= 2:
+                    # Lấy 2 phần cuối (ví dụ: "Oct 6")
+                    clean_date_text = " ".join(date_parts[-2:])
+                    current_date = datetime.strptime(f"{clean_date_text} {datetime.now().year}", "%b %d %Y").date()
+            except (ValueError, IndexError):
+                logger.warning(f"Không thể phân tích ngày từ chuỗi: '{date_text}'")
                 continue
         
         if not current_date:
@@ -85,33 +91,68 @@ def _parse_html_data(html: str) -> List[Dict[str, Any]]:
             continue
 
         try:
+            # Logic kiểm tra impact đã được sửa
             impact_cell = row.find("td", class_="calendar__impact")
-            impact_title = impact_cell.find("span").get("title", "").lower()
-            if "high" not in impact_title:
+            if not impact_cell:
+                continue
+            impact_span = impact_cell.find("span")
+            if not impact_span:
                 continue
 
-            title = row.find("td", class_="calendar__event").text.strip()
+            # Sửa lỗi pyright: Kiểm tra class an toàn hơn
+            span_classes = impact_span.get("class")
+            if not isinstance(span_classes, list) or "icon--ff-impact-red" not in span_classes:
+                continue
+
+            # Sửa lỗi pyright: Kiểm tra sự tồn tại của cell trước khi lấy text
+            title_cell = row.find("td", class_="calendar__event")
+            if not title_cell:
+                continue
+            title = title_cell.text.strip()
+
             if not title or any(k in title.lower() for k in EXCLUDED_EVENT_KEYWORDS):
                 continue
 
-            time_str = row.find("td", class_="calendar__time").text.strip()
+            # Sửa lỗi pyright: Kiểm tra sự tồn tại của cell trước khi lấy text
+            time_cell = row.find("td", class_="calendar__time")
+            if not time_cell:
+                continue
+            time_str = time_cell.text.strip()
+
             if not time_str or "all-day" in time_str.lower():
                 continue
+
+            # Sửa lỗi: Xử lý thời gian "Tentative"
+            event_time = None
+            if "tentative" in time_str.lower():
+                # Gán thời gian mặc định là nửa đêm cho các sự kiện không chắc chắn
+                event_time = datetime.min.time()
+            else:
+                try:
+                    # Chuyển đổi thời gian như bình thường
+                    event_time = datetime.strptime(time_str, "%I:%M%p").time()
+                except ValueError:
+                    logger.warning(f"Không thể parse chuỗi thời gian: '{time_str}'. Bỏ qua sự kiện.")
+                    continue
             
-            # Chuyển đổi thời gian
-            event_time = datetime.strptime(time_str, "%I:%M%p").time()
+            if event_time is None:
+                continue
             dt_local = datetime.combine(current_date, event_time)
             # Giả sử thời gian từ FF là giờ New York (ET), cần chuyển sang UTC rồi sang local
             # Đây là một giả định đơn giản, thực tế cần xử lý múi giờ phức tạp hơn
             dt_utc = dt_local.astimezone(timezone.utc)
 
+            # Sửa lỗi pyright: Kiểm tra sự tồn tại của cell trước khi lấy text
+            currency_cell = row.find("td", class_="calendar__currency")
+            currency = currency_cell.text.strip().upper() if currency_cell else None
+
             events.append({
                 "when": dt_utc.astimezone(), # Chuyển sang múi giờ địa phương
                 "title": title,
-                "curr": row.find("td", class_="calendar__currency").text.strip().upper() or None,
+                "curr": currency,
             })
         except Exception:
-            logger.warning(f"Lỗi khi parse một hàng sự kiện từ Forex Factory", exc_info=True)
+            logger.warning("Lỗi khi parse một hàng sự kiện từ Forex Factory", exc_info=True)
             continue
             
     return events

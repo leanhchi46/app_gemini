@@ -14,16 +14,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
-# logger và TYPE_CHECKING
-logger = logging.getLogger(__name__)
-if TYPE_CHECKING:
-    from APP.configs.app_config import RunConfig
-
-# Các import cục bộ
 from APP.analysis import report_parser
 from APP.configs import workspace_config
 from APP.persistence import log_handler
 from APP.utils import general_utils
+
+# logger và TYPE_CHECKING
+logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from APP.configs.app_config import RunConfig
 
 
 class JsonSaver:
@@ -160,7 +159,7 @@ class JsonSaver:
             logger.info(f"Đã lưu file JSON báo cáo thành công tại: {out_path.name}")
             general_utils.cleanup_old_files(self.reports_dir, "ctx_*.json", self.config.folder.max_files)
             return out_path
-        except Exception as e:
+        except Exception:
             logger.exception(f"LỖI NGHIÊM TRỌNG khi lưu JSON cuối cùng vào {out_path.name}")
             return None
 

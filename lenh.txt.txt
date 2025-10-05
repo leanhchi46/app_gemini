@@ -5,7 +5,14 @@ nếu có lỗi đọc kỹ và Kiểm tra đồng bộ với toàn dự án @/A
 tôi muốn toàn bộ dự án được liên kết logic với nhau chứ không phải sửa cục bộ.
 Kiểm tra @problems sau mỗi lần hoàn thành file để đảm bảo không bị lỗi code.
 Chú ý: cập nhật UI (giao diện) để đúng với logic.
-_------------------------------------------------
+------------------------------------
+tôi muốn kiểm tra logic đồng bộ với toàn dự án @/APP để tránh lỗi. 
+tôi muốn toàn bộ dự án được liên kết logic với nhau chứ không phải sửa cục bộ.
+Kiểm tra @problems sau mỗi lần hoàn thành file để đảm bảo không bị lỗi code.
+Chú ý: cập nhật UI (giao diện) để đúng với logic.
+
+
+------------------------------------------
 check lỗi bằng pyright APP --outputjson và fix đến khi hết.
 đọc kỹ và Kiểm tra đồng bộ với toàn dự án @/APP để tránh lỗi. 
 tôi muốn toàn bộ dự án được liên kết logic với nhau chứ không phải sửa cục bộ.
@@ -29,3 +36,4 @@ thực hiện đề xuất tất cả đề xuất trên vào trong APP/utils/ge
 Kiểm tra đồng bộ với toàn dự án @/APP để tránh lỗi
 ---------------------
 tôi muốn chú thích 1. Mô tả chức năng và 2. Đánh giá Logic và Code của file  vào file rule-tool.txt để cline ghi nhớ
+------------------------------------------------------

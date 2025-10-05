@@ -13,7 +13,7 @@ import logging
 import tkinter as tk
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List
 
 if TYPE_CHECKING:
     from APP.ui.app_ui import AppUI
@@ -111,9 +111,12 @@ def _build_top_frame(app: "AppUI") -> None:
     app.api_entry = ttk.Entry(api_frame, textvariable=app.api_key_var, show="*", width=40)
     app.api_entry.grid(row=0, column=1, sticky="ew", padx=6)
     ttk.Checkbutton(api_frame, text="Hiện", command=app._toggle_api_visibility).grid(row=0, column=2, sticky="w", padx=(0, 10))
-    ttk.Button(api_frame, text="Tải .env", command=app._load_env).grid(row=0, column=3, sticky="w")
-    ttk.Button(api_frame, text="Lưu an toàn", command=app._save_api_safe).grid(row=0, column=4, sticky="w", padx=6)
-    ttk.Button(api_frame, text="Xoá đã lưu", command=app._delete_api_safe).grid(row=0, column=5, sticky="w")
+
+    key_actions_frame = ttk.Frame(api_frame)
+    key_actions_frame.grid(row=0, column=3, sticky="w")
+    ttk.Button(key_actions_frame, text="Tải .env", command=app._load_env).pack(side="left")
+    ttk.Button(key_actions_frame, text="Lưu an toàn", command=app._save_api_safe).pack(side="left", padx=6)
+    ttk.Button(key_actions_frame, text="Xoá đã lưu", command=app._delete_api_safe).pack(side="left")
 
     # --- Row 2: Analysis Config ---
     config_frame = ttk.Frame(top)
@@ -200,7 +203,7 @@ def _build_report_tab(app: "AppUI") -> None:
     hist_frame = _create_listbox_with_controls(archives, "History (.md)", "history_list", {"preview": app.history_manager.preview_history_selected, "open": app.history_manager.open_history_selected, "delete": app.history_manager.delete_history_selected, "folder": app.history_manager.open_reports_folder})
     hist_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
 
-    json_frame = _create_listbox_with_controls(archives, "JSON (ctx_*.json)", "json_list", {"preview": app.history_manager.preview_json_selected, "open": app.history_manager.load_json_selected, "delete": app.history_manager.delete_json_selected, "folder": app.history_manager.open_json_folder})
+    json_frame = _create_listbox_with_controls(archives, "JSON (ctx_*.json)", "json_list", {"preview": app.history_manager.preview_json_selected, "open": app.history_manager.open_json_selected, "delete": app.history_manager.delete_json_selected, "folder": app.history_manager.open_json_folder})
     json_frame.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
 
     # Right Panel
@@ -219,7 +222,8 @@ def _build_report_tab(app: "AppUI") -> None:
 
 def _build_chart_tab(app: "AppUI") -> None:
     """Xây dựng tab "Chart"."""
-    if not app.nb: return
+    if not app.nb:
+        return
     if HAS_MPL:
         app.chart_tab = ChartTab(app, app.nb)
     else:
@@ -230,7 +234,8 @@ def _build_chart_tab(app: "AppUI") -> None:
 
 def _build_prompt_tab(app: "AppUI") -> None:
     """Xây dựng tab "Prompt"."""
-    if not app.nb: return
+    if not app.nb:
+        return
     tab = ttk.Frame(app.nb, padding=8)
     app.nb.add(tab, text="Prompt")
     tab.columnconfigure(0, weight=1)
@@ -506,7 +511,8 @@ def _build_opts_news(app: "AppUI", parent: ttk.Notebook) -> None:
 
 def _build_options_tab(app: "AppUI") -> None:
     """Xây dựng tab "Options"."""
-    if not app.nb: return
+    if not app.nb:
+        return
     tab = ttk.Frame(app.nb, padding=8)
     app.nb.add(tab, text="Options")
     tab.columnconfigure(0, weight=1)

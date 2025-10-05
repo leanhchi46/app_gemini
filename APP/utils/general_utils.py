@@ -50,18 +50,22 @@ def _machine_key() -> bytes:
     return key
 
 
-def obfuscate_text(text: str) -> str:
+def obfuscate_text(text: str, salt: str) -> str:
     """
-    Mã hóa một chuỗi văn bản bằng cách sử dụng phép XOR với khóa máy và mã hóa Base64.
+    Mã hóa một chuỗi văn bản bằng cách sử dụng phép XOR với khóa máy, salt và mã hóa Base64.
 
     Args:
         text: Chuỗi văn bản cần mã hóa.
+        salt: Chuỗi salt để tăng cường bảo mật.
 
     Returns:
         Chuỗi văn bản đã được mã hóa Base64.
     """
-    logger.debug("Bắt đầu obfuscate text.")
-    key = _machine_key()
+    logger.debug("Bắt đầu obfuscate text với salt.")
+    machine = _machine_key()
+    salt_bytes = hashlib.sha256(salt.encode("utf-8")).digest()
+    key = hashlib.sha256(machine + salt_bytes).digest()
+
     data = text.encode("utf-8")
     encrypted = _xor_bytes(data, key * (len(data) // len(key) + 1))
     result = base64.b64encode(encrypted).decode("utf-8")
@@ -69,18 +73,21 @@ def obfuscate_text(text: str) -> str:
     return result
 
 
-def deobfuscate_text(b64_text: str) -> str:
+def deobfuscate_text(b64_text: str, salt: str) -> str:
     """
-    Giải mã một chuỗi văn bản đã được mã hóa Base64 bằng cách sử dụng phép XOR với khóa máy.
+    Giải mã một chuỗi văn bản đã được mã hóa Base64 bằng cách sử dụng phép XOR với khóa máy và salt.
 
     Args:
         b64_text: Chuỗi văn bản đã được mã hóa Base64.
+        salt: Chuỗi salt đã được sử dụng để mã hóa.
 
     Returns:
         Chuỗi văn bản đã được giải mã. Trả về chuỗi rỗng nếu có lỗi giải mã.
     """
-    logger.debug("Bắt đầu deobfuscate text.")
-    key = _machine_key()
+    logger.debug("Bắt đầu deobfuscate text với salt.")
+    machine = _machine_key()
+    salt_bytes = hashlib.sha256(salt.encode("utf-8")).digest()
+    key = hashlib.sha256(machine + salt_bytes).digest()
     try:
         # Fix incorrect padding
         b64_text += "=" * (-len(b64_text) % 4)
@@ -89,7 +96,7 @@ def deobfuscate_text(b64_text: str) -> str:
         result = decrypted.decode("utf-8")
         logger.debug("Đã deobfuscate text thành công.")
         return result
-    except (ValueError, TypeError, binascii.Error) as e:
+    except (ValueError, TypeError, binascii.Error, UnicodeDecodeError) as e:
         logger.warning(f"Lỗi khi deobfuscate text: {e}. Trả về chuỗi rỗng.")
         # Return empty string if the key is corrupted or invalid
         return ""

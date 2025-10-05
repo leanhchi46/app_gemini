@@ -27,7 +27,7 @@ except ImportError:
     Image = None
 
 # Import cục bộ
-from APP.configs.constants import FILES, PATHS
+from APP.configs.constants import PATHS
 
 if TYPE_CHECKING:
     from APP.configs.app_config import ImageProcessingConfig
@@ -245,7 +245,7 @@ def upload_image_to_gemini(
     
     try:
         mime_type, _ = mimetypes.guess_type(image_path)
-        uploaded_file = genai.files.upload(
+        uploaded_file = genai.upload_file(
             path=image_path,
             mime_type=mime_type or "application/octet-stream",
             display_name=display_name,
@@ -257,7 +257,7 @@ def upload_image_to_gemini(
         delay = 0.6
         while time.monotonic() - start_time < timeout:
             time.sleep(delay)
-            file_status = genai.files.get(uploaded_file.name)
+            file_status = genai.get_file(uploaded_file.name)
             state_name = getattr(getattr(file_status, "state", None), "name", "UNKNOWN")
             logger.debug(f"Kiểm tra trạng thái tệp cho '{display_name}': {state_name}. Thời gian đã trôi qua: {time.monotonic() - start_time:.1f}s")
 
@@ -267,7 +267,7 @@ def upload_image_to_gemini(
             if state_name == "FAILED":
                 logger.error(f"Tải lên không thành công cho '{display_name}'. Trạng thái là FAILED.")
                 try:
-                    genai.files.delete(uploaded_file.name)
+                    genai.delete_file(uploaded_file.name)
                     logger.debug(f"Đã xóa cấu phần tệp không thành công: {uploaded_file.name}")
                 except Exception as del_e:
                     logger.warning(f"Không thể xóa cấu phần tệp không thành công: {del_e}")
