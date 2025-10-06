@@ -206,9 +206,32 @@ class AppUI:
 
         # Xóa bỏ làm mới tự động khi khởi động để tránh race condition.
         # Việc làm mới sẽ được thực hiện sau khi người dùng chọn thư mục hoặc tải workspace.
+        
+        # Cải tiến: Kiểm tra API key sau khi UI đã sẵn sàng
+        self._check_api_key_on_startup()
 
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
         logger.debug("AppUI đã khởi tạo xong.")
+
+    def _check_api_key_on_startup(self):
+        """
+        Kiểm tra API key khi khởi động và thông báo cho người dùng nếu nó không hợp lệ.
+        """
+        api_key = self.api_key_var.get()
+        # Chỉ hiển thị cảnh báo nếu không có key nào được tìm thấy từ cả file đã lưu và biến môi trường.
+        if not api_key:
+            # Sử dụng 'after' để đảm bảo cửa sổ chính đã sẵn sàng trước khi hiển thị popup.
+            self.root.after(
+                200,
+                lambda: self.show_error_message(
+                    "Thiếu API Key",
+                    "Không tìm thấy Google AI API Key.\n\n"
+                    "Lý do có thể là:\n"
+                    "- Đây là lần chạy đầu tiên.\n"
+                    "- File API key đã lưu bị hỏng hoặc không tương thích.\n\n"
+                    "Vui lòng nhập API key của bạn trong tab 'Cài đặt' và bấm 'Lưu Key An Toàn'.",
+                ),
+            )
 
     def shutdown(self):
         """

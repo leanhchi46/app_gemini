@@ -177,7 +177,7 @@ class AnalysisWorker:
             if remote_name:
                 try:
                     logger.debug(f"Tìm thấy trong cache: {name}, đang lấy thông tin file...")
-                    file_obj = genai.files.get(remote_name)
+                    file_obj = genai.get_file(remote_name)
                     self.file_slots[i] = file_obj
                     self.app.results[i]["status"] = "Đã cache"
                     self.app.ui_queue.put(lambda i=i: self.app._update_tree_row(i, "Đã cache"))
@@ -346,7 +346,7 @@ class AnalysisWorker:
             for uf, _ in self.uploaded_files:
                 try:
                     if genai:
-                        genai.files.delete(uf.name)
+                        genai.delete_file(uf.name)
                         logger.debug(f"Đã xóa file Gemini: {uf.name}")
                 except Exception as e:
                     logger.warning(f"Lỗi khi xóa file Gemini '{uf.name}': {e}")
