@@ -278,8 +278,19 @@ class AnalysisWorker:
             # Xử lý lỗi streaming một cách an toàn
             if isinstance(chunk, StreamError):
                 logger.error(f"Lỗi nghiêm trọng khi streaming từ Gemini: {chunk}")
-                self.combined_text = f"[LỖI PHÂN TÍCH] Không thể nhận phản hồi từ AI.\n\nChi tiết:\n{chunk}"
+                error_title = "Lỗi Kết Nối AI"
+                error_message = (
+                    "Không thể nhận phản hồi từ model AI sau nhiều lần thử.\n\n"
+                    "Lý do có thể là:\n"
+                    "- Lỗi tạm thời từ dịch vụ của Google AI.\n"
+                    "- Vấn đề về kết nối mạng.\n"
+                    "- API key không hợp lệ hoặc hết hạn mức.\n\n"
+                    f"Chi tiết kỹ thuật:\n{chunk}"
+                )
+                self.combined_text = f"[LỖI PHÂN TÍCH] {error_message}"
+                # Gửi cả hai tác vụ cập nhật UI vào queue
                 self.app.ui_queue.put(lambda: self.app.ui_detail_replace(self.combined_text))
+                self.app.ui_queue.put(lambda: self.app.show_error_message(error_title, error_message))
                 return False # Báo hiệu cho worker biết đã có lỗi
 
             chunk_text = getattr(chunk, "text", "")
