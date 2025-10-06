@@ -1107,6 +1107,14 @@ def is_connected() -> bool:
         return False
 
 
+def shutdown():
+    """Ngắt kết nối khỏi terminal MetaTrader 5."""
+    logger.info("Đang ngắt kết nối khỏi MetaTrader 5.")
+    if mt5 and is_connected():
+        mt5.shutdown()
+        logger.info("Đã ngắt kết nối MT5 thành công.")
+
+
 # ------------------------------
 # Trading action helpers
 # ------------------------------
@@ -1185,17 +1193,34 @@ def build_trade_requests(
     tp1_price: float | None,
     tp2_price: float | None,
     total_lots: float,
-    current_price: float,
+    tick: dict[str, Any],
     config: "RunConfig",
     info: dict[str, Any]
 ) -> list[dict[str, Any]]:
     """
-    Xây dựng danh sách các yêu cầu giao dịch (có thể chia lệnh).
+    Xây dựng danh sách các yêu cầu giao dịch, có kiểm tra stop level.
     """
     logger.debug("Bắt đầu build_trade_requests.")
-    requests = []
     
-    trade_type = mt5.ORDER_TYPE_BUY if direction.upper() == "BUY" else mt5.ORDER_TYPE_SELL
+    stop_level_points = info.get("stop_level_points", 0)
+    point = info.get("point", 0.00001)
+    
+    is_buy = direction.upper() == "BUY"
+    market_price = tick.get("ask") if is_buy else tick.get("bid")
+
+    # Kiểm tra Stop Loss
+    if abs(market_price - sl_price) < stop_level_points * point:
+        logger.error(f"Invalid Stop Loss. Khoảng cách {abs(market_price - sl_price):.5f} < mức dừng tối thiểu {stop_level_points * point:.5f}.")
+        return []
+
+    # Kiểm tra Take Profit
+    tp_to_check = tp1_price or tp2_price
+    if tp_to_check and abs(market_price - tp_to_check) < stop_level_points * point:
+        logger.error(f"Invalid Take Profit. Khoảng cách {abs(market_price - tp_to_check):.5f} < mức dừng tối thiểu {stop_level_points * point:.5f}.")
+        return []
+
+    requests = []
+    trade_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
     
     # Xác định filling type từ config
     filling_type_str = config.auto_trade.filling_type.upper()

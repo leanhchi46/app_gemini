@@ -14,6 +14,8 @@ from APP.core.trading import conditions as trade_conditions
 from APP.persistence import md_handler
 from APP.persistence.json_handler import JsonSaver
 from APP.services import gemini_service
+# Cập nhật import để nhận diện lớp lỗi mới
+from APP.services.gemini_service import StreamError
 from APP.analysis import prompt_builder
 from APP.utils.safe_data import SafeData
 
@@ -29,21 +31,24 @@ def _tnow() -> float:
     return time.perf_counter()
 
 
+import threading
 class AnalysisWorker:
     """
     Lớp điều phối toàn bộ quy trình phân tích, chạy trong một luồng riêng biệt.
     """
 
-    def __init__(self, app: "AppUI", cfg: "RunConfig"):
+    def __init__(self, app: "AppUI", cfg: "RunConfig", stop_event: threading.Event):
         """
         Khởi tạo worker với các đối tượng cần thiết.
 
         Args:
             app (AppUI): Instance của ứng dụng UI chính.
             cfg (RunConfig): Đối tượng cấu hình cho lần chạy này.
+            stop_event (threading.Event): Sự kiện để báo hiệu dừng worker.
         """
         self.app = app
         self.cfg = cfg
+        self.stop_event = stop_event
         self.model_name: str = self.app.model_var.get()
         self.model: Optional[Any] = None
 
@@ -65,10 +70,19 @@ class AnalysisWorker:
         """Phương thức chính để chạy worker, chứa logic try/except/finally."""
         logger.debug(f"Bắt đầu AnalysisWorker.run với model: {self.model_name}")
         try:
+            if self.stop_event.is_set(): return
             self._stage_1_initialize_and_validate()
+            if self.stop_event.is_set(): return
             self._stage_2_build_context_and_check_conditions()
+            if self.stop_event.is_set(): return
             self._stage_3_prepare_and_upload_images()
-            self._stage_4_call_ai_model()
+            if self.stop_event.is_set(): return
+            # Cập nhật: Hàm này giờ sẽ trả về False nếu có lỗi không thể phục hồi
+            if not self._stage_4_call_ai_model():
+                # Nếu có lỗi nghiêm trọng từ AI (ví dụ: API key hỏng), dừng worker
+                # và không tiếp tục đến giai đoạn 5. Giai đoạn 6 (dọn dẹp) vẫn sẽ chạy.
+                return
+            if self.stop_event.is_set(): return
             self._stage_5_execute_or_manage_trades()
         except SystemExit as e:
             logger.info(f"Worker đã thoát một cách có kiểm soát: {e}")
@@ -149,7 +163,7 @@ class AnalysisWorker:
         self.steps_upload = total_files
 
         for i, (path_str, name) in enumerate(zip(self.paths, self.names)):
-            if self.app.stop_flag:
+            if self.stop_event.is_set():
                 raise SystemExit("Dừng bởi người dùng trong quá trình chuẩn bị ảnh.")
 
             self.app.ui_queue.put(lambda i=i: self.app._update_progress(i, total_files + 2))
@@ -212,18 +226,21 @@ class AnalysisWorker:
 
         self.app.ui_queue.put(lambda: self.app.ui_status(f"Xử lý {total_files} ảnh xong trong {(_tnow() - t_up0):.2f}s"))
 
-        if self.app.stop_flag:
+        if self.stop_event.is_set():
             raise SystemExit("Dừng bởi người dùng sau khi upload.")
 
-    def _stage_4_call_ai_model(self) -> None:
-        """Giai đoạn 4: Gọi model AI và xử lý kết quả."""
-        logger.debug("GIAI ĐOẠN 4: Gọi model AI.")
-        self.app.ui_queue.put(lambda: self.app.ui_status("Đang phân tích..."))
-        
-        # Lọc ra các file đã được upload thành công
+    def _stage_4_call_ai_model(self) -> bool:
+        """
+        Giai đoạn 4: Gọi model AI và xử lý kết quả.
+        Trả về True nếu thành công, False nếu có lỗi API không thể phục hồi.
+        """
+        logger.debug("BẮT ĐẦU GIAI ĐOẠN 4: Gọi Model AI")
+        self.app.ui_queue.put(lambda: self.app.ui_status("Giai đoạn 4/6: Đang nhận phân tích từ AI..."))
+
         all_media = [f for f in self.file_slots if f is not None]
         if not all_media:
-            raise SystemExit("Không có media nào để gửi đến model.")
+            logger.error("Không có media nào để gửi đến model. Bỏ qua giai đoạn 4.")
+            return True # Không phải lỗi nghiêm trọng, chỉ là không có gì để làm
 
         prompt_no_entry = self.app.prompt_manager.get_prompts().get("no_entry", "")
         prompt_entry_run = self.app.prompt_manager.get_prompts().get("entry_run", "")
@@ -232,54 +249,51 @@ class AnalysisWorker:
             self.app, self.cfg, self.safe_mt5_data, prompt_no_entry, prompt_entry_run
         )
         prompt_final = prompt_builder.construct_prompt(
-            self.app,
-            prompt,
-            self.mt5_dict,
-            self.context_block,
-            self.paths,
+            self.app, prompt, self.mt5_dict, self.context_block, self.paths
         )
 
         parts = all_media + [prompt_final]
         t_llm0 = _tnow()
-
-        # Logic xử lý stream đã được chuyển vào đây từ service cũ
         self.combined_text = ""
-        try:
-            # Lấy các tham số retry từ config, nếu không có thì dùng giá trị mặc định
-            tries = self.cfg.api.tries
-            base_delay = self.cfg.api.delay
 
-            if not self.model:
-                raise SystemExit("Model chưa được khởi tạo.")
-            stream_generator = gemini_service.stream_gemini_response(
-                model=self.model, parts=parts, tries=tries, base_delay=base_delay
-            )
+        tries = self.cfg.api.tries
+        base_delay = self.cfg.api.delay
 
-            self.app.ui_queue.put(lambda: self.app.ui_detail_replace("Đang nhận dữ liệu từ AI..."))
+        if not self.model:
+            raise SystemExit("Model chưa được khởi tạo.")
 
-            for chunk in stream_generator:
-                if self.app.stop_flag:
-                    logger.info("Người dùng đã dừng quá trình nhận dữ liệu AI.")
-                    if hasattr(stream_generator, "close"):
-                        stream_generator.close()
-                    raise SystemExit("Dừng bởi người dùng trong khi streaming.")
+        stream_generator = gemini_service.stream_gemini_response(
+            model=self.model, parts=parts, tries=tries, base_delay=base_delay
+        )
 
-                chunk_text = getattr(chunk, "text", "")
-                if chunk_text:
-                    self.combined_text += chunk_text
-                    self.app.ui_queue.put(
-                        lambda: self.app.ui_detail_replace(self.combined_text)
-                    )
+        self.app.ui_queue.put(lambda: self.app.ui_detail_replace("Đang nhận dữ liệu từ AI..."))
 
-            if not self.combined_text:
-                self.combined_text = "[Không có nội dung trả về]"
+        for chunk in stream_generator:
+            if self.stop_event.is_set():
+                logger.info("Người dùng đã dừng quá trình nhận dữ liệu AI.")
+                if hasattr(stream_generator, "close"):
+                    stream_generator.close()
+                raise SystemExit("Dừng bởi người dùng trong khi streaming.")
 
-        except Exception as e:
-            logger.error(f"Lỗi nghiêm trọng khi streaming từ Gemini: {e}")
-            raise  # Ném lại lỗi để khối try...except chính của worker xử lý
+            # Xử lý lỗi streaming một cách an toàn
+            if isinstance(chunk, StreamError):
+                logger.error(f"Lỗi nghiêm trọng khi streaming từ Gemini: {chunk}")
+                self.combined_text = f"[LỖI PHÂN TÍCH] Không thể nhận phản hồi từ AI.\n\nChi tiết:\n{chunk}"
+                self.app.ui_queue.put(lambda: self.app.ui_detail_replace(self.combined_text))
+                return False # Báo hiệu cho worker biết đã có lỗi
+
+            chunk_text = getattr(chunk, "text", "")
+            if chunk_text:
+                self.combined_text += chunk_text
+                self.app.ui_queue.put(lambda: self.app.ui_detail_replace(self.combined_text))
+
+        if not self.combined_text:
+            self.combined_text = "[LỖI PHÂN TÍCH] AI không trả về nội dung nào."
+            logger.warning("AI không trả về nội dung nào sau khi stream kết thúc.")
 
         self.app.ui_queue.put(lambda: self.app.ui_status(f"Model trả lời trong {(_tnow() - t_llm0):.2f}s"))
         self.app.ui_queue.put(lambda: self.app._update_progress(self.steps_upload + 1, self.steps_upload + 2))
+        return True
 
     def _stage_5_execute_or_manage_trades(self) -> None:
         """Giai đoạn 5: Thực thi hoặc quản lý giao dịch."""

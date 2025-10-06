@@ -51,8 +51,10 @@ class Files:
 class Reports:
     """Lớp chứa các hằng số liên quan đến việc xử lý báo cáo."""
 
-    # Mẫu regex để tìm điểm bắt đầu của báo cáo dành cho người đọc
-    REPORT_START_MARKER: str = r"###\s+NHIỆM VỤ 2"
+    # Mẫu regex để tìm điểm bắt đầu của báo cáo dành cho người đọc.
+    # Tìm kiếm một tiêu đề Markdown (###) theo sau là một trong các từ khóa
+    # chính, giúp hệ thống linh hoạt hơn với các thay đổi nhỏ trong định dạng phản hồi.
+    REPORT_START_MARKER: str = r"###\s+(PHÂN TÍCH|TÓM TẮT|KẾ HOẠCH|NHIỆM VỤ|PHÂN TÍCH CHI TIẾT)"
 
 
 # Tạo các instance bất biến của các lớp cấu hình

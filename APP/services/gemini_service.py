@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import random
 import time
-from typing import Any, Generator, List, Optional
+from typing import Any, Generator, List, Optional, Union
 
 # Sửa lỗi pyright bằng cách import từ các submodule cụ thể theo gợi ý
 from google.generativeai.client import configure
@@ -16,6 +16,18 @@ logger = logging.getLogger(__name__)
 
 # Hằng số cho việc gọi API
 REQUEST_TIMEOUT: int = 1200
+
+
+class StreamError:
+    """Lớp tùy chỉnh để biểu diễn lỗi trong quá trình streaming."""
+    def __init__(self, message: str, exception: Exception | None = None):
+        self.message = message
+        self.exception = exception
+
+    def __str__(self) -> str:
+        if self.exception:
+            return f"StreamError: {self.message} (Caused by: {self.exception})"
+        return f"StreamError: {self.message}"
 
 
 def initialize_model(api_key: str, model_name: str) -> Optional[GenerativeModel]:
@@ -122,7 +134,7 @@ def stream_gemini_response(
     parts: List[Any],
     tries: int = 5,
     base_delay: float = 2.0,
-) -> Generator[Any, None, None]:
+) -> Generator[Union[Any, StreamError], None, None]:
     """
     Tạo một generator để gọi API Gemini streaming với cơ chế thử lại (retry).
 
@@ -158,9 +170,17 @@ def stream_gemini_response(
             _handle_api_exception(e, attempt=i, tries=tries, base_delay=base_delay)
 
     logger.error(f"Tất cả {tries} lần thử streaming đều thất bại.")
+    # Thay vì ném lỗi, yield một đối tượng StreamError để worker có thể xử lý.
+    # Điều này giúp worker không bị crash và có thể tiếp tục vòng lặp.
     if last_exception:
-        raise last_exception
-    raise RuntimeError("Không thể kết nối tới Gemini API sau nhiều lần thử.")
+        yield StreamError(
+            message=f"Tất cả {tries} lần thử streaming đều thất bại.",
+            exception=last_exception
+        )
+    else:
+        yield StreamError(
+            message="Không thể kết nối tới Gemini API sau nhiều lần thử mà không có lỗi cụ thể."
+        )
 
 
 def gemini_api_call(

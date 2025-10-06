@@ -150,9 +150,10 @@ class AppUI:
         self.prompt_file_path_var: tk.StringVar
         self.auto_load_prompt_txt_var: tk.BooleanVar
 
-        # Locks and Queues
+        # Locks, Events, and Queues
         self._trade_log_lock = threading.Lock()
         self.ui_queue: queue.Queue[Any] = queue.Queue()
+        self.stop_event = threading.Event()
 
         # UI Widget Attributes (khai báo trước để pyright nhận diện)
         self.tree: Optional[ttk.Treeview] = None
@@ -211,32 +212,48 @@ class AppUI:
 
     def shutdown(self):
         """
-        Xử lý sự kiện đóng cửa sổ ứng dụng một cách an toàn.
-        Thu thập cấu hình, lưu vào file, và hủy các tác vụ đang chạy.
+        Xử lý sự kiện đóng cửa sổ ứng dụng một cách an toàn (graceful shutdown).
         """
-        logger.info("Bắt đầu quy trình tắt ứng dụng.")
+        if self.is_shutting_down:
+            return
+        self.is_shutting_down = True
+        logger.info("Bắt đầu quy trình tắt ứng dụng an toàn.")
 
-        # Hủy các tác vụ hẹn giờ
+        # 1. Dừng các tác vụ lặp lại
         if self._autorun_job:
             self.root.after_cancel(self._autorun_job)
-            self._autorun_job = None
-        if self._mt5_reconnect_job:
-            self.root.after_cancel(self._mt5_reconnect_job)
-            self._mt5_reconnect_job = None
         if self._mt5_check_connection_job:
             self.root.after_cancel(self._mt5_check_connection_job)
-            self._mt5_check_connection_job = None
 
-        # Thu thập và lưu cấu hình
+        # 2. Gửi tín hiệu dừng cho luồng worker
+        self.stop_event.set()
+        self.stop_flag = True # Giữ lại để tương thích ngược
+        
+        # 3. Chờ luồng worker kết thúc (với timeout)
+        if self.active_worker_thread and self.active_worker_thread.is_alive():
+            logger.debug("Đang chờ luồng AnalysisWorker kết thúc...")
+            self.active_worker_thread.join(timeout=5.0)
+            if self.active_worker_thread.is_alive():
+                logger.warning("Luồng AnalysisWorker không kết thúc kịp thời.")
+
+        # 4. Dừng các thành phần UI
+        if self.chart_tab:
+            self.chart_tab.stop()
+
+        # 5. Lưu cấu hình
         try:
             config_data = self._collect_config_data()
             workspace_config.save_config_to_file(config_data)
             logger.info("Đã lưu cấu hình workspace thành công.")
         except Exception:
-            logger.exception("Lỗi khi lưu cấu hình workspace.")
+            logger.exception("Lỗi khi lưu cấu hình workspace trong quá trình tắt.")
 
+        # 6. Ngắt kết nối MT5
+        mt5_service.shutdown()
+        
+        # 7. Phá hủy cửa sổ UI
         self.root.destroy()
-        logger.info("Ứng dụng đã đóng.")
+        logger.info("Ứng dụng đã đóng thành công.")
 
     def _init_tk_variables(self):
         """
@@ -482,10 +499,6 @@ class AppUI:
         self.mt5_enabled_var.set(get_nested(mt5_cfg, ["enabled"], False))
         self.mt5_term_path_var.set(get_nested(mt5_cfg, ["terminal_path"], ""))
         self.mt5_symbol_var.set(get_nested(mt5_cfg, ["symbol"], ""))
-        # SỬA LỖI: Xóa bỏ logic tự động suy luận symbol.
-        # Logic này gây ra lỗi khi thư mục được chọn là thư mục cha (ví dụ: Screenshots)
-        # thay vì thư mục con của symbol (ví dụ: Screenshots/XAUUSD).
-        # Giờ đây, ứng dụng sẽ chỉ dựa vào symbol được lưu trong workspace.
 
         self.mt5_n_M1.set(get_nested(mt5_cfg, ["n_M1"], 120))
         self.mt5_n_M5.set(get_nested(mt5_cfg, ["n_M5"], 180))
@@ -697,11 +710,12 @@ class AppUI:
 
         self.is_running = True
         self.stop_flag = False
+        self.stop_event.clear() # Reset lại event trước mỗi lần chạy
         ui_builder.toggle_controls_state(self, "disabled")
         cfg = self._snapshot_config()
         self.run_config = cfg
 
-        worker_instance = AnalysisWorker(app=self, cfg=cfg)
+        worker_instance = AnalysisWorker(app=self, cfg=cfg, stop_event=self.stop_event)
         self.active_worker_thread = threading.Thread(target=worker_instance.run, daemon=True)
         self.active_worker_thread.start()
         logger.info("Đã khởi tạo và bắt đầu luồng AnalysisWorker.")

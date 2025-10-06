@@ -68,7 +68,7 @@ class ChartTab:
         self._build_bottom_grids()
 
         self.root.after(200, self.start)
-        self._redraw_safe()
+        self._redraw_chart_safe()
         logger.debug("Kết thúc hàm __init__ của ChartTab.")
 
     def _init_vars(self):
@@ -81,6 +81,7 @@ class ChartTab:
         self.chart_type_var = tk.StringVar(value="Nến")
         self._after_job: Optional[str] = None
         self._running = False
+        self._last_bar_time: Optional[datetime] = None
         # Biến cho biểu đồ
         self.fig: Optional[Figure] = None
         self.ax_price: Optional[Any] = None  # AxesSubplot is not easily typed here
@@ -111,7 +112,7 @@ class ChartTab:
         ttk.Label(ctrl, text="Ký hiệu:").grid(row=0, column=0, sticky="w")
         self.cbo_symbol = ttk.Combobox(ctrl, width=16, textvariable=self.symbol_var, state="normal", values=[])
         self.cbo_symbol.grid(row=0, column=1, sticky="w", padx=(4, 10))
-        self.cbo_symbol.bind("<<ComboboxSelected>>", lambda e: self._redraw_safe())
+        self.cbo_symbol.bind("<<ComboboxSelected>>", self._reset_and_redraw)
         self._populate_symbol_list()
 
         ttk.Label(ctrl, text="Khung:").grid(row=0, column=2, sticky="w")
@@ -119,10 +120,10 @@ class ChartTab:
             ctrl, width=6, state="readonly", values=["M1", "M5", "M15", "H1", "H4", "D1"], textvariable=self.tf_var
         )
         self.cbo_tf.grid(row=0, column=3, sticky="w", padx=(4, 10))
-        self.cbo_tf.bind("<<ComboboxSelected>>", lambda e: self._redraw_safe())
+        self.cbo_tf.bind("<<ComboboxSelected>>", self._reset_and_redraw)
 
         ttk.Label(ctrl, text="Số nến:").grid(row=0, column=4, sticky="w")
-        ttk.Spinbox(ctrl, from_=50, to=5000, textvariable=self.n_candles_var, width=8, command=self._redraw_safe)\
+        ttk.Spinbox(ctrl, from_=50, to=5000, textvariable=self.n_candles_var, width=8, command=self._reset_and_redraw)\
             .grid(row=0, column=5, sticky="w", padx=(4, 10))
 
         ttk.Label(ctrl, text="Kiểu:").grid(row=0, column=6, sticky="w")
@@ -130,7 +131,7 @@ class ChartTab:
             ctrl, width=8, state="readonly", values=["Đường", "Nến"], textvariable=self.chart_type_var
         )
         self.cbo_chart_type.grid(row=0, column=7, sticky="w", padx=(4, 10))
-        self.cbo_chart_type.bind("<<ComboboxSelected>>", lambda e: self._redraw_safe())
+        self.cbo_chart_type.bind("<<ComboboxSelected>>", self._reset_and_redraw)
 
         ttk.Label(ctrl, text="Làm mới (s):").grid(row=0, column=8, sticky="w")
         ttk.Spinbox(ctrl, from_=1, to=3600, textvariable=self.refresh_secs_var, width=6)\
@@ -527,9 +528,15 @@ class ChartTab:
         except Exception as e:
             logger.error(f"Lỗi khi vẽ các đối tượng giao dịch: {e}")
 
-    def _redraw_safe(self) -> None:
-        """Vẽ lại toàn bộ tab một cách an toàn."""
-        logger.debug("Bắt đầu hàm _redraw_safe.")
+    def _reset_and_redraw(self, event: Any = None) -> None:
+        """Đặt lại trạng thái và buộc vẽ lại biểu đồ, thường do người dùng tương tác."""
+        logger.debug("Đặt lại trạng thái và vẽ lại biểu đồ do hành động của người dùng.")
+        self._last_bar_time = None  # Đặt lại thời gian thanh nến cuối cùng để buộc vẽ lại
+        self._redraw_chart_safe()
+
+    def _redraw_chart_safe(self) -> None:
+        """Chỉ vẽ lại khu vực biểu đồ một cách an toàn."""
+        logger.debug("Bắt đầu hàm _redraw_chart_safe.")
         try:
             self._draw_chart()
         except Exception as e:
@@ -541,28 +548,49 @@ class ChartTab:
                     self.canvas.draw_idle()
             except Exception:
                 pass
-
-        sym = self.symbol_var.get().strip()
-        try:
-            self._update_account_info(sym)
-            self._fill_positions_table(sym)
-            self._fill_history_table(sym)
-        except Exception as e:
-            logger.error(f"Lỗi khi cập nhật thông tin: {e}")
-
-        try:
-            self._update_notrade_panel()
-        except Exception as e:
-            logger.error(f"Lỗi khi cập nhật panel No-Trade: {e}")
-        logger.debug("Kết thúc hàm _redraw_safe.")
+        logger.debug("Kết thúc hàm _redraw_chart_safe.")
 
     def _tick(self) -> None:
-        """Hàm tick được gọi định kỳ để làm mới dữ liệu."""
+        """
+        Hàm tick được gọi định kỳ để làm mới dữ liệu.
+
+        Tối ưu hóa để chỉ vẽ lại biểu đồ khi có thanh nến mới,
+        nhưng vẫn cập nhật thông tin tài khoản và các lệnh thường xuyên.
+        """
         logger.debug("Bắt đầu hàm _tick.")
         if not self._running:
             return
 
-        self._redraw_safe()
+        sym = self.symbol_var.get().strip()
+        tf_code = self._mt5_tf(self.tf_var.get())
+
+        # 1. Kiểm tra thanh nến mới để quyết định có vẽ lại biểu đồ hay không
+        redraw_chart_needed = False
+        if tf_code is not None:
+            try:
+                rates = mt5.copy_rates_from_pos(sym, tf_code, 0, 1)
+                if rates is not None and len(rates) > 0:
+                    current_bar_time = datetime.fromtimestamp(rates[0]['time'])
+                    if self._last_bar_time is None or current_bar_time > self._last_bar_time:
+                        logger.info(f"Phát hiện thanh nến mới cho {sym}/{self.tf_var.get()}. Sẽ vẽ lại biểu đồ.")
+                        self._last_bar_time = current_bar_time
+                        redraw_chart_needed = True
+            except Exception as e:
+                logger.warning(f"Lỗi khi kiểm tra thanh nến mới: {e}")
+
+        if redraw_chart_needed:
+            self._redraw_chart_safe()
+
+        # 2. Luôn cập nhật các thông tin không phải biểu đồ
+        try:
+            self._update_account_info(sym)
+            self._fill_positions_table(sym)
+            self._fill_history_table(sym)
+            self._update_notrade_panel()
+        except Exception as e:
+            logger.error(f"Lỗi khi cập nhật thông tin phụ trong _tick: {e}")
+
+        # 3. Lên lịch cho lần tick tiếp theo
         secs = max(1, self.refresh_secs_var.get() or 5)
         self._after_job = self.root.after(secs * 1000, self._tick)
 

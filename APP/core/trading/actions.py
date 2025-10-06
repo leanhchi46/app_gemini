@@ -61,7 +61,7 @@ def execute_trade_action(
         tp1_price=plan.get("tp1"),
         tp2_price=plan.get("tp2"),
         total_lots=lots,
-        current_price=mt5_ctx.get("tick", {}).get("last", 0.0),
+        tick=mt5_ctx.get("tick", {}),
         config=cfg,
         info=mt5_ctx.get("info", {})
     )

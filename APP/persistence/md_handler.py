@@ -36,25 +36,27 @@ class MdSaver:
         """
         Trích xuất phần báo cáo mà con người có thể đọc được từ phản hồi đầy đủ của AI.
 
-        Tìm kiếm tiêu đề "NHIỆM VỤ 2" và trả về tất cả nội dung từ đó trở đi.
+        Sử dụng regex linh hoạt từ `constants.REPORTS.REPORT_START_MARKER`
+        để tìm điểm bắt đầu của báo cáo.
 
         Args:
             text: Phản hồi đầy đủ dưới dạng chuỗi từ mô hình AI.
 
         Returns:
             Chuỗi chứa phần báo cáo có thể đọc được. Trả về toàn bộ văn bản
-            nếu không tìm thấy tiêu đề cụ thể.
+            nếu không tìm thấy điểm đánh dấu bắt đầu.
         """
         logger.debug("Bắt đầu trích xuất báo cáo human-readable.")
-        # Sử dụng hằng số từ constants để dễ dàng quản lý
-        match = re.search(constants.REPORTS.REPORT_START_MARKER, text, re.IGNORECASE)
+        # Sử dụng hằng số regex linh hoạt từ constants
+        match = re.search(constants.REPORTS.REPORT_START_MARKER, text, re.IGNORECASE | re.DOTALL)
 
         if match:
-            human_report = text[match.start():]
+            # Lấy toàn bộ nội dung từ điểm tìm thấy trở đi
+            human_report = text[match.start():].strip()
             logger.debug(f"Đã trích xuất báo cáo. Độ dài: {len(human_report)}")
             return human_report
         
-        logger.warning("Không tìm thấy header 'NHIỆM VỤ 2', trả về toàn bộ nội dung.")
+        logger.warning("Không tìm thấy điểm bắt đầu báo cáo hợp lệ, trả về toàn bộ nội dung.")
         return text
 
     @staticmethod

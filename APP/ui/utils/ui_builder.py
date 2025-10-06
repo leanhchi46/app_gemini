@@ -125,8 +125,6 @@ def _build_top_frame(app: "AppUI") -> None:
     ttk.Label(config_frame, text="Model:").grid(row=0, column=0, sticky="w")
     app.model_combo = ttk.Combobox(config_frame, textvariable=app.model_var, state="readonly", width=40)
     app.model_combo.grid(row=0, column=1, sticky="w", padx=6)
-    # Sửa lỗi: Gọi hàm cấu hình API đúng, hàm này đã bị đổi tên trong app_ui.py
-    # app._configure_gemini_api_and_update_ui() # Hàm này được gọi ở cuối __init__ của AppUI rồi.
     ttk.Label(config_frame, text="Thư mục ảnh:").grid(row=0, column=2, sticky="w", padx=(10, 0))
     app.folder_label = ttk.Entry(config_frame, textvariable=app.folder_path, state="readonly")
     app.folder_label.grid(row=0, column=3, sticky="ew", padx=6)

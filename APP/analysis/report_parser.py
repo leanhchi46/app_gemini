@@ -166,25 +166,37 @@ def extract_summary_lines(text: str) -> Tuple[List[str], Optional[str], bool]:
 
 def repair_json_string(s: str) -> str:
     """
-    Cố gắng sửa một chuỗi JSON không hợp lệ.
+    Cố gắng sửa một chuỗi JSON không hợp lệ một cách toàn diện hơn.
     """
     logger.debug("Bắt đầu sửa chuỗi JSON.")
     s = s.strip()
 
+    # Xử lý trường hợp chuỗi JSON bị cắt cụt hoặc thiếu dấu ngoặc
     if not s.startswith("{"):
         s = "{" + s
     if not s.endswith("}"):
         s = s + "}"
+        
+    # Thay thế các ký tự thoát không hợp lệ
+    s = s.replace("\\'", "'")
 
+    # Sửa các lỗi phổ biến bằng regex
     s = RE_REPAIR_TRAILING_COMMA.sub(r"\1", s)
     s = RE_REPAIR_UNQUOTED_KEYS.sub(r'\1"\2":', s)
 
+    # Cố gắng cân bằng lại dấu ngoặc nếu cần
+    open_braces = s.count('{')
+    close_braces = s.count('}')
+    if open_braces > close_braces:
+        s += '}' * (open_braces - close_braces)
+
     try:
+        # Thử tải lại lần cuối sau khi đã sửa
         json.loads(s)
         logger.debug("Chuỗi JSON hợp lệ sau khi sửa.")
         return s
     except json.JSONDecodeError:
-        logger.warning("Không thể sửa chữa hoàn toàn chuỗi JSON.")
+        logger.warning("Không thể sửa chữa hoàn toàn chuỗi JSON ngay cả sau khi đã cố gắng.")
         return s
 
 
@@ -226,36 +238,34 @@ def find_balanced_json_after(text: str, start_idx: int) -> Tuple[Optional[str], 
 def extract_json_block_prefer(text: str) -> Dict[str, Any]:
     """
     Trích xuất khối JSON từ văn bản, ưu tiên khối lớn nhất và hợp lệ nhất.
+    Hàm này được cải tiến để xử lý các trường hợp phức tạp hơn.
     """
     logger.debug("Bắt đầu trích xuất khối JSON ưu tiên.")
-    possible_blocks = []
-    search_idx = 0
-    while search_idx < len(text):
-        start_brace = text.find('{', search_idx)
-        if start_brace == -1:
-            break
-        json_str, end_idx = find_balanced_json_after(text, start_brace)
-        if json_str and end_idx:
-            possible_blocks.append(json_str)
-            search_idx = end_idx
-        else:
-            search_idx = start_brace + 1
+    
+    # Tìm tất cả các khối JSON tiềm năng bằng regex, bao gồm cả các khối lồng nhau
+    json_pattern = re.compile(r"\{.*\}", re.DOTALL)
+    potential_json_strings = json_pattern.findall(text)
 
-    possible_blocks.sort(key=len, reverse=True)
+    valid_json_objects = []
 
-    for block in possible_blocks:
+    for json_str in potential_json_strings:
         try:
-            repaired = repair_json_string(block)
-            data = json.loads(repaired)
+            # Cố gắng sửa chữa và phân tích từng khối JSON tìm thấy
+            repaired_str = repair_json_string(json_str)
+            data = json.loads(repaired_str)
             if isinstance(data, dict):
-                logger.info("Trích xuất và phân tích JSON thành công.")
-                return data
+                valid_json_objects.append(data)
         except json.JSONDecodeError:
-            logger.debug("Khối JSON không hợp lệ, thử khối tiếp theo.")
             continue
-            
-    logger.warning("Không tìm thấy khối JSON hợp lệ nào trong văn bản.")
-    return {"error": "No valid JSON block found"}
+
+    if not valid_json_objects:
+        logger.warning("Không tìm thấy khối JSON hợp lệ nào trong văn bản.")
+        return {"error": "No valid JSON block found"}
+
+    # Ưu tiên khối JSON lớn nhất (có nhiều khóa nhất)
+    best_json = max(valid_json_objects, key=len)
+    logger.info(f"Đã tìm thấy và chọn khối JSON tốt nhất với {len(best_json)} khóa.")
+    return best_json
 
 
 def _generate_positions_report(positions: List[Dict[str, Any]]) -> str:

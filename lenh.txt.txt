@@ -1,6 +1,6 @@
  sử dụng cú pháp PlantUML để mô tả nó
 ------------------------------------------
-khởi chạy dự án bằng python APP/main.py, đọc @terminal để check lỗi và fix lỗi.
+khởi chạy dự án bằng python APP/main.py, đọc @terminal để check lỗi và fix lỗi cho đến khi hết lỗi.
 nếu có lỗi đọc kỹ và Kiểm tra đồng bộ với toàn dự án @/APP để tránh lỗi. 
 tôi muốn toàn bộ dự án được liên kết logic với nhau chứ không phải sửa cục bộ.
 Kiểm tra @problems sau mỗi lần hoàn thành file để đảm bảo không bị lỗi code.
@@ -10,9 +10,19 @@ tôi muốn kiểm tra logic đồng bộ với toàn dự án @/APP để trán
 tôi muốn toàn bộ dự án được liên kết logic với nhau chứ không phải sửa cục bộ.
 Kiểm tra @problems sau mỗi lần hoàn thành file để đảm bảo không bị lỗi code.
 Chú ý: cập nhật UI (giao diện) để đúng với logic.
-
+---------------------------
+Kiểm tra Tab Report.
+- Xem xét logic Tab Report có đang hoạt động đúng không?
+- Xem xét các hàm nào khởi động ban đầu với phần mềm, có hàm nào không khởi động theo logic mong muốn hay không?
+tôi muốn kiểm tra logic đồng bộ với toàn dự án @/APP để tránh lỗi. 
+tôi muốn toàn bộ dự án được liên kết logic với nhau chứ không phải sửa cục bộ.
+Kiểm tra @problems sau mỗi lần hoàn thành file để đảm bảo không bị lỗi code.
+Chú ý: cập nhật UI (giao diện) để đúng với logic.
 
 ------------------------------------------
+python -m ruff check
+
+------------------------------
 check lỗi bằng pyright APP --outputjson và fix đến khi hết.
 đọc kỹ và Kiểm tra đồng bộ với toàn dự án @/APP để tránh lỗi. 
 tôi muốn toàn bộ dự án được liên kết logic với nhau chứ không phải sửa cục bộ.
