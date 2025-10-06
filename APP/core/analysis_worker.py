@@ -252,6 +252,8 @@ class AnalysisWorker:
             self.app, prompt, self.mt5_dict, self.context_block, self.paths
         )
 
+        logger.debug(f"--- PROMPT FINAL GỬI ĐẾN AI ---\n{prompt_final}\n--- KẾT THÚC PROMPT ---")
+
         parts = all_media + [prompt_final]
         t_llm0 = _tnow()
         self.combined_text = ""

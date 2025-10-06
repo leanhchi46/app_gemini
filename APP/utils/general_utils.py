@@ -44,7 +44,9 @@ def _machine_key() -> bytes:
         Khóa máy dưới dạng chuỗi byte SHA256.
     """
     logger.debug("Tạo machine key.")
-    info = f"{platform.system()}-{platform.machine()}-{platform.node()}"
+    # Loại bỏ platform.node() để tránh lỗi khi tên máy tính thay đổi.
+    # Khóa giờ đây sẽ ổn định hơn trên cùng một máy.
+    info = f"{platform.system()}-{platform.machine()}"
     key = hashlib.sha256(info.encode("utf-8")).digest()
     logger.debug(f"Đã tạo machine key. Độ dài: {len(key)} bytes.")
     return key
