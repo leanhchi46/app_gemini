@@ -157,7 +157,7 @@ class JsonSaver:
         try:
             out_path.write_text(json.dumps(report_data, ensure_ascii=False, indent=2), encoding="utf-8")
             logger.info(f"Đã lưu file JSON báo cáo thành công tại: {out_path.name}")
-            general_utils.cleanup_old_files(self.reports_dir, "ctx_*.json", self.config.folder.max_files)
+            general_utils.cleanup_old_files(self.reports_dir, "ctx_*.json", self.config.persistence.max_json_reports)
             return out_path
         except Exception:
             logger.exception(f"LỖI NGHIÊM TRỌNG khi lưu JSON cuối cùng vào {out_path.name}")

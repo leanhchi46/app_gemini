@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -31,7 +32,6 @@ def _tnow() -> float:
     return time.perf_counter()
 
 
-import threading
 class AnalysisWorker:
     """
     Lớp điều phối toàn bộ quy trình phân tích, chạy trong một luồng riêng biệt.
@@ -70,19 +70,24 @@ class AnalysisWorker:
         """Phương thức chính để chạy worker, chứa logic try/except/finally."""
         logger.debug(f"Bắt đầu AnalysisWorker.run với model: {self.model_name}")
         try:
-            if self.stop_event.is_set(): return
+            if self.stop_event.is_set():
+                return
             self._stage_1_initialize_and_validate()
-            if self.stop_event.is_set(): return
+            if self.stop_event.is_set():
+                return
             self._stage_2_build_context_and_check_conditions()
-            if self.stop_event.is_set(): return
+            if self.stop_event.is_set():
+                return
             self._stage_3_prepare_and_upload_images()
-            if self.stop_event.is_set(): return
+            if self.stop_event.is_set():
+                return
             # Cập nhật: Hàm này giờ sẽ trả về False nếu có lỗi không thể phục hồi
             if not self._stage_4_call_ai_model():
                 # Nếu có lỗi nghiêm trọng từ AI (ví dụ: API key hỏng), dừng worker
                 # và không tiếp tục đến giai đoạn 5. Giai đoạn 6 (dọn dẹp) vẫn sẽ chạy.
                 return
-            if self.stop_event.is_set(): return
+            if self.stop_event.is_set():
+                return
             self._stage_5_execute_or_manage_trades()
         except SystemExit as e:
             logger.info(f"Worker đã thoát một cách có kiểm soát: {e}")
@@ -347,8 +352,7 @@ class AnalysisWorker:
                 # Sửa lỗi: Thay thế hàm không tồn tại bằng cách gọi phương thức trên app
                 self.app.ui_queue.put(lambda: self.app.show_error_message("Lỗi Lưu JSON", err_msg))
 
-            self.app.ui_queue.put(self.app.history_manager.refresh_history_list)
-            self.app.ui_queue.put(self.app.history_manager.refresh_json_list)
+            self.app.ui_queue.put(self.app.history_manager.refresh_all_lists)
 
             # Logic thông báo đã được chuyển vào trade_actions và conditions.py
             # if not self.app.stop_flag:

@@ -195,6 +195,9 @@ class AppUI:
         # Build the UI layout
         ui_builder.build_ui(self)
 
+        # Sửa lỗi: Liên kết các widget UI với HistoryManager SAU KHI chúng đã được tạo.
+        self.history_manager.link_ui_widgets()
+
         # Post-UI setup
         self._configure_gemini_api_and_update_ui()
         self.apply_config(self.initial_config)
@@ -587,10 +590,9 @@ class AppUI:
         if self.auto_load_prompt_txt_var.get():
             self.prompt_manager.load_prompts_from_disk(silent=True)
 
-        # Cập nhật 1: Tự động làm mới danh sách history và json sau khi áp dụng config
+        # Cập nhật 1: Tự động làm mới tất cả danh sách tệp lịch sử sau khi áp dụng config
         # Điều này đảm bảo UI hiển thị đúng trạng thái khi khởi động
-        self.history_manager.refresh_history_list()
-        self.history_manager.refresh_json_list()
+        self.history_manager.refresh_all_lists()
 
         logger.info("Đã áp dụng cấu hình lên UI thành công.")
     def _snapshot_config(self) -> "RunConfig":
@@ -816,12 +818,7 @@ class AppUI:
 
             # Logic cuối cùng: Sau khi quét file, luôn làm mới danh sách
             # báo cáo và context dựa trên symbol hiện tại trong UI.
-            def refresh_lists():
-                """Hàm helper để làm mới cả hai danh sách từ UI thread."""
-                self.history_manager.refresh_history_list()
-                self.history_manager.refresh_json_list()
-
-            ui_builder.enqueue(self, refresh_lists)
+            ui_builder.enqueue(self, self.history_manager.refresh_all_lists)
 
         except Exception:
             logger.exception(f"Lỗi trong luồng quét thư mục {folder}.")
@@ -994,8 +991,7 @@ class AppUI:
         Được gọi mỗi khi symbol thay đổi. Làm mới danh sách lịch sử và json.
         """
         logger.debug(f"Symbol đã thay đổi thành: {self.mt5_symbol_var.get()}, làm mới danh sách tệp.")
-        self.history_manager.refresh_history_list()
-        self.history_manager.refresh_json_list()
+        self.history_manager.refresh_all_lists()
 
     def _update_progress(self, current_step: int, total_steps: int):
         """Cập nhật thanh tiến trình dựa trên bước hiện tại và tổng số bước."""

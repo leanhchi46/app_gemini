@@ -120,6 +120,7 @@ class NewsConfig:
 class PersistenceConfig:
     """Cấu hình liên quan đến việc lưu trữ dữ liệu."""
     max_md_reports: int = 10
+    max_json_reports: int = 10
 
 
 @dataclass(frozen=True)

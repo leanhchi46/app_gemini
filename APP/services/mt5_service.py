@@ -1208,14 +1208,19 @@ def build_trade_requests(
     is_buy = direction.upper() == "BUY"
     market_price = tick.get("ask") if is_buy else tick.get("bid")
 
+    # Thêm kiểm tra market_price để đảm bảo nó không phải là None
+    if market_price is None or market_price <= 0:
+        logger.error("Không thể lấy giá thị trường hợp lệ (ask/bid). Không thể tạo yêu cầu giao dịch.")
+        return []
+
     # Kiểm tra Stop Loss
-    if abs(market_price - sl_price) < stop_level_points * point:
+    if sl_price is not None and abs(market_price - sl_price) < stop_level_points * point:
         logger.error(f"Invalid Stop Loss. Khoảng cách {abs(market_price - sl_price):.5f} < mức dừng tối thiểu {stop_level_points * point:.5f}.")
         return []
 
     # Kiểm tra Take Profit
     tp_to_check = tp1_price or tp2_price
-    if tp_to_check and abs(market_price - tp_to_check) < stop_level_points * point:
+    if tp_to_check is not None and abs(market_price - tp_to_check) < stop_level_points * point:
         logger.error(f"Invalid Take Profit. Khoảng cách {abs(market_price - tp_to_check):.5f} < mức dừng tối thiểu {stop_level_points * point:.5f}.")
         return []
 
