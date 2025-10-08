@@ -148,6 +148,15 @@ class SafeData:
         logger.debug(f"Get RR projection '{key}': {result}")
         return result
 
+    def is_valid(self) -> bool:
+        """
+        Kiểm tra xem dữ liệu có chứa các trường thiết yếu tối thiểu hay không.
+        """
+        # Một kiểm tra đơn giản: dữ liệu hợp lệ nếu có symbol và tick data.
+        is_ok = bool(self._data.get("symbol") and self._data.get("tick"))
+        logger.debug(f"Kiểm tra is_valid: {is_ok}")
+        return is_ok
+
     def get_plan_value(self, key: str, default: Any = None) -> Any:
         """
         Truy cập an toàn một giá trị từ từ điển 'plan'.

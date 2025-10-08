@@ -63,45 +63,66 @@ class FileListView:
 
     def refresh(self) -> None:
         """
-        Làm mới danh sách tệp bằng cách quét tất cả các thư mục symbol con.
-        Logic này không còn phụ thuộc vào symbol hiện tại đang được chọn.
+        Bắt đầu quá trình làm mới danh sách tệp trong một luồng nền.
         """
-        self.logger.debug(f"Bắt đầu làm mới danh sách toàn diện cho '{self.file_glob}'")
-        try:
-            self.listbox.delete(0, "end")
-            self._file_paths.clear()
+        self.logger.debug(f"Yêu cầu làm mới danh sách cho '{self.file_glob}'")
+        # Xóa danh sách hiện tại ngay lập tức để người dùng biết quá trình bắt đầu
+        self.listbox.delete(0, "end")
+        self._file_paths.clear()
+        self.listbox.insert("end", "Đang tải...")
 
+        # Chạy tác vụ I/O nặng trong một luồng riêng
+        self.app._run_in_background(self._refresh_worker)
+
+    def _refresh_worker(self) -> None:
+        """
+        Worker chạy nền để quét, sắp xếp và chuẩn bị dữ liệu danh sách tệp.
+        """
+        self.logger.debug(f"Worker bắt đầu quét tệp cho '{self.file_glob}'")
+        try:
             base_folder_str = self.app.folder_path.get()
             if not base_folder_str:
-                self.logger.warning("Thư mục gốc (Screenshots) chưa được đặt.")
+                self.logger.warning("Thư mục gốc chưa được đặt, worker thoát.")
+                ui_builder.enqueue(self.app, self._update_listbox_ui, [], [], "Chưa chọn thư mục.")
                 return
 
             base_folder = Path(base_folder_str)
             all_files = []
 
-            # Duyệt qua tất cả các thư mục con trực tiếp trong thư mục gốc
             for symbol_dir in base_folder.iterdir():
                 if symbol_dir.is_dir():
                     reports_dir = symbol_dir / "Reports"
                     if reports_dir.is_dir():
-                        # Thu thập tất cả các tệp khớp với mẫu glob
-                        found_files = list(reports_dir.glob(self.file_glob))
-                        all_files.extend(found_files)
+                        all_files.extend(list(reports_dir.glob(self.file_glob)))
 
-            # Sắp xếp tất cả các tệp đã tìm thấy theo ngày sửa đổi, mới nhất trước
-            # Điều này đảm bảo các báo cáo gần đây nhất luôn ở trên cùng
             sorted_files = sorted(all_files, key=lambda p: p.stat().st_mtime, reverse=True)
+            display_names = [f"{p.parent.parent.name}/{p.name}" for p in sorted_files]
+            
+            status_msg = f"Tìm thấy {len(sorted_files)} {self.file_type_name}."
+            self.logger.info(status_msg)
+            ui_builder.enqueue(self.app, lambda: self._update_listbox_ui(sorted_files, display_names, status_msg))
 
-            self._file_paths = sorted_files
-            for p in self._file_paths:
-                # Hiển thị tên tệp cùng với symbol của nó để dễ phân biệt
-                display_name = f"{p.parent.parent.name}/{p.name}"
-                self.listbox.insert("end", display_name)
-
-            self.logger.info(f"Đã làm mới và tìm thấy {len(self._file_paths)} tệp '{self.file_glob}' trong tất cả các symbol.")
         except Exception as e:
-            self.logger.error(f"Lỗi nghiêm trọng khi làm mới danh sách tệp: {e}", exc_info=True)
-            ui_builder.show_message("Lỗi", f"Không thể làm mới danh sách {self.file_type_name}:\n{e}")
+            error_msg = f"Lỗi khi làm mới danh sách {self.file_type_name}"
+            self.logger.error(f"{error_msg}: {e}", exc_info=True)
+            ui_builder.enqueue(self.app, lambda: self._update_listbox_ui([], [], error_msg))
+
+    def _update_listbox_ui(self, file_paths: List[Path], display_names: List[str], status_message: str) -> None:
+        """
+        Cập nhật Listbox trên luồng UI chính với dữ liệu từ worker.
+        """
+        self.listbox.delete(0, "end")
+        self._file_paths = file_paths
+        if not file_paths:
+            self.listbox.insert("end", f"Không tìm thấy tệp {self.file_type_name}.")
+        else:
+            for name in display_names:
+                self.listbox.insert("end", name)
+        
+        # Chỉ cập nhật status bar nếu đây là lần làm mới cuối cùng
+        # (ví dụ: của json_manager) để tránh ghi đè thông báo.
+        if "json" in self.file_type_name.lower():
+            self.app.ui_status(status_message)
 
     def _get_selected_path(self) -> Optional[Path]:
         """Lấy đường dẫn của tệp đang được chọn trong Listbox."""
@@ -142,23 +163,35 @@ class FileListView:
         return None
 
     def preview_selected(self, event: Optional[tk.Event] = None) -> None:
-        """Hiển thị nội dung của tệp được chọn trong ô chi tiết."""
-        del event  # Không sử dụng tham số event
+        """Bắt đầu quá trình đọc và hiển thị tệp trong luồng nền."""
+        del event
         file_path = self._get_selected_path()
         if not file_path or not self.app.detail_text:
             return
 
-        self.logger.debug(f"Xem trước tệp: {file_path.name}")
+        self.app.ui_status(f"Đang tải {self.file_type_name}: {file_path.name}...")
+        self.app._run_in_background(self._preview_worker, file_path)
+
+    def _preview_worker(self, file_path: Path) -> None:
+        """Worker chạy nền để đọc nội dung tệp."""
+        self.logger.debug(f"Worker bắt đầu đọc tệp: {file_path.name}")
         try:
             content = file_path.read_text(encoding="utf-8", errors="ignore")
+            status_msg = f"Đang xem {self.file_type_name}: {file_path.name}"
+            ui_builder.enqueue(self.app, self._update_detail_text_ui, content, status_msg)
+        except Exception as e:
+            error_msg = f"Lỗi khi đọc tệp '{file_path.name}'"
+            self.logger.error(f"{error_msg}: {e}", exc_info=True)
+            ui_builder.enqueue(self.app, self._update_detail_text_ui, f"{error_msg}:\n{e}", error_msg)
+
+    def _update_detail_text_ui(self, content: str, status_message: str) -> None:
+        """Cập nhật ô chi tiết trên luồng UI chính."""
+        if self.app.detail_text:
             self.app.detail_text.config(state="normal")
             self.app.detail_text.delete("1.0", "end")
             self.app.detail_text.insert("1.0", content)
             self.app.detail_text.config(state="disabled")
-            self.app.ui_status(f"Đang xem {self.file_type_name}: {file_path.name}")
-        except Exception as e:
-            self.logger.error(f"Lỗi khi xem trước tệp '{file_path.name}': {e}", exc_info=True)
-            ui_builder.show_message("Lỗi", f"Không thể xem trước tệp:\n{e}")
+        self.app.ui_status(status_message)
 
     def open_selected(self) -> None:
         """Mở tệp được chọn bằng ứng dụng mặc định của hệ điều hành."""

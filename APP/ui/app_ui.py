@@ -14,29 +14,35 @@ import os
 import queue
 import threading
 import tkinter as tk
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
 from google.api_core import exceptions
 
 from APP.configs import workspace_config
-from APP.configs.app_config import (ApiConfig, AutoTradeConfig, ContextConfig,
-                                    FolderConfig, ImageProcessingConfig,
-                                    MT5Config, NewsConfig, NoRunConfig,
-                                    NoTradeConfig, PersistenceConfig,
-                                    RunConfig, TelegramConfig, UploadConfig)
+from APP.configs.app_config import (ApiConfig, AutoTradeConfig, ChartConfig,
+                                    ContextConfig, FMPConfig, FolderConfig,
+                                    ImageProcessingConfig, MT5Config,
+                                    NewsConfig, NoRunConfig, NoTradeConfig,
+                                    PersistenceConfig, RunConfig, TEConfig,
+                                    TelegramConfig, UploadConfig)
 from APP.configs.constants import FILES, MODELS, PATHS
 from APP.core.analysis_worker import AnalysisWorker
 from APP.services import gemini_service, mt5_service
+from APP.services.news_service import NewsService
 from APP.ui.components.chart_tab import ChartTab
 from APP.ui.components.history_manager import HistoryManager
+from APP.ui.components.news_tab import NewsTab
 from APP.ui.components.prompt_manager import PromptManager
 from APP.ui.utils import ui_builder
 from APP.ui.utils.timeframe_detector import TimeframeDetector
 from APP.utils import general_utils
+from APP.utils.safe_data import SafeData
+from APP.utils.threading_utils import ThreadingManager
 
 if TYPE_CHECKING:
     pass
@@ -72,6 +78,10 @@ class AppUI:
         self.is_shutting_down: bool = False
         self.news_events: Optional[List[Dict[str, Any]]] = None
         self.news_fetch_time: Optional[float] = None
+        self.news_service: Optional[NewsService] = None
+
+        # Threading Manager
+        self.threading_manager = ThreadingManager()
 
         # Component Managers (initialized below)
         self.history_manager: HistoryManager
@@ -83,6 +93,10 @@ class AppUI:
         self.status_var: tk.StringVar
         self.progress_var: tk.DoubleVar
         self.api_key_var: tk.StringVar
+        self.fmp_api_key_var: tk.StringVar
+        self.fmp_enabled_var: tk.BooleanVar
+        self.te_api_key_var: tk.StringVar
+        self.te_enabled_var: tk.BooleanVar
         self.model_var: tk.StringVar
         self.delete_after_var: tk.BooleanVar
         self.max_files_var: tk.IntVar
@@ -146,6 +160,7 @@ class AppUI:
         self.trade_news_block_before_min_var: tk.IntVar
         self.trade_news_block_after_min_var: tk.IntVar
         self.news_cache_ttl_var: tk.IntVar
+        self.news_provider_var: tk.StringVar
         self.persistence_max_md_reports_var: tk.IntVar
         self.prompt_file_path_var: tk.StringVar
         self.auto_load_prompt_txt_var: tk.BooleanVar
@@ -162,14 +177,32 @@ class AppUI:
         self.prompt_nb: Optional[ttk.Notebook] = None
         self.model_combo: Optional[ttk.Combobox] = None
         self.api_entry: Optional[tk.Entry] = None
+        self.fmp_api_entry: Optional[tk.Entry] = None
+        self.fmp_enabled_check: Optional[ttk.Checkbutton] = None
+        self.te_api_entry: Optional[tk.Entry] = None
+        self.te_enabled_check: Optional[ttk.Checkbutton] = None
         self.prompt_entry_run_text: Optional[tk.Text] = None
         self.prompt_no_entry_text: Optional[tk.Text] = None
+        self.start_btn: Optional[ttk.Button] = None
         self.stop_btn: Optional[ttk.Button] = None
+        self.save_ws_btn: Optional[ttk.Button] = None
+        self.load_ws_btn: Optional[ttk.Button] = None
+        self.delete_ws_btn: Optional[ttk.Button] = None
+        self.choose_folder_btn: Optional[ttk.Button] = None
         self.folder_label: Optional[ttk.Entry] = None
         self.autorun_interval_spin: Optional[ttk.Spinbox] = None
         self.chart_tab: Optional[ChartTab] = None
+        self.news_tab: Optional[NewsTab] = None
         self.history_list: Optional[tk.Listbox] = None
         self.json_list: Optional[tk.Listbox] = None
+
+        # Thêm khai báo cho các widget tin tức
+        self.news_card: Optional[ttk.LabelFrame] = None
+        self.news_block_check: Optional[ttk.Checkbutton] = None
+        self.news_before_spin: Optional[ttk.Spinbox] = None
+        self.news_after_spin: Optional[ttk.Spinbox] = None
+        self.news_cache_spin: Optional[ttk.Spinbox] = None
+        self.news_provider_combo: Optional[ttk.Combobox] = None
 
 
         # State Variables
@@ -185,6 +218,11 @@ class AppUI:
 
         # Initialize Tkinter variables
         self._init_tk_variables()
+
+        # Khởi tạo các service chạy nền
+        self.news_service = NewsService()
+        self.news_service.set_update_callback(self._on_news_updated)
+        self.news_service.start()
 
         # Initialize component managers BEFORE building the UI
         # This is crucial because the UI builder needs access to these managers.
@@ -215,6 +253,23 @@ class AppUI:
 
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
         logger.debug("AppUI đã khởi tạo xong.")
+
+    def _run_in_background(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Future:
+        """
+        Chạy một tác vụ trong luồng nền bằng cách sử dụng ThreadingManager.
+
+        Đây là một phương thức tiện ích để các thành phần con có thể dễ dàng
+        gửi các tác vụ mà không cần truy cập trực tiếp vào threading_manager.
+
+        Args:
+            func (Callable): Hàm hoặc phương thức cần thực thi.
+            *args: Các đối số vị trí cho hàm.
+            **kwargs: Các đối số từ khóa cho hàm.
+
+        Returns:
+            Future: Một đối tượng Future đại diện cho việc thực thi tác vụ.
+        """
+        return self.threading_manager.submit_task(func, *args, **kwargs)
 
     def _check_api_key_on_startup(self):
         """
@@ -262,9 +317,11 @@ class AppUI:
             if self.active_worker_thread.is_alive():
                 logger.warning("Luồng AnalysisWorker không kết thúc kịp thời.")
 
-        # 4. Dừng các thành phần UI
+        # 4. Dừng các thành phần UI và services
         if self.chart_tab:
             self.chart_tab.stop()
+        if self.news_service:
+            self.news_service.stop()
 
         # 5. Lưu cấu hình
         try:
@@ -276,8 +333,11 @@ class AppUI:
 
         # 6. Ngắt kết nối MT5
         mt5_service.shutdown()
+
+        # 7. Tắt ThreadingManager
+        self.threading_manager.shutdown(wait=True, timeout=2.0)
         
-        # 7. Phá hủy cửa sổ UI
+        # 8. Phá hủy cửa sổ UI
         self.root.destroy()
         logger.info("Ứng dụng đã đóng thành công.")
 
@@ -293,13 +353,38 @@ class AppUI:
         self.progress_var = tk.DoubleVar(value=0.0)
 
         # API & Model
-        api_init = ""
-        if PATHS.API_KEY_ENC.exists():
-            api_init = general_utils.deobfuscate_text(
+        import json
+        api_keys = {
+            "google": os.environ.get("GOOGLE_API_KEY", ""),
+            "fmp": os.environ.get("FMP_API_KEY", ""),
+            "te": os.environ.get("TE_API_KEY", ""),
+        }
+        if PATHS.ALL_API_KEYS_ENC.exists():
+            try:
+                decrypted_json = general_utils.deobfuscate_text(
+                    PATHS.ALL_API_KEYS_ENC.read_text(encoding="utf-8"), "all_api_keys_salt"
+                )
+                stored_keys = json.loads(decrypted_json)
+                api_keys.update(stored_keys)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Không thể đọc file API keys đã mã hóa, có thể file bị hỏng.")
+        # Fallback cho phiên bản cũ
+        elif PATHS.API_KEY_ENC.exists():
+            api_keys["google"] = general_utils.deobfuscate_text(
                 PATHS.API_KEY_ENC.read_text(encoding="utf-8"), "api_key_salt"
             )
-        api_init = api_init or os.environ.get("GOOGLE_API_KEY", "")
-        self.api_key_var = tk.StringVar(value=api_init)
+
+        self.api_key_var = tk.StringVar(value=api_keys.get("google", ""))
+        self.fmp_api_key_var = tk.StringVar(value=api_keys.get("fmp", ""))
+        self.fmp_enabled_var = tk.BooleanVar(value=False)
+        self.te_api_key_var = tk.StringVar(value=api_keys.get("te", ""))
+        self.te_enabled_var = tk.BooleanVar(value=False)
+        self.te_skip_ssl_var = tk.BooleanVar(value=False)
+
+        # Thêm trace để cập nhật UI khi nhà cung cấp tin tức thay đổi
+        self.fmp_enabled_var.trace_add("write", lambda *args: self._update_news_widgets_state())
+        self.te_enabled_var.trace_add("write", lambda *args: self._update_news_widgets_state())
+
         self.model_var = tk.StringVar(value=MODELS.DEFAULT_VISION)
         self.api_key_var.trace_add("write", lambda *args: self._configure_gemini_api_and_update_ui())
 
@@ -385,6 +470,7 @@ class AppUI:
         self.trade_news_block_before_min_var = tk.IntVar(value=15)
         self.trade_news_block_after_min_var = tk.IntVar(value=15)
         self.news_cache_ttl_var = tk.IntVar(value=300)
+        self.news_provider_var = tk.StringVar(value="FMP")
 
         # Persistence
         self.persistence_max_md_reports_var = tk.IntVar(value=10)
@@ -418,6 +504,15 @@ class AppUI:
             "api": {
                 "tries": self.api_tries_var.get(),
                 "delay": self.api_delay_var.get(),
+            },
+            "fmp": {
+                "enabled": self.fmp_enabled_var.get(),
+                "api_key": self.fmp_api_key_var.get().strip(),
+            },
+            "te": {
+                "enabled": self.te_enabled_var.get(),
+                "api_key": self.te_api_key_var.get().strip(),
+                "skip_ssl_verify": self.te_skip_ssl_var.get(),
             },
             "context": {
                 "ctx_limit": self.context_limit_chars_var.get(),
@@ -495,6 +590,13 @@ class AppUI:
             "model": self.model_var.get(),
             "autorun": self.autorun_var.get(),
             "autorun_secs": self.autorun_seconds_var.get(),
+            # Thêm thu thập dữ liệu từ ChartTab
+            "chart": {
+                "timeframe": self.chart_tab.tf_var.get() if self.chart_tab else "M15",
+                "num_candles": self.chart_tab.n_candles_var.get() if self.chart_tab else 150,
+                "chart_type": self.chart_tab.chart_type_var.get() if self.chart_tab else "Nến",
+                "refresh_interval_secs": self.chart_tab.refresh_secs_var.get() if self.chart_tab else 5,
+            },
         }
 
     def apply_config(self, config_data: dict):
@@ -514,12 +616,42 @@ class AppUI:
 
         # Apply config group by group
         folder_cfg = config_data.get("folder", {})
+        self.delete_after_var.set(get_nested(folder_cfg, ["delete_after"], True))
+        self.max_files_var.set(get_nested(folder_cfg, ["max_files"], 0))
+        self.only_generate_if_changed_var.set(get_nested(folder_cfg, ["only_generate_if_changed"], False))
         folder_path = get_nested(folder_cfg, ["folder_path"], "")
         if folder_path and Path(folder_path).exists():
             self.folder_path.set(folder_path)
             self._load_files(folder_path)
 
-        # ... (các dòng khác)
+        upload_cfg = config_data.get("upload", {})
+        self.upload_workers_var.set(get_nested(upload_cfg, ["upload_workers"], 4))
+        self.cache_enabled_var.set(get_nested(upload_cfg, ["cache_enabled"], True))
+        self.optimize_lossless_var.set(get_nested(upload_cfg, ["optimize_lossless"], False))
+
+        image_cfg = config_data.get("image_processing", {})
+        self.image_max_width_var.set(get_nested(image_cfg, ["max_width"], 1600))
+        self.image_jpeg_quality_var.set(get_nested(image_cfg, ["jpeg_quality"], 85))
+
+        api_cfg = config_data.get("api", {})
+        self.api_tries_var.set(get_nested(api_cfg, ["tries"], 5))
+        self.api_delay_var.set(get_nested(api_cfg, ["delay"], 2.0))
+
+        context_cfg = config_data.get("context", {})
+        self.context_limit_chars_var.set(get_nested(context_cfg, ["ctx_limit"], 2000))
+        self.create_ctx_json_var.set(get_nested(context_cfg, ["create_ctx_json"], True))
+        self.prefer_ctx_json_var.set(get_nested(context_cfg, ["prefer_ctx_json"], True))
+        self.ctx_json_n_var.set(get_nested(context_cfg, ["ctx_json_n"], 5))
+        self.remember_context_var.set(get_nested(context_cfg, ["remember_context"], True))
+        self.context_n_reports_var.set(get_nested(context_cfg, ["n_reports"], 1))
+
+        telegram_cfg = config_data.get("telegram", {})
+        self.telegram_enabled_var.set(get_nested(telegram_cfg, ["enabled"], False))
+        self.telegram_token_var.set(get_nested(telegram_cfg, ["token"], ""))
+        self.telegram_chat_id_var.set(get_nested(telegram_cfg, ["chat_id"], ""))
+        self.telegram_skip_verify_var.set(get_nested(telegram_cfg, ["skip_verify"], False))
+        self.telegram_ca_path_var.set(get_nested(telegram_cfg, ["ca_path"], ""))
+        self.telegram_notify_early_exit_var.set(get_nested(telegram_cfg, ["notify_on_early_exit"], True))
 
         mt5_cfg = config_data.get("mt5", {})
         self.mt5_enabled_var.set(get_nested(mt5_cfg, ["enabled"], False))
@@ -565,6 +697,15 @@ class AppUI:
         self.trade_trailing_atr_mult_var.set(get_nested(auto_trade_cfg, ["trailing_atr_mult"], 0.5))
         self.trade_filling_type_var.set(get_nested(auto_trade_cfg, ["filling_type"], "IOC"))
 
+        fmp_cfg = config_data.get("fmp", {})
+        self.fmp_enabled_var.set(get_nested(fmp_cfg, ["enabled"], False))
+        self.fmp_api_key_var.set(get_nested(fmp_cfg, ["api_key"], ""))
+
+        te_cfg = config_data.get("te", {})
+        self.te_enabled_var.set(get_nested(te_cfg, ["enabled"], False))
+        self.te_api_key_var.set(get_nested(te_cfg, ["api_key"], ""))
+        self.te_skip_ssl_var.set(get_nested(te_cfg, ["skip_ssl_verify"], False))
+
         news_cfg = config_data.get("news", {})
         self.news_block_enabled_var.set(get_nested(news_cfg, ["block_enabled"], True))
         self.trade_news_block_before_min_var.set(get_nested(news_cfg, ["block_before_min"], 15))
@@ -582,6 +723,16 @@ class AppUI:
         self.autorun_var.set(config_data.get("autorun", False))
         self.autorun_seconds_var.set(config_data.get("autorun_secs", 60))
 
+        # Áp dụng cấu hình cho ChartTab
+        chart_cfg = config_data.get("chart", {})
+        if self.chart_tab:
+            self.chart_tab.tf_var.set(get_nested(chart_cfg, ["timeframe"], "M15"))
+            self.chart_tab.n_candles_var.set(get_nested(chart_cfg, ["num_candles"], 150))
+            self.chart_tab.chart_type_var.set(get_nested(chart_cfg, ["chart_type"], "Nến"))
+            self.chart_tab.refresh_secs_var.set(get_nested(chart_cfg, ["refresh_interval_secs"], 5))
+            # Vẽ lại biểu đồ với cài đặt mới
+            self.chart_tab._reset_and_redraw()
+
         # Kích hoạt autorun nếu cần
         if self.autorun_var.get():
             self._toggle_autorun()
@@ -593,6 +744,12 @@ class AppUI:
         # Cập nhật 1: Tự động làm mới tất cả danh sách tệp lịch sử sau khi áp dụng config
         # Điều này đảm bảo UI hiển thị đúng trạng thái khi khởi động
         self.history_manager.refresh_all_lists()
+
+        # Cập nhật 2: Đồng bộ trạng thái của các widget tin tức sau khi áp dụng config
+        self._update_news_widgets_state()
+
+        # Cập nhật 3: Cung cấp cấu hình mới cho các service chạy nền
+        self._update_services_config()
 
         logger.info("Đã áp dụng cấu hình lên UI thành công.")
     def _snapshot_config(self) -> "RunConfig":
@@ -628,6 +785,15 @@ class AppUI:
             api=ApiConfig(
                 tries=self.api_tries_var.get(),
                 delay=self.api_delay_var.get(),
+            ),
+            fmp=FMPConfig(
+                enabled=self.fmp_enabled_var.get(),
+                api_key=self.fmp_api_key_var.get(),
+            ),
+            te=TEConfig(
+                enabled=self.te_enabled_var.get(),
+                api_key=self.te_api_key_var.get(),
+                skip_ssl_verify=self.te_skip_ssl_var.get(),
             ),
             telegram=TelegramConfig(
                 enabled=self.telegram_enabled_var.get(),
@@ -689,35 +855,60 @@ class AppUI:
             persistence=PersistenceConfig(
                 max_md_reports=self.persistence_max_md_reports_var.get()
             ),
+            chart=ChartConfig(
+                timeframe=self.chart_tab.tf_var.get() if self.chart_tab else "M15",
+                num_candles=self.chart_tab.n_candles_var.get() if self.chart_tab else 150,
+                chart_type=self.chart_tab.chart_type_var.get() if self.chart_tab else "Nến",
+                refresh_interval_secs=self.chart_tab.refresh_secs_var.get() if self.chart_tab else 5,
+            ),
         )
 
     def _save_workspace(self):
-        """Thu thập cấu hình hiện tại từ UI và lưu vào file workspace."""
+        """Bắt đầu quá trình lưu cấu hình workspace trong luồng nền."""
         logger.info("Yêu cầu lưu workspace từ UI.")
+        self.ui_status("Đang lưu workspace...")
+        config_data = self._collect_config_data()
+        self.threading_manager.submit_task(self._save_workspace_worker, config_data)
+
+    def _save_workspace_worker(self, config_data: dict):
+        """Worker chạy nền để ghi file workspace."""
         try:
-            config_data = self._collect_config_data()
             workspace_config.save_config_to_file(config_data)
-            ui_builder.show_message("Thành công", "Đã lưu cấu hình workspace.")
             logger.info("Đã lưu cấu hình workspace thành công.")
-        except Exception:
+            ui_builder.enqueue(self, lambda: ui_builder.show_message("Thành công", "Đã lưu cấu hình workspace."))
+            ui_builder.enqueue(self, lambda: self.ui_status("Đã lưu workspace."))
+        except Exception as e:
             logger.exception("Lỗi khi lưu cấu hình workspace.")
-            ui_builder.show_message("Lỗi", "Không thể lưu cấu hình workspace.")
+            ui_builder.enqueue(self, lambda: ui_builder.show_message("Lỗi", f"Không thể lưu cấu hình:\n{e}"))
+            ui_builder.enqueue(self, lambda: self.ui_status("Lỗi khi lưu workspace."))
 
     def _load_workspace(self):
-        """Tải cấu hình từ file workspace và áp dụng lên UI."""
+        """Bắt đầu quá trình tải cấu hình workspace trong luồng nền."""
         logger.info("Yêu cầu tải workspace từ UI.")
+        self.ui_status("Đang tải workspace...")
+        self.threading_manager.submit_task(self._load_workspace_worker)
+
+    def _load_workspace_worker(self):
+        """Worker chạy nền để đọc file workspace."""
         try:
             config_data = workspace_config.load_config_from_file()
-            if config_data:
-                self.apply_config(config_data)
-                ui_builder.show_message("Thành công", "Đã tải và áp dụng cấu hình workspace.")
-                logger.info("Đã tải và áp dụng cấu hình workspace thành công.")
-            else:
-                ui_builder.show_message("Thông báo", "Không tìm thấy file workspace hoặc file bị rỗng.")
-                logger.info("Không tìm thấy file workspace hoặc file bị rỗng.")
-        except Exception:
+            
+            def update_ui():
+                if config_data:
+                    self.apply_config(config_data)
+                    ui_builder.show_message("Thành công", "Đã tải và áp dụng cấu hình workspace.")
+                    self.ui_status("Đã tải workspace.")
+                    logger.info("Đã tải và áp dụng cấu hình workspace thành công.")
+                else:
+                    ui_builder.show_message("Thông báo", "Không tìm thấy file workspace hoặc file bị rỗng.")
+                    self.ui_status("Không tìm thấy workspace.")
+                    logger.info("Không tìm thấy file workspace hoặc file bị rỗng.")
+
+            ui_builder.enqueue(self, update_ui)
+        except Exception as e:
             logger.exception("Lỗi khi tải cấu hình workspace.")
-            ui_builder.show_message("Lỗi", "Không thể tải hoặc áp dụng cấu hình workspace.")
+            ui_builder.enqueue(self, lambda: ui_builder.show_message("Lỗi", f"Không thể tải cấu hình:\n{e}"))
+            ui_builder.enqueue(self, lambda: self.ui_status("Lỗi khi tải workspace."))
 
     # --- Action Methods ---
     def start_analysis(self):
@@ -739,6 +930,9 @@ class AppUI:
         ui_builder.toggle_controls_state(self, "disabled")
         cfg = self._snapshot_config()
         self.run_config = cfg
+
+        # Cập nhật cấu hình cho các service trước khi chạy
+        self._update_services_config()
 
         worker_instance = AnalysisWorker(app=self, cfg=cfg, stop_event=self.stop_event)
         self.active_worker_thread = threading.Thread(target=worker_instance.run, daemon=True)
@@ -783,10 +977,7 @@ class AppUI:
             self.ui_detail_replace("Báo cáo tổng hợp sẽ hiển thị tại đây.")
 
         # Chạy tác vụ quét thư mục trong một luồng riêng
-        scan_thread = threading.Thread(
-            target=self._scan_folder_worker, args=(folder,), daemon=True
-        )
-        scan_thread.start()
+        self.threading_manager.submit_task(self._scan_folder_worker, folder)
 
     def _scan_folder_worker(self, folder: str):
         """
@@ -837,8 +1028,8 @@ class AppUI:
         self.ui_status("Đã xoá kết quả.")
 
     def export_markdown(self):
-        """Xuất báo cáo phân tích tổng hợp ra file Markdown."""
-        logger.debug("Chuẩn bị xuất báo cáo Markdown.")
+        """Mở hộp thoại lưu file và bắt đầu quá trình xuất Markdown trong luồng nền."""
+        logger.debug("Yêu cầu xuất báo cáo Markdown.")
         if not self.combined_report_text.strip():
             self.show_error_message("Trống", "Không có nội dung báo cáo để xuất.")
             return
@@ -854,14 +1045,20 @@ class AppUI:
             logger.debug("Người dùng đã hủy lưu báo cáo Markdown.")
             return
 
+        self.ui_status("Đang xuất báo cáo Markdown...")
+        self.threading_manager.submit_task(self._export_markdown_worker, out_path_str, self.combined_report_text)
+
+    def _export_markdown_worker(self, path_str: str, content: str):
+        """Worker chạy nền để ghi báo cáo ra file Markdown."""
         try:
-            # Sửa lỗi: Ghi trực tiếp nội dung vào file thay vì gọi hàm không tồn tại
-            Path(out_path_str).write_text(self.combined_report_text, encoding="utf-8")
-            self.show_error_message("Thành công", f"Đã lưu báo cáo tại:\n{out_path_str}")
-            logger.info(f"Đã lưu báo cáo Markdown thành công tại: {out_path_str}.")
-        except Exception:
+            Path(path_str).write_text(content, encoding="utf-8")
+            logger.info(f"Đã lưu báo cáo Markdown thành công tại: {path_str}.")
+            ui_builder.enqueue(self, lambda: self.show_error_message("Thành công", f"Đã lưu báo cáo tại:\n{path_str}"))
+            ui_builder.enqueue(self, lambda: self.ui_status("Đã xuất báo cáo Markdown."))
+        except Exception as e:
             logger.exception("Lỗi khi ghi báo cáo Markdown.")
-            self.show_error_message("Lỗi ghi file", "Không thể lưu báo cáo.")
+            ui_builder.enqueue(self, lambda: self.show_error_message("Lỗi ghi file", f"Không thể lưu báo cáo:\n{e}"))
+            ui_builder.enqueue(self, lambda: self.ui_status("Lỗi khi xuất báo cáo."))
 
     # --- UI Callbacks and Helpers ---
     def _on_tree_select(self, _evt: tk.Event):
@@ -905,9 +1102,15 @@ class AppUI:
             self.ui_detail_replace("Lỗi khi hiển thị chi tiết báo cáo.")
 
     def _toggle_api_visibility(self):
-        """Chuyển đổi trạng thái hiển thị của ô nhập API key."""
-        if self.api_entry:
-            self.api_entry.configure(show="" if self.api_entry.cget("show") == "*" else "*")
+        """Chuyển đổi trạng thái hiển thị của tất cả các ô nhập API key."""
+        entries = [self.api_entry, self.fmp_api_entry, self.te_api_entry]
+        # Xác định trạng thái mới dựa trên entry đầu tiên
+        is_hidden = entries[0] and entries[0].cget("show") == "*"
+        new_show_char = "" if is_hidden else "*"
+        
+        for entry in entries:
+            if entry:
+                entry.configure(show=new_show_char)
 
     def _configure_gemini_api_and_update_ui(self):
         """
@@ -922,7 +1125,7 @@ class AppUI:
             return
 
         # Chạy trong luồng riêng để không làm treo UI
-        threading.Thread(target=self._update_model_list_worker, args=(api_key,), daemon=True).start()
+        self.threading_manager.submit_task(self._update_model_list_worker, api_key)
 
     def _update_model_list_worker(self, api_key: str):
         """
@@ -988,10 +1191,46 @@ class AppUI:
 
     def _on_symbol_changed(self, *args):
         """
-        Được gọi mỗi khi symbol thay đổi. Làm mới danh sách lịch sử và json.
+        Được gọi mỗi khi symbol thay đổi. Đồng bộ hóa tất cả các thành phần phụ thuộc.
         """
-        logger.debug(f"Symbol đã thay đổi thành: {self.mt5_symbol_var.get()}, làm mới danh sách tệp.")
+        new_symbol = self.mt5_symbol_var.get()
+        logger.debug(f"Symbol đã thay đổi thành: {new_symbol}, đang đồng bộ hóa các thành phần.")
+
+        # 1. Cập nhật HistoryManager
         self.history_manager.refresh_all_lists()
+
+        # 2. Cập nhật ChartTab
+        if self.chart_tab:
+            logger.debug("Thông báo cho ChartTab để vẽ lại biểu đồ.")
+            self.chart_tab._reset_and_redraw()
+
+    def _update_news_widgets_state(self):
+        """
+        Bật/tắt các widget con trong phần cài đặt tin tức dựa trên việc
+        có nhà cung cấp nào (FMP/TE) được bật hay không.
+        """
+        any_provider_enabled = self.fmp_enabled_var.get() or self.te_enabled_var.get()
+        new_state = "normal" if any_provider_enabled else "disabled"
+
+        # Danh sách các widget cần thay đổi trạng thái
+        widgets_to_toggle = [
+            self.news_block_check,
+            self.news_before_spin,
+            self.news_after_spin,
+            self.news_cache_spin,
+            self.news_provider_combo,
+        ]
+
+        for widget in widgets_to_toggle:
+            if widget:
+                widget.config(state=new_state)
+
+        # Cập nhật cả tiêu đề của card để cung cấp phản hồi trực quan
+        if self.news_card:
+            if not any_provider_enabled:
+                self.news_card.config(text="Chặn tin tức (Cần bật FMP hoặc TE)")
+            else:
+                self.news_card.config(text="Chặn giao dịch theo tin tức (News)")
 
     def _update_progress(self, current_step: int, total_steps: int):
         """Cập nhật thanh tiến trình dựa trên bước hiện tại và tổng số bước."""
@@ -1052,19 +1291,45 @@ class AppUI:
         self._autorun_job = self.root.after(interval_ms, self._autorun_tick)
 
     def _autorun_tick(self):
-        """Hàm được gọi khi đến thời gian tự động chạy."""
-        logger.info("Autorun tick: Đã đến giờ chạy.")
+        """
+        Hàm được gọi khi đến thời gian tự động chạy.
+        Kích hoạt một worker nền để kiểm tra các điều kiện và bắt đầu phân tích.
+        """
+        logger.info("Autorun tick: Kích hoạt worker kiểm tra.")
+        # Chỉ kích hoạt worker nếu chưa có phân tích nào chạy,
+        # để tránh tạo ra quá nhiều luồng không cần thiết.
+        if not self.is_running:
+            self.threading_manager.submit_task(self._autorun_tick_worker)
+        else:
+            logger.warning("Autorun tick: Bỏ qua vì một phân tích khác đã đang chạy.")
+            # Vẫn phải lên lịch lại cho lần chạy tiếp theo
+            self._schedule_next_autorun()
+
+    def _autorun_tick_worker(self):
+        """
+        Worker chạy nền để kiểm tra các điều kiện (đặc biệt là kết nối MT5)
+        trước khi bắt đầu một phiên phân tích tự động.
+        """
+        logger.debug("Autorun tick worker: Bắt đầu kiểm tra điều kiện.")
+        
+        # Kiểm tra lại is_running bên trong luồng để tránh race condition
         if self.is_running:
-            logger.warning("Autorun tick: Bỏ qua vì một tiến trình khác đang chạy.")
-            self._schedule_next_autorun()
-            return
-        if not self.mt5_enabled_var.get() or not mt5_service.is_connected():
-            logger.warning("Autorun tick: Bỏ qua vì MT5 chưa được kết nối.")
-            self._schedule_next_autorun()
+            logger.warning("Autorun tick worker: Bỏ qua vì phân tích vừa được bắt đầu.")
+            self.ui_queue.put(self._schedule_next_autorun)
             return
 
-        logger.info("Autorun tick: Bắt đầu phân tích tự động.")
-        self.start_analysis()
+        # Kiểm tra kết nối MT5 (tác vụ có thể bị chặn)
+        is_mt5_ok = self.mt5_enabled_var.get() and mt5_service.is_connected()
+
+        if not is_mt5_ok:
+            logger.warning("Autorun tick worker: Bỏ qua vì MT5 chưa được kết nối hoặc chưa bật.")
+            # Lên lịch lại cho lần chạy tiếp theo từ luồng chính
+            self.ui_queue.put(self._schedule_next_autorun)
+            return
+
+        logger.info("Autorun tick worker: Điều kiện hợp lệ, yêu cầu bắt đầu phân tích trên luồng UI.")
+        # Yêu cầu start_analysis chạy trên luồng chính để đảm bảo an toàn cho UI
+        self.ui_queue.put(self.start_analysis)
 
     # --- MT5 Methods ---
     def _pick_mt5_terminal(self):
@@ -1092,91 +1357,248 @@ class AppUI:
             self.show_error_message("Đoán Symbol", "Không thể đoán symbol từ tên file.")
 
     def _mt5_connect(self):
-        """Thực hiện kết nối đến MetaTrader 5."""
+        """Thực hiện kết nối đến MetaTrader 5 trong một luồng riêng."""
         logger.info("Yêu cầu kết nối MT5 từ UI.")
         path = self.mt5_term_path_var.get()
         if not path or not Path(path).exists():
             self.show_error_message("Lỗi MT5", "Đường dẫn terminal64.exe không hợp lệ.")
             return
 
+        self.ui_status("Đang kết nối đến MT5...")
+        self.threading_manager.submit_task(self._mt5_connect_worker, path)
+
+    def _mt5_connect_worker(self, path: str):
+        """Worker để thực hiện kết nối MT5."""
         ok, msg = mt5_service.connect(path=path)
-        self.mt5_status_var.set(str(msg))
-        if ok:
-            self.show_error_message("MT5", "Kết nối thành công.")
-            self._schedule_mt5_connection_check()
-        else:
-            self.show_error_message("MT5", str(msg))
+        
+        def update_ui():
+            self.mt5_status_var.set(str(msg) if msg else "Kết nối thành công.")
+            if ok:
+                self.show_error_message("MT5", "Kết nối thành công.")
+                # Sau khi kết nối thành công, bắt đầu lại lịch kiểm tra
+                self._schedule_mt5_connection_check()
+            else:
+                self.show_error_message("MT5", str(msg))
+            self.ui_status("Sẵn sàng.")
+
+        self.ui_queue.put(update_ui)
 
     def _schedule_mt5_connection_check(self):
-        """Lên lịch kiểm tra kết nối MT5 định kỳ."""
+        """Lên lịch kiểm tra kết nối MT5 định kỳ (chạy trong luồng riêng)."""
         if self._mt5_check_connection_job:
             self.root.after_cancel(self._mt5_check_connection_job)
 
         if self.mt5_enabled_var.get():
-            is_connected = mt5_service.is_connected()
+            # Chạy kiểm tra trong luồng nền
+            self.threading_manager.submit_task(self._mt5_check_connection_worker)
+
+        # Lên lịch cho lần kiểm tra tiếp theo
+        self._mt5_check_connection_job = self.root.after(15000, self._schedule_mt5_connection_check)
+
+    def _mt5_check_connection_worker(self):
+        """Worker để kiểm tra trạng thái kết nối MT5."""
+        is_connected = mt5_service.is_connected()
+        
+        def update_ui():
             status = "MT5: Đã kết nối" if is_connected else "MT5: Mất kết nối"
             self.mt5_status_var.set(status)
             if not is_connected:
-                logger.warning("Mất kết nối MT5, sẽ thử kết nối lại.")
-                self._mt5_connect() # Thử kết nối lại ngay
+                logger.warning("Mất kết nối MT5, sẽ thử kết nối lại trong lần kiểm tra tiếp theo.")
+                # Không gọi _mt5_connect trực tiếp để tránh vòng lặp vô hạn,
+                # thay vào đó, lần kiểm tra theo lịch tiếp theo sẽ xử lý.
 
-        self._mt5_check_connection_job = self.root.after(15000, self._schedule_mt5_connection_check)
+        self.ui_queue.put(update_ui)
 
     def _mt5_snapshot_popup(self):
-        """Hiển thị cửa sổ popup chứa dữ liệu MT5 hiện tại."""
+        """Yêu cầu snapshot dữ liệu MT5 và hiển thị nó (chạy trong luồng riêng)."""
         logger.debug("Yêu cầu snapshot dữ liệu MT5.")
         if not mt5_service.is_connected():
             self.show_error_message("MT5", "Chưa kết nối MT5.")
             return
+        
+        self.ui_status("Đang lấy snapshot dữ liệu MT5...")
+        self.threading_manager.submit_task(self._mt5_snapshot_worker)
+
+    def _update_services_config(self):
+        """
+        Lấy cấu hình hiện tại và cập nhật cho các service chạy nền.
+        """
+        current_config = self._snapshot_config()
+        if self.news_service:
+            self.news_service.update_config(current_config)
+
+    def _on_news_updated(self, events: List[Dict[str, Any]]):
+        """
+        Callback được gọi từ NewsService khi cache tin tức được làm mới.
+        """
+        logger.debug(f"Callback nhận được {len(events)} sự kiện tin tức mới.")
+        
+        def update_ui():
+            # Lọc lại danh sách tin tức dựa trên symbol hiện tại của UI
+            symbol = self.mt5_symbol_var.get()
+            if self.news_service and self.news_tab and symbol:
+                filtered_events = self.news_service.get_upcoming_events(symbol)
+                self.news_tab.update_news_list(filtered_events)
+                self.ui_status(f"Tin tức được tự động cập nhật ({len(filtered_events)} sự kiện).")
+            elif self.news_tab:
+                # Xử lý trường hợp không có symbol
+                self.news_tab.update_news_list([])
+
+        self.ui_queue.put(update_ui)
+
+    def _mt5_snapshot_worker(self):
+        """Worker để lấy dữ liệu snapshot MT5."""
         cfg = self._snapshot_config()
-        mt5_data = mt5_service.get_market_data(cfg.mt5) # type: ignore
-        if mt5_data:
-            ui_builder.show_json_popup(self.root, "MT5 Data Snapshot", mt5_data.to_dict()) # type: ignore
-        else:
-            self.show_error_message("MT5", "Không thể lấy dữ liệu snapshot.")
+        # Sử dụng kiến trúc timeout tương tự như AnalysisWorker
+        mt5_data = None
+        error_msg = None
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            try:
+                future = executor.submit(mt5_service.get_market_data, cfg.mt5)
+                mt5_data_untyped = future.result(timeout=20)
+                if isinstance(mt5_data_untyped, SafeData):
+                    mt5_data = mt5_data_untyped
+            except TimeoutError:
+                error_msg = "Lấy dữ liệu snapshot thất bại (Timeout). Terminal có thể bị treo."
+                logger.error(error_msg)
+            except Exception as e:
+                error_msg = f"Lỗi khi lấy snapshot: {e}"
+                logger.exception(error_msg)
+
+        def update_ui():
+            self.ui_status("Sẵn sàng.")
+            if mt5_data and mt5_data.is_valid():
+                ui_builder.show_json_popup(self.root, "MT5 Data Snapshot", mt5_data.to_dict())
+            else:
+                # Hiển thị lỗi cụ thể nếu có, hoặc lỗi chung
+                final_error = error_msg or "Không thể lấy dữ liệu snapshot hợp lệ."
+                self.show_error_message("Lỗi Snapshot MT5", final_error)
+
+        self.ui_queue.put(update_ui)
 
     # --- API Key & Env Methods ---
     def _load_env(self):
-        """Tải biến môi trường từ file .env."""
+        """Mở hộp thoại chọn file .env và bắt đầu quá trình tải trong luồng nền."""
         logger.debug("Mở hộp thoại chọn file .env.")
-        env_path = filedialog.askopenfilename(title="Chọn file .env", filetypes=[(".env files", "*.env")])
-        if env_path and Path(env_path).exists():
-            load_dotenv(dotenv_path=env_path, override=True)
-            api_key = os.environ.get("GOOGLE_API_KEY")
-            if api_key:
-                self.api_key_var.set(api_key)
-                ui_builder.show_message("Thành công", "Đã tải GOOGLE_API_KEY từ .env.")
-                logger.info("Đã tải GOOGLE_API_KEY từ file .env.")
-            else:
-                ui_builder.show_message("Thiếu key", "Không tìm thấy GOOGLE_API_KEY trong file .env.")
+        env_path_str = filedialog.askopenfilename(
+            title="Chọn file .env", filetypes=[(".env files", "*.env")]
+        )
+        if not (env_path_str and Path(env_path_str).exists()):
+            logger.debug("Người dùng đã hủy chọn file .env.")
+            return
+
+        self.ui_status("Đang tải file .env...")
+        self.threading_manager.submit_task(self._load_env_worker, env_path_str)
+
+    def _load_env_worker(self, env_path: str):
+        """Worker chạy nền để đọc và áp dụng các biến từ file .env."""
+        try:
+            # Tải các biến môi trường vào một dict tạm thời thay vì os.environ
+            # để tránh các vấn đề về thread-safety với biến môi trường toàn cục.
+            env_vars = load_dotenv(dotenv_path=env_path, override=True)
+            
+            keys_found = {}
+            if key := os.environ.get("GOOGLE_API_KEY"):
+                keys_found["google"] = key
+            if key := os.environ.get("FMP_API_KEY"):
+                keys_found["fmp"] = key
+            if key := os.environ.get("TE_API_KEY"):
+                keys_found["te"] = key
+
+            def update_ui():
+                self.ui_status("Sẵn sàng.")
+                if not keys_found:
+                    ui_builder.show_message("Không tìm thấy", "Không tìm thấy key API nào trong file .env.")
+                    return
+
+                keys_loaded_names = []
+                if "google" in keys_found:
+                    self.api_key_var.set(keys_found["google"])
+                    keys_loaded_names.append("GOOGLE_API_KEY")
+                if "fmp" in keys_found:
+                    self.fmp_api_key_var.set(keys_found["fmp"])
+                    keys_loaded_names.append("FMP_API_KEY")
+                if "te" in keys_found:
+                    self.te_api_key_var.set(keys_found["te"])
+                    keys_loaded_names.append("TE_API_KEY")
+
+                msg = f"Đã tải các key sau từ .env:\n- " + "\n- ".join(keys_loaded_names)
+                ui_builder.show_message("Thành công", msg)
+                logger.info(msg)
+
+            self.ui_queue.put(update_ui)
+
+        except Exception as e:
+            logger.exception(f"Lỗi khi tải file .env: {env_path}")
+            self.ui_queue.put(lambda: self.show_error_message("Lỗi", f"Không thể tải file .env:\n{e}"))
+            self.ui_queue.put(lambda: self.ui_status("Lỗi khi tải .env."))
 
     def _save_api_safe(self):
-        """Mã hóa và lưu API key vào tệp."""
-        api_key = self.api_key_var.get()
-        if not api_key:
-            ui_builder.show_message("Thiếu key", "Vui lòng nhập API key trước khi lưu.")
+        """Bắt đầu quá trình lưu API key an toàn trong luồng nền."""
+        logger.debug("Yêu cầu lưu API keys.")
+        import json
+        keys_to_save = {
+            "google": self.api_key_var.get().strip(),
+            "fmp": self.fmp_api_key_var.get().strip(),
+            "te": self.te_api_key_var.get().strip(),
+        }
+        keys_to_save = {k: v for k, v in keys_to_save.items() if v}
+
+        if not keys_to_save:
+            ui_builder.show_message("Thiếu key", "Vui lòng nhập ít nhất một API key trước khi lưu.")
             return
+        
+        self.ui_status("Đang lưu API keys...")
+        self.threading_manager.submit_task(self._save_api_safe_worker, keys_to_save)
+
+    def _save_api_safe_worker(self, keys_to_save: dict):
+        """Worker chạy nền để mã hóa và ghi API keys vào file."""
+        import json
         try:
-            encrypted_key = general_utils.obfuscate_text(api_key, "api_key_salt")
-            PATHS.API_KEY_ENC.write_text(encrypted_key, encoding="utf-8")
-            ui_builder.show_message("Thành công", "Đã mã hóa và lưu API key.")
-            logger.info("Đã lưu API key đã mã hóa.")
+            json_string = json.dumps(keys_to_save, indent=2)
+            encrypted_content = general_utils.obfuscate_text(json_string, "all_api_keys_salt")
+            PATHS.ALL_API_KEYS_ENC.write_text(encrypted_content, encoding="utf-8")
+            logger.info("Đã lưu các API key đã mã hóa.")
+            ui_builder.enqueue(self, lambda: ui_builder.show_message("Thành công", "Đã mã hóa và lưu các API key."))
+            ui_builder.enqueue(self, lambda: self.ui_status("Đã lưu API keys."))
         except Exception as e:
-            logger.exception("Lỗi khi lưu API key.")
-            ui_builder.show_message("Lỗi", f"Không thể lưu API key: {e}")
+            logger.exception("Lỗi khi lưu API keys.")
+            ui_builder.enqueue(self, lambda: ui_builder.show_message("Lỗi", f"Không thể lưu API keys: {e}"))
+            ui_builder.enqueue(self, lambda: self.ui_status("Lỗi khi lưu API keys."))
 
     def _delete_api_safe(self):
-        """Xóa tệp chứa API key đã mã hóa."""
-        if PATHS.API_KEY_ENC.exists():
-            try:
-                PATHS.API_KEY_ENC.unlink()
-                ui_builder.show_message("Thành công", "Đã xóa API key đã lưu.")
-                logger.info("Đã xóa tệp API key đã mã hóa.")
-            except Exception as e:
-                logger.exception("Lỗi khi xóa API key.")
-                ui_builder.show_message("Lỗi", f"Không thể xóa API key: {e}")
-        else:
-            ui_builder.show_message("Thông báo", "Không có API key nào được lưu.")
+        """Bắt đầu quá trình xóa API key an toàn trong luồng nền."""
+        logger.debug("Yêu cầu xóa API keys.")
+        self.ui_status("Đang xóa API keys...")
+        self.threading_manager.submit_task(self._delete_api_safe_worker)
+
+    def _delete_api_safe_worker(self):
+        """Worker chạy nền để xóa file API key."""
+        file_to_delete = PATHS.ALL_API_KEYS_ENC
+        if not file_to_delete.exists() and PATHS.API_KEY_ENC.exists():
+            file_to_delete = PATHS.API_KEY_ENC
+        
+        if not file_to_delete.exists():
+            ui_builder.enqueue(self, lambda: ui_builder.show_message("Thông báo", "Không có API key nào được lưu."))
+            ui_builder.enqueue(self, lambda: self.ui_status("Sẵn sàng."))
+            return
+
+        try:
+            file_to_delete.unlink()
+            
+            def update_ui():
+                self.api_key_var.set("")
+                self.fmp_api_key_var.set("")
+                self.te_api_key_var.set("")
+                ui_builder.show_message("Thành công", "Đã xóa các API key đã lưu.")
+                self.ui_status("Đã xóa API keys.")
+            
+            ui_builder.enqueue(self, update_ui)
+            logger.info("Đã xóa tệp API key đã mã hóa.")
+        except Exception as e:
+            logger.exception("Lỗi khi xóa API key.")
+            ui_builder.enqueue(self, lambda: ui_builder.show_message("Lỗi", f"Không thể xóa API key: {e}"))
+            ui_builder.enqueue(self, lambda: self.ui_status("Lỗi khi xóa API keys."))
 
     def _telegram_test(self):
         """Gửi tin nhắn thử nghiệm qua Telegram."""
@@ -1185,19 +1607,23 @@ class AppUI:
         logger.info("Nút gửi thử Telegram đã được nhấn.")
 
     def _delete_workspace(self):
-        """Xóa file workspace."""
+        """Bắt đầu quá trình xóa file workspace trong luồng nền."""
+        logger.debug("Yêu cầu xóa workspace.")
         if ui_builder.ask_confirmation(
             title="Xác nhận Xóa",
             message="Bạn có chắc chắn muốn xóa file workspace hiện tại không?",
         ):
-            try:
-                workspace_config.delete_workspace()
-                ui_builder.show_message(
-                    title="Thành công", message="Đã xóa file workspace."
-                )
-                logger.info("Đã xóa file workspace.")
-            except Exception as e:
-                ui_builder.show_message(
-                    title="Lỗi", message=f"Không thể xóa file workspace:\n{e}"
-                )
-                logger.exception("Lỗi khi xóa file workspace.")
+            self.ui_status("Đang xóa workspace...")
+            self.threading_manager.submit_task(self._delete_workspace_worker)
+
+    def _delete_workspace_worker(self):
+        """Worker chạy nền để xóa file workspace."""
+        try:
+            workspace_config.delete_workspace()
+            logger.info("Đã xóa file workspace.")
+            ui_builder.enqueue(self, lambda: ui_builder.show_message("Thành công", "Đã xóa file workspace."))
+            ui_builder.enqueue(self, lambda: self.ui_status("Đã xóa workspace."))
+        except Exception as e:
+            logger.exception("Lỗi khi xóa file workspace.")
+            ui_builder.enqueue(self, lambda: ui_builder.show_message("Lỗi", f"Không thể xóa file workspace:\n{e}"))
+            ui_builder.enqueue(self, lambda: self.ui_status("Lỗi khi xóa workspace."))

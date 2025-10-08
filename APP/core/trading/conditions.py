@@ -8,11 +8,12 @@ from typing import TYPE_CHECKING, Any, Optional
 import holidays
 
 from APP.services import mt5_service, telegram_service
+from APP.services.news_service import NewsService
+from APP.utils.safe_data import SafeData
 
 if TYPE_CHECKING:
     from APP.configs.app_config import RunConfig
     from APP.core.analysis_worker import AnalysisWorker
-from APP.utils.safe_data import SafeData
 
 
 logger = logging.getLogger(__name__)
@@ -23,11 +24,14 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-def check_no_run_conditions(cfg: RunConfig) -> tuple[bool, str]:
+def check_no_run_conditions(
+    cfg: RunConfig, news_service: NewsService
+) -> tuple[bool, str]:
     """Kiểm tra các điều kiện NO-RUN cấp cao nhất.
 
     Args:
         cfg: Đối tượng cấu hình RunConfig.
+        news_service: Instance của dịch vụ tin tức.
 
     Returns:
         Tuple (bool, str): (True, "Lý do chạy") hoặc (False, "Lý do dừng").
@@ -52,7 +56,6 @@ def check_no_run_conditions(cfg: RunConfig) -> tuple[bool, str]:
     # 3. Kiểm tra Kill Zone
     active_kill_zone = ""
     if cfg.no_run.killzone_enabled:
-        # Sửa lỗi: Gọi hàm mới `get_active_killzone`
         is_in_kill_zone, zone_name = mt5_service.get_active_killzone(
             d=now, target_tz=cfg.no_run.timezone
         )
@@ -95,20 +98,22 @@ class AbstractCondition(ABC):
 
 
 class NewsCondition(AbstractCondition):
-    """Kiểm tra các tin tức quan trọng."""
+    """Kiểm tra các tin tức quan trọng bằng NewsService."""
 
     def check(
         self, safe_mt5_data: Optional[SafeData], cfg: RunConfig, **kwargs: Any
     ) -> str | None:
-        if not safe_mt5_data:
-            return "Không có dữ liệu MT5 để kiểm tra tin tức."
-        
-        if cfg.news.block_enabled:
-            news_analysis = safe_mt5_data.get("news_analysis", {})
-            is_in_window = news_analysis.get("is_in_news_window", False)
-            reason = news_analysis.get("reason")
+        news_service: NewsService | None = kwargs.get("news_service")
+        if not news_service:
+            # Đây là một lỗi logic nếu news_service không được truyền vào
+            logger.error("NewsService không được cung cấp cho NewsCondition. Bỏ qua kiểm tra.")
+            return "Lỗi cấu hình: NewsService không khả dụng."
 
-            if is_in_window and reason:
+        if cfg.news.block_enabled:
+            is_in_blackout, reason = news_service.is_in_news_blackout(
+                symbol=cfg.mt5.symbol
+            )
+            if is_in_blackout:
                 return f"Tin tức quan trọng: {reason}"
         return None
 
@@ -125,7 +130,6 @@ class SpreadCondition(AbstractCondition):
             symbol_info = safe_mt5_data.get("info")
             tick_info = safe_mt5_data.get("tick")
             if symbol_info and tick_info:
-                # Sửa lỗi: Gọi hàm mới `get_spread_pips`
                 current_spread_pips = mt5_service.get_spread_pips(symbol_info, tick_info)
                 if current_spread_pips is not None and current_spread_pips > cfg.no_trade.spread_max_pips:
                     return (
@@ -144,14 +148,11 @@ class ATRCondition(AbstractCondition):
         if not safe_mt5_data:
             return "Không có dữ liệu MT5 để kiểm tra ATR."
         if cfg.no_trade.min_atr_m5_pips > 0:
-            # Since get_nested is not a method of SafeData, we access it differently
-            # Sửa lỗi: Truy cập dữ liệu ATR một cách an toàn hơn
             atr_m5 = safe_mt5_data.get_nested("volatility.ATR.M5")
             if atr_m5 is not None:
                 symbol_info = safe_mt5_data.get("info")
                 if not symbol_info:
                     return "Không có thông tin symbol để kiểm tra ATR."
-                # Sửa lỗi: Gọi hàm mới `points_to_pips`
                 atr_m5_pips = mt5_service.points_to_pips(atr_m5, symbol_info)
                 if atr_m5_pips is not None and atr_m5_pips < cfg.no_trade.min_atr_m5_pips:
                     return (
@@ -176,10 +177,8 @@ class SessionCondition(AbstractCondition):
             "london": cfg.no_trade.allow_session_london,
             "ny": cfg.no_trade.allow_session_ny,
         }
-        # Sửa lỗi: Logic kiểm tra session được viết lại để sử dụng dữ liệu từ SafeData
         killzone_active = safe_mt5_data.get("killzone_active")
         
-        # Map từ killzone của mt5_service sang key của config
         session_map = {
             "asia": "asia",
             "london": "london",
@@ -188,15 +187,10 @@ class SessionCondition(AbstractCondition):
         }
         current_session_key = session_map.get(killzone_active, None) if killzone_active else None
 
-        # Chỉ kiểm tra nếu có ít nhất 1 phiên bị tắt
         if not all(allowed_sessions.values()):
-            # Nếu đang trong một phiên giao dịch...
             if current_session_key:
-                # ...và phiên đó không được cho phép
                 if not allowed_sessions.get(current_session_key, True):
                     return f"Không được phép giao dịch trong phiên {current_session_key}."
-            # Nếu không trong phiên giao dịch nào, và không phải tất cả các phiên đều được bật
-            # (có nghĩa là người dùng muốn giới hạn giao dịch trong các phiên cụ thể)
             else:
                 return "Không nằm trong phiên giao dịch được phép (ngoài killzone)."
         return None
@@ -225,8 +219,7 @@ class KeyLevelCondition(AbstractCondition):
 
 
 def check_no_trade_conditions(
-    safe_mt5_data: Optional[SafeData],
-    cfg: RunConfig
+    safe_mt5_data: Optional[SafeData], cfg: RunConfig, news_service: NewsService
 ) -> list[str]:
     """
     Đánh giá các điều kiện NO-TRADE bằng cách sử dụng Strategy Pattern.
@@ -234,7 +227,7 @@ def check_no_trade_conditions(
     Args:
         safe_mt5_data: Dữ liệu an toàn từ MT5.
         cfg: Đối tượng cấu hình RunConfig.
-        news_events: Danh sách các sự kiện tin tức đã được cache.
+        news_service: Instance của dịch vụ tin tức.
 
     Returns:
         Danh sách các lý do vi phạm. Rỗng nếu không có vi phạm nào.
@@ -243,7 +236,7 @@ def check_no_trade_conditions(
         return []
 
     logger.debug("Bắt đầu kiểm tra các điều kiện NO-TRADE.")
-    
+
     conditions: list[AbstractCondition] = [
         NewsCondition(),
         SpreadCondition(),
@@ -251,12 +244,13 @@ def check_no_trade_conditions(
         SessionCondition(),
         KeyLevelCondition(),
     ]
-    
+
+    # Truyền news_service vào kwargs để các điều kiện con có thể sử dụng
+    kwargs = {"news_service": news_service}
+
     reasons: list[str] = []
     for condition in conditions:
-        reason = condition.check(
-            safe_mt5_data, cfg
-        )
+        reason = condition.check(safe_mt5_data, cfg, **kwargs)
         if reason:
             reasons.append(reason)
 
@@ -284,26 +278,20 @@ def handle_early_exit(
 
     logger.info(f"Thoát sớm. Giai đoạn: {stage}, Lý do: {reason}")
 
-    # Đặt văn bản báo cáo cuối cùng để khối finally có thể lưu lại
     report_text = f"Dừng sớm: {reason}."
     worker.combined_text = report_text
 
-    # Cập nhật giao diện người dùng với lý do dừng
-    # Cả thanh trạng thái (chỉ dòng đầu) và vùng hiển thị chi tiết (toàn bộ)
     worker.app.ui_queue.put(lambda: worker.app.ui_status(f"Dừng: {reason.splitlines()[0]}"))
     worker.app.ui_queue.put(lambda: worker.app.ui_detail_replace(report_text))
     if worker.context_block:
         worker.combined_text += f"\n\n--- NGỮ CẢNH ---\n{worker.context_block}"
 
-    # Ghi log quyết định
     log_handler.log_trade(
         run_config=worker.cfg,
         trade_data={"stage": stage, "reason": reason},
     )
 
-    # Gửi thông báo nếu được yêu cầu
     if notify and worker.cfg.telegram.enabled:
-        # Sửa lỗi: Sử dụng lớp TelegramClient để gửi tin nhắn
         try:
             client = telegram_service.TelegramClient.from_config(worker.cfg)
             client.send_message(f"*[EARLY EXIT]*\n- Stage: {stage}\n- Reason: {reason}")

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
@@ -185,7 +186,7 @@ def folder_signature(names: List[str]) -> str:
 # endregion
 
 
-def build_context_from_reports(
+def build_historical_context_async(
     reports_dir: Path,
     image_results: List[Dict],
     timeframe_detector: "TimeframeDetector",
@@ -193,16 +194,13 @@ def build_context_from_reports(
     budget_chars: int = 1800,
 ) -> Tuple[str, Optional[Dict]]:
     """
-    Xây dựng chuỗi JSON ngữ cảnh lịch sử (được cắt bớt theo ngân sách).
-
-    Hàm này tập trung logic lắp ráp và làm gọn ngữ cảnh từ các lần chạy trước,
-    dữ liệu backtest, và các quy tắc rủi ro. Hàm này được thiết kế để không
-    phụ thuộc trực tiếp vào đối tượng AppUI, giúp tăng khả năng kiểm thử.
+    Hàm worker công khai để xây dựng ngữ cảnh lịch sử từ các file báo cáo.
+    Được thiết kế để chạy song song với các tác vụ I/O khác.
 
     Args:
         reports_dir: Đường dẫn đến thư mục chứa báo cáo.
         image_results: Danh sách kết quả hình ảnh từ UI.
-        detect_tf_callback: Hàm callback để phát hiện timeframe từ tên file.
+        timeframe_detector: Đối tượng để phát hiện timeframe từ tên file.
         cfg: Đối tượng cấu hình (RunConfig).
         budget_chars: Ngân sách ký tự tối đa cho chuỗi JSON.
 
@@ -296,9 +294,10 @@ def build_context_from_reports(
     return text, plan
 
 
-def _create_concept_value_table(data: SafeData) -> str:
+def create_concept_value_table(data: SafeData) -> str:
     """
     Tạo một bảng Markdown tóm tắt các thông tin quan trọng nhất từ dữ liệu MT5.
+    Hàm này được đặt ở đây để logic xây dựng prompt có thể tái sử dụng.
     """
     if not data or not data.raw:
         return "Không có dữ liệu MT5."
@@ -334,85 +333,4 @@ def _create_concept_value_table(data: SafeData) -> str:
     return table
 
 
-def coordinate_context_building(
-    app: "AppUI", cfg: "RunConfig"
-) -> Tuple[Optional[SafeData], Dict, str, str]:
-    """
-    Điều phối việc xây dựng toàn bộ ngữ cảnh cần thiết cho model AI.
-
-    Hàm này là điểm vào chính, kết hợp ngữ cảnh lịch sử với dữ liệu thời gian thực
-    để tạo ra đầu vào hoàn chỉnh cho worker phân tích.
-
-    Returns:
-        Một tuple chứa:
-        - SafeMT5Data: Đối tượng dữ liệu MT5 đã được làm giàu.
-        - Dict: Dữ liệu MT5 dưới dạng dictionary.
-        - str: Khối ngữ cảnh lịch sử (đã có header).
-        - str: Toàn bộ dữ liệu MT5 dưới dạng chuỗi JSON.
-    """
-    logger.info("Bắt đầu điều phối xây dựng ngữ cảnh toàn diện.")
-
-    # 1. Thu thập các phụ thuộc từ 'app' để truyền vào hàm con
-    # reports_dir = app.get_reports_dir() # This should be handled by the caller
-    image_results = getattr(app, "results", [])
-    timeframe_detector = app.timeframe_detector
-
-    # 2. Xây dựng ngữ cảnh lịch sử bằng cách gọi hàm đã được tách rời
-    composed_json, plan = build_context_from_reports(
-        reports_dir=Path(app.folder_path.get()) / "Reports", # Get reports dir directly
-        image_results=image_results,
-        timeframe_detector=timeframe_detector,
-        cfg=cfg,
-        budget_chars=max(800, int(cfg.context.ctx_limit)),
-    )
-    context_block = f"\n\n[CONTEXT_COMPOSED]\n{composed_json}" if composed_json else ""
-
-    # 3. Lấy và làm giàu dữ liệu MT5 thời gian thực
-    safe_mt5_data_untyped = (
-        mt5_service.get_market_data(
-            cfg=cfg.mt5, plan=plan, return_json=False
-        )
-        if cfg.mt5.enabled
-        else None
-    )
-    safe_mt5_data: Optional[SafeData] = cast(Optional[SafeData], safe_mt5_data_untyped)
-
-    if safe_mt5_data and safe_mt5_data.raw:
-        logger.debug("Dữ liệu MT5 có sẵn, bắt đầu làm giàu với tin tức.")
-        # Làm giàu với phân tích tin tức bằng cơ chế cache
-        try:
-            is_in_window, reason, updated_events, updated_fetch_time = news_service.within_news_window_cached(
-                symbol=cfg.mt5.symbol,
-                minutes_before=cfg.news.block_before_min,
-                minutes_after=cfg.news.block_after_min,
-                cache_events=app.news_events,
-                cache_fetch_time=app.news_fetch_time,
-                ttl_sec=cfg.news.cache_ttl_sec,
-            )
-            # Cập nhật lại cache trên app
-            app.news_events = updated_events
-            app.news_fetch_time = updated_fetch_time
-
-            upcoming = news_service.next_events_for_symbol(
-                events=updated_events, symbol=cfg.mt5.symbol, limit=3
-            )
-            safe_mt5_data.raw["news_analysis"] = {
-                "is_in_news_window": is_in_window, "reason": reason, "upcoming_events": upcoming
-            }
-            logger.debug(f"Phân tích tin tức hoàn tất. Trong cửa sổ tin tức: {is_in_window}")
-        except Exception:
-            logger.error("Lỗi khi làm giàu dữ liệu với tin tức.", exc_info=True)
-            safe_mt5_data.raw["news_analysis"] = {"error": "failed to fetch or analyze news"}
-
-        # Tạo và thêm bảng tóm tắt
-        concept_table_str = _create_concept_value_table(safe_mt5_data)
-        safe_mt5_data.raw["concept_value_table"] = concept_table_str
-        logger.debug("Đã tạo và thêm bảng tóm tắt khái niệm.")
-
-    mt5_dict = safe_mt5_data.raw if safe_mt5_data else {}
-    mt5_json_full = safe_mt5_data.to_json(indent=2) if safe_mt5_data else ""
-
-    logger.info("Điều phối xây dựng ngữ cảnh hoàn tất.")
-    return safe_mt5_data, mt5_dict, context_block, mt5_json_full
-
-__all__ = ["coordinate_context_building", "build_context_from_reports"]
+__all__ = ["build_historical_context_async", "create_concept_value_table"]

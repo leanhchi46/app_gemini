@@ -34,7 +34,8 @@ class Paths:
 
     # Các file cấu hình và cache quan trọng
     WORKSPACE_JSON: Path = APP_DIR / "workspace.json"
-    API_KEY_ENC: Path = APP_DIR / "api_key.enc"
+    API_KEY_ENC: Path = APP_DIR / "api_key.enc"  # DEPRECATED: Sẽ bị thay thế bởi ALL_API_KEYS_ENC
+    ALL_API_KEYS_ENC: Path = APP_DIR / "api_keys.json.enc"
     UPLOAD_CACHE_JSON: Path = APP_DIR / "upload_cache.json"
 
 

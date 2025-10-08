@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from APP.ui.app_ui import AppUI
 
 from APP.ui.components.chart_tab import ChartTab
+from APP.ui.components.news_tab import NewsTab
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,6 @@ def _create_listbox_with_controls(
 
     listbox = tk.Listbox(col_frame, exportselection=False)
     listbox.grid(row=1, column=0, sticky="nsew")
-    # Sửa lỗi nghiêm trọng: Gán widget vào đối tượng `app` chính, không phải `parent`.
     setattr(app, listbox_attr_name, listbox)
 
     scrollbar = ttk.Scrollbar(col_frame, orient="vertical", command=listbox.yview)
@@ -91,7 +91,6 @@ def _create_listbox_with_controls(
     if folder_cmd:
         ttk.Button(buttons_frame, text="Thư mục", command=folder_cmd).pack(side="left")
     
-    # Thêm nút làm mới thủ công để gỡ lỗi
     refresh_cmd = callbacks.get("refresh")
     if refresh_cmd:
         ttk.Button(buttons_frame, text="Làm mới", command=refresh_cmd).pack(side="right", padx=(6, 0))
@@ -111,24 +110,9 @@ def _build_top_frame(app: "AppUI") -> None:
     top.grid(row=0, column=0, sticky="ew")
     top.columnconfigure(1, weight=1)
 
-    # --- Row 1: API Key ---
-    api_frame = ttk.Frame(top)
-    api_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-    api_frame.columnconfigure(1, weight=1)
-    ttk.Label(api_frame, text="API Key:").grid(row=0, column=0, sticky="w")
-    app.api_entry = ttk.Entry(api_frame, textvariable=app.api_key_var, show="*", width=40)
-    app.api_entry.grid(row=0, column=1, sticky="ew", padx=6)
-    ttk.Checkbutton(api_frame, text="Hiện", command=app._toggle_api_visibility).grid(row=0, column=2, sticky="w", padx=(0, 10))
-
-    key_actions_frame = ttk.Frame(api_frame)
-    key_actions_frame.grid(row=0, column=3, sticky="w")
-    ttk.Button(key_actions_frame, text="Tải .env", command=app._load_env).pack(side="left")
-    ttk.Button(key_actions_frame, text="Lưu an toàn", command=app._save_api_safe).pack(side="left", padx=6)
-    ttk.Button(key_actions_frame, text="Xoá đã lưu", command=app._delete_api_safe).pack(side="left")
-
-    # --- Row 2: Analysis Config ---
+    # --- Row 1: Analysis Config ---
     config_frame = ttk.Frame(top)
-    config_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 4))
+    config_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(4, 4))
     config_frame.columnconfigure(3, weight=1)
     ttk.Label(config_frame, text="Model:").grid(row=0, column=0, sticky="w")
     app.model_combo = ttk.Combobox(config_frame, textvariable=app.model_var, state="readonly", width=40)
@@ -136,22 +120,27 @@ def _build_top_frame(app: "AppUI") -> None:
     ttk.Label(config_frame, text="Thư mục ảnh:").grid(row=0, column=2, sticky="w", padx=(10, 0))
     app.folder_label = ttk.Entry(config_frame, textvariable=app.folder_path, state="readonly")
     app.folder_label.grid(row=0, column=3, sticky="ew", padx=6)
-    ttk.Button(config_frame, text="Chọn thư mục…", command=app.choose_folder).grid(row=0, column=4, sticky="w")
+    app.choose_folder_btn = ttk.Button(config_frame, text="Chọn thư mục…", command=app.choose_folder)
+    app.choose_folder_btn.grid(row=0, column=4, sticky="w")
 
-    # --- Row 3: Actions & Workspace ---
+    # --- Row 2: Actions & Workspace ---
     action_frame = ttk.Frame(top)
-    action_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+    action_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
     action_frame.columnconfigure(1, weight=1)
     ws_frame = ttk.Frame(action_frame)
     ws_frame.grid(row=0, column=0, sticky="w")
     ttk.Label(ws_frame, text="Workspace:").pack(side="left", anchor="center")
-    ttk.Button(ws_frame, text="Lưu", command=app._save_workspace).pack(side="left", padx=(6, 0))
-    ttk.Button(ws_frame, text="Khôi phục", command=app._load_workspace).pack(side="left", padx=6)
-    ttk.Button(ws_frame, text="Xoá", command=app._delete_workspace).pack(side="left")
+    app.save_ws_btn = ttk.Button(ws_frame, text="Lưu", command=app._save_workspace)
+    app.save_ws_btn.pack(side="left", padx=(6, 0))
+    app.load_ws_btn = ttk.Button(ws_frame, text="Khôi phục", command=app._load_workspace)
+    app.load_ws_btn.pack(side="left", padx=6)
+    app.delete_ws_btn = ttk.Button(ws_frame, text="Xoá", command=app._delete_workspace)
+    app.delete_ws_btn.pack(side="left")
 
     run_frame = ttk.Frame(action_frame)
     run_frame.grid(row=0, column=2, sticky="e")
-    ttk.Button(run_frame, text="► Bắt đầu", command=app.start_analysis).pack(side="left")
+    app.start_btn = ttk.Button(run_frame, text="► Bắt đầu", command=app.start_analysis)
+    app.start_btn.pack(side="left")
     app.stop_btn = ttk.Button(run_frame, text="□ Dừng", command=app.stop_analysis, state="disabled")
     app.stop_btn.pack(side="left", padx=6)
     ttk.Separator(run_frame, orient="vertical").pack(side="left", fill="y", padx=4, pady=2)
@@ -206,25 +195,22 @@ def _build_report_tab(app: "AppUI") -> None:
     archives.columnconfigure(1, weight=1)
     archives.rowconfigure(0, weight=1)
 
-    # Cập nhật: Loại bỏ callback "preview" vì FileListView đã tự xử lý sự kiện bind.
-    # Các callback khác hoạt động nhờ lớp tương thích trong HistoryManager.
     hist_callbacks = {
         "open": app.history_manager.open_history_selected,
         "delete": app.history_manager.delete_history_selected,
         "folder": app.history_manager.open_reports_folder,
-        "refresh": app.history_manager.refresh_history_list, # Thêm callback làm mới
+        "refresh": app.history_manager.refresh_history_list,
     }
     hist_frame = _create_listbox_with_controls(
         archives, app, "History (.md)", "history_list", hist_callbacks
     )
     hist_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
 
-    # Cập nhật: open_json_folder được thay thế bằng open_reports_folder.
     json_callbacks = {
         "open": app.history_manager.open_json_selected,
         "delete": app.history_manager.delete_json_selected,
         "folder": app.history_manager.open_reports_folder,
-        "refresh": app.history_manager.refresh_json_list, # Thêm callback làm mới
+        "refresh": app.history_manager.refresh_json_list,
     }
     json_frame = _create_listbox_with_controls(
         archives, app, "JSON (ctx_*.json)", "json_list", json_callbacks
@@ -257,6 +243,13 @@ def _build_chart_tab(app: "AppUI") -> None:
         ttk.Label(placeholder, text="Chức năng Chart yêu cầu: pip install matplotlib mplfinance", foreground="#666").pack(anchor="w")
 
 
+def _build_news_tab(app: "AppUI") -> None:
+    """Xây dựng tab "News"."""
+    if not app.nb:
+        return
+    app.news_tab = NewsTab(app, app.nb)
+
+
 def _build_prompt_tab(app: "AppUI") -> None:
     """Xây dựng tab "Prompt"."""
     if not app.nb:
@@ -283,6 +276,56 @@ def _build_prompt_tab(app: "AppUI") -> None:
         text_widget = ScrolledText(prompt_frame, wrap="word", height=18)
         text_widget.grid(row=0, column=0, sticky="nsew")
         setattr(app, f"prompt_{key}_text", text_widget)
+
+
+def _build_opts_api_keys(app: "AppUI", parent: ttk.Notebook) -> None:
+    """Xây dựng tab Options -> API Keys."""
+    tab = ttk.Frame(parent, padding=8)
+    parent.add(tab, text="API Keys")
+    tab.columnconfigure(1, weight=1)
+
+    # --- API Keys ---
+    api_keys_frame = ttk.LabelFrame(tab, text="API Keys", padding=8)
+    api_keys_frame.pack(fill="x", expand=True, anchor="n")
+    api_keys_frame.columnconfigure(1, weight=1)
+
+    # Google AI
+    ttk.Label(api_keys_frame, text="Google AI Key:").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=4)
+    app.api_entry = ttk.Entry(api_keys_frame, textvariable=app.api_key_var, show="*", width=50)
+    app.api_entry.grid(row=0, column=1, sticky="ew", padx=6)
+    ttk.Checkbutton(api_keys_frame, text="Hiện", command=app._toggle_api_visibility).grid(row=0, column=2, sticky="w", padx=(0, 10))
+
+    # FMP
+    fmp_frame = ttk.Frame(api_keys_frame)
+    fmp_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=4)
+    fmp_frame.columnconfigure(2, weight=1)
+    app.fmp_enabled_check = ttk.Checkbutton(fmp_frame, text="Bật FMP", variable=app.fmp_enabled_var)
+    app.fmp_enabled_check.grid(row=0, column=0, sticky="w")
+    ttk.Label(fmp_frame, text="FMP Key:").grid(row=0, column=1, sticky="w", padx=(10, 4))
+    app.fmp_api_entry = ttk.Entry(fmp_frame, textvariable=app.fmp_api_key_var, show="*", width=50)
+    app.fmp_api_entry.grid(row=0, column=2, sticky="ew")
+
+    # Trading Economics
+    te_frame = ttk.Frame(api_keys_frame)
+    te_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=4)
+    te_frame.columnconfigure(2, weight=1)
+    app.te_enabled_check = ttk.Checkbutton(te_frame, text="Bật TE", variable=app.te_enabled_var)
+    app.te_enabled_check.grid(row=0, column=0, sticky="w")
+    ttk.Label(te_frame, text="TE Key:").grid(row=0, column=1, sticky="w", padx=(10, 4))
+    app.te_api_entry = ttk.Entry(te_frame, textvariable=app.te_api_key_var, show="*", width=50)
+    app.te_api_entry.grid(row=0, column=2, sticky="ew")
+
+    # Thêm checkbox cho SSL verify
+    te_ssl_check = ttk.Checkbutton(
+        api_keys_frame, text="Bỏ qua xác minh SSL cho TE (không khuyến khích)", variable=app.te_skip_ssl_var
+    )
+    te_ssl_check.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+    key_actions_frame = ttk.Frame(api_keys_frame)
+    key_actions_frame.grid(row=0, column=3, rowspan=3, sticky="ns", padx=(10, 0))
+    ttk.Button(key_actions_frame, text="Tải .env", command=app._load_env).pack(fill="x")
+    ttk.Button(key_actions_frame, text="Lưu an toàn", command=app._save_api_safe).pack(fill="x", pady=4)
+    ttk.Button(key_actions_frame, text="Xoá đã lưu", command=app._delete_api_safe).pack(fill="x")
 
 
 def _build_opts_general(app: "AppUI", parent: ttk.Notebook) -> None:
@@ -428,15 +471,31 @@ def _build_opts_conditions(app: "AppUI", parent: ttk.Notebook) -> None:
     # --- NEWS ---
     card3 = ttk.LabelFrame(left_col, text="Chặn giao dịch theo tin tức (News)", padding=8)
     card3.pack(fill="x")
-    
-    ttk.Checkbutton(card3, text="Bật chặn giao dịch khi có tin tức quan trọng", variable=app.news_block_enabled_var).pack(anchor="w")
+    app.news_card = card3  # Gán widget vào thuộc tính của app
+
+    app.news_block_check = ttk.Checkbutton(card3, text="Bật chặn giao dịch khi có tin tức quan trọng", variable=app.news_block_enabled_var)
+    app.news_block_check.pack(anchor="w")
     
     separator_news = ttk.Separator(card3, orient="horizontal")
     separator_news.pack(fill="x", pady=8, padx=2)
 
-    _create_labeled_spinbox(card3, "Chặn trước khi tin ra (phút):", app.trade_news_block_before_min_var, 0, 120, width=8).pack(anchor="w", pady=4)
-    _create_labeled_spinbox(card3, "Chặn sau khi tin ra (phút):", app.trade_news_block_after_min_var, 0, 120, width=8).pack(anchor="w", pady=4)
-    _create_labeled_spinbox(card3, "Thời gian cache tin tức (giây):", app.news_cache_ttl_var, 60, 3600, width=8).pack(anchor="w", pady=4)
+    provider_frame = ttk.Frame(card3)
+    provider_frame.pack(anchor="w", pady=4)
+    ttk.Label(provider_frame, text="Nhà cung cấp tin tức:").pack(side="left")
+    app.news_provider_combo = ttk.Combobox(provider_frame, textvariable=app.news_provider_var, values=["FMP", "TE"], state="readonly", width=10)
+    app.news_provider_combo.pack(side="left", padx=6)
+
+    before_spin_frame = _create_labeled_spinbox(card3, "Chặn trước khi tin ra (phút):", app.trade_news_block_before_min_var, 0, 120, width=8)
+    before_spin_frame.pack(anchor="w", pady=4)
+    app.news_before_spin = before_spin_frame.winfo_children()[1] # Lấy widget Spinbox
+
+    after_spin_frame = _create_labeled_spinbox(card3, "Chặn sau khi tin ra (phút):", app.trade_news_block_after_min_var, 0, 120, width=8)
+    after_spin_frame.pack(anchor="w", pady=4)
+    app.news_after_spin = after_spin_frame.winfo_children()[1] # Lấy widget Spinbox
+
+    cache_spin_frame = _create_labeled_spinbox(card3, "Thời gian cache tin tức (giây):", app.news_cache_ttl_var, 60, 3600, width=8)
+    cache_spin_frame.pack(anchor="w", pady=4)
+    app.news_cache_spin = cache_spin_frame.winfo_children()[1] # Lấy widget Spinbox
 
     # --- CỘT PHẢI ---
     # --- NO TRADE ---
@@ -547,6 +606,7 @@ def _build_options_tab(app: "AppUI") -> None:
     opts_nb.grid(row=0, column=0, sticky="nsew")
 
     # Xây dựng các tab theo cấu trúc logic mới
+    _build_opts_api_keys(app, opts_nb)
     _build_opts_general(app, opts_nb)
     _build_opts_context(app, opts_nb)
     _build_opts_conditions(app, opts_nb) # Gộp No-Run, No-Trade, News
@@ -576,6 +636,7 @@ def build_ui(app: "AppUI") -> None:
 
     _build_report_tab(app)
     _build_chart_tab(app)
+    _build_news_tab(app)
     _build_prompt_tab(app)
     _build_options_tab(app)
 
@@ -589,9 +650,11 @@ def build_ui(app: "AppUI") -> None:
 def poll_ui_queue(app: "AppUI") -> None:
     """Lấy và thực thi các hàm cập nhật UI từ hàng đợi một cách an toàn."""
     try:
-        while True:
+        while not app.ui_queue.empty():
             callback = app.ui_queue.get_nowait()
+            logger.debug(f"Executing UI callback: {callback.__name__}")
             callback()
+            app.ui_queue.task_done()
     except Exception:
         pass
     app.root.after(100, lambda: poll_ui_queue(app))
@@ -602,12 +665,53 @@ def enqueue(app: "AppUI", callback: Callable[[], Any]) -> None:
     app.ui_queue.put(callback)
 
 
+class CustomMessageBox(tk.Toplevel):
+    """
+    Một hộp thoại thông báo tùy chỉnh có khả năng tự động đóng.
+    """
+    def __init__(self, parent: tk.Tk | tk.Widget | None, title: str, message: str, timeout: int = 30000):
+        """
+        Khởi tạo hộp thoại.
+
+        Args:
+            parent: Cửa sổ cha.
+            title: Tiêu đề của hộp thoại.
+            message: Nội dung thông báo.
+            timeout: Thời gian (ms) trước khi tự động đóng.
+        """
+        super().__init__(parent)
+        self.title(title)
+        self.transient(parent) # Giữ cho cửa sổ này luôn ở trên cửa sổ cha
+        self.grab_set() # Chặn tương tác với cửa sổ cha
+
+        # Căn giữa cửa sổ so với cửa sổ cha
+        if parent:
+            parent_x = parent.winfo_x()
+            parent_y = parent.winfo_y()
+            parent_width = parent.winfo_width()
+            parent_height = parent.winfo_height()
+            self.geometry(f"+{parent_x + parent_width // 2 - 150}+{parent_y + parent_height // 2 - 75}")
+
+
+        main_frame = ttk.Frame(self, padding="12 12 12 12")
+        main_frame.pack(expand=True, fill="both")
+
+        message_label = ttk.Label(main_frame, text=message, wraplength=300, justify="left")
+        message_label.pack(expand=True, fill="both", pady=(0, 10))
+
+        ok_button = ttk.Button(main_frame, text="OK", command=self.destroy)
+        ok_button.pack()
+        ok_button.focus_set()
+
+        # Lên lịch tự động đóng
+        self.after(timeout, self.destroy)
+
+
 def show_message(
     title: str, message: str, parent: tk.Tk | tk.Widget | None = None
 ) -> None:
-    """Hiển thị một hộp thoại thông báo thông tin."""
-    from tkinter import messagebox
-    messagebox.showinfo(title, message, parent=parent) # type: ignore
+    """Hiển thị một hộp thoại thông báo thông tin tùy chỉnh, tự động đóng sau 30 giây."""
+    CustomMessageBox(parent=parent, title=title, message=message)
 
 
 def ask_confirmation(title: str, message: str) -> bool:
@@ -617,32 +721,18 @@ def ask_confirmation(title: str, message: str) -> bool:
 
 
 def toggle_controls_state(app: "AppUI", state: str) -> None:
-    """Bật hoặc tắt các điều khiển chính trên giao diện."""
+    """
+    Bật hoặc tắt các nút điều khiển chính khi quá trình phân tích bắt đầu hoặc kết thúc.
+    Chỉ vô hiệu hóa nút "Bắt đầu" và bật nút "Dừng".
+    """
+    # Chỉ bật/tắt các nút Start và Stop để cho phép tương tác với phần còn lại của UI.
+    if app.start_btn:
+        app.start_btn.config(state=state)
     if app.stop_btn:
         app.stop_btn.config(state="normal" if state == "disabled" else "disabled")
-    
-    # Duyệt qua tất cả các widget con của root và thay đổi trạng thái
-    # trừ các widget không nên bị vô hiệu hóa (như nút Stop)
-    widgets_to_disable: List[tk.Widget] = []
-    
-    # Hàm đệ quy để thu thập widget
-    def collect_widgets(parent: tk.Misc):
-        for widget in parent.winfo_children():
-            # Không vô hiệu hóa nút Stop hoặc thanh cuộn, v.v.
-            if widget != app.stop_btn and isinstance(widget, (ttk.Button, ttk.Checkbutton, ttk.Entry, ttk.Combobox, ttk.Spinbox, tk.Text, tk.Listbox)):
-                 widgets_to_disable.append(widget)
-            # Đệ quy vào các container
-            if isinstance(widget, (ttk.Frame, ttk.LabelFrame, ttk.Notebook)):
-                collect_widgets(widget)
 
-    collect_widgets(app.root)
-    
-    for widget in widgets_to_disable:
-        try:
-            widget.config(state=state) # type: ignore
-        except tk.TclError:
-            # Một số widget không có thuộc tính 'state'
-            pass
+    # Ghi log trạng thái thay đổi để gỡ lỗi
+    logger.debug(f"Đã thay đổi trạng thái nút Start/Stop thành '{state}'. Các điều khiển khác không bị ảnh hưởng.")
 
 
 def show_json_popup(parent: tk.Tk | tk.Widget, title: str, data: dict) -> None:

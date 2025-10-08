@@ -10,6 +10,14 @@ from APP.utils.general_utils import deobfuscate_text, obfuscate_text
 
 logger = logging.getLogger(__name__)
 
+# Nguồn chân lý duy nhất cho các trường cần mã hóa.
+# Mỗi mục là một tuple: (tên nhóm config, tên trường chứa secret).
+SENSITIVE_KEYS: set[tuple[str, str]] = {
+    ("telegram", "token"),
+    ("fmp", "api_key"),
+    ("te", "api_key"),
+}
+
 
 def setup_workspace():
     """
@@ -75,11 +83,20 @@ def load_config_from_file(workspace_path: str | Path | None = None) -> dict[str,
         data = json.loads(config_path.read_text(encoding="utf-8"))
         logger.debug("Đã đọc và parse file JSON thành công.")
 
-        # Giải mã các thông tin nhạy cảm nếu có
-        if "telegram" in data and "token_enc" in data["telegram"]:
-            token_enc = data["telegram"]["token_enc"]
-            if token_enc:
-                data["telegram"]["token"] = deobfuscate_text(token_enc, "telegram_token_salt")
+        # Tái cấu trúc: Tự động giải mã các trường nhạy cảm
+        for group, key in SENSITIVE_KEYS:
+            encrypted_key = f"{key}_enc"
+            salt = f"{group}_{key}_salt"
+            
+            if group in data and isinstance(data[group], dict) and encrypted_key in data[group]:
+                encrypted_value = data[group][encrypted_key]
+                if encrypted_value:
+                    try:
+                        decrypted_value = deobfuscate_text(encrypted_value, salt)
+                        data[group][key] = decrypted_value
+                        logger.debug(f"Đã giải mã thành công trường '{key}' trong nhóm '{group}'.")
+                    except Exception as e:
+                        logger.warning(f"Lỗi khi giải mã trường '{key}' trong nhóm '{group}': {e}")
 
         logger.info("Tải cấu hình từ file thành công.")
         return data
@@ -101,13 +118,24 @@ def save_config_to_file(config_data: dict[str, Any]):
     # Tạo một bản sao sâu để tránh thay đổi dictionary gốc
     data_to_save = json.loads(json.dumps(config_data))
 
-    # Mã hóa các thông tin nhạy cảm trong đúng mục của nó
-    if "telegram" in data_to_save and "token" in data_to_save["telegram"]:
-        token = data_to_save["telegram"]["token"]
-        if token:
-            data_to_save["telegram"]["token_enc"] = obfuscate_text(token, "telegram_token_salt")
-        # Luôn xóa key gốc để không lưu vào file
-        del data_to_save["telegram"]["token"]
+    # Tái cấu trúc: Tự động mã hóa các trường nhạy cảm
+    for group, key in SENSITIVE_KEYS:
+        encrypted_key = f"{key}_enc"
+        salt = f"{group}_{key}_salt"
+
+        if group in data_to_save and isinstance(data_to_save[group], dict) and key in data_to_save[group]:
+            plain_text_value = data_to_save[group][key]
+            
+            if plain_text_value:
+                try:
+                    encrypted_value = obfuscate_text(plain_text_value, salt)
+                    data_to_save[group][encrypted_key] = encrypted_value
+                    logger.debug(f"Đã mã hóa thành công trường '{key}' trong nhóm '{group}'.")
+                except Exception as e:
+                    logger.error(f"Lỗi khi mã hóa trường '{key}' trong nhóm '{group}': {e}")
+            
+            # Luôn xóa key gốc để không lưu vào file JSON
+            del data_to_save[group][key]
 
     try:
         PATHS.WORKSPACE_JSON.write_text(

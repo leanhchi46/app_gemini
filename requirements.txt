@@ -14,3 +14,5 @@ matplotlib
 mplfinance
 beautifulsoup4
 cloudscraper
+fmp-py
+tradingeconomics

@@ -19,19 +19,26 @@ def select_prompt(
 ) -> str:
     """
     Chọn prompt thích hợp dựa trên trạng thái giao dịch hiện tại.
+
+    Cập nhật: Hiện tại, prompt 'no_entry' đã được thiết kế để xử lý cả hai trường hợp
+    (có và không có lệnh). Do đó, chúng ta sẽ luôn trả về prompt này.
+    Logic cũ được giữ lại dưới dạng comment để tham khảo.
     """
-    # Logic đơn giản: nếu không có vị thế nào đang mở, sử dụng prompt "no entry".
-    # Ngược lại, sử dụng prompt "entry run".
-    if not safe_mt5_data:
-        return prompt_no_entry
-    positions = safe_mt5_data.get("positions", [])
-    positions_total = len(positions) if positions else 0
-    if positions_total == 0:
-        logger.debug("Không có vị thế nào, chọn prompt 'no entry'.")
-        return prompt_no_entry
+    # Logic mới: Luôn sử dụng prompt_no_entry vì nó có thể xử lý cả hai kịch bản.
+    has_positions = False
+    if safe_mt5_data:
+        positions = safe_mt5_data.get("positions", [])
+        if positions:
+            has_positions = True
+
+    if has_positions:
+        logger.debug("Có vị thế đang mở, chọn prompt 'no_entry' (đã được cập nhật để quản lý lệnh).")
     else:
-        logger.debug(f"Có {positions_total} vị thế, chọn prompt 'entry run'.")
-        return prompt_entry_run
+        logger.debug("Không có vị thế, chọn prompt 'no_entry' để tìm kiếm setup.")
+
+    # Trả về prompt đã được cập nhật, có khả năng xử lý cả hai trường hợp.
+    # `prompt_entry_run` có thể sẽ bị loại bỏ trong tương lai.
+    return prompt_no_entry
 
 def construct_prompt(
     app: "AppUI",

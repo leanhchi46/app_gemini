@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,10 @@ if TYPE_CHECKING:
     from APP.configs.app_config import MT5Config, RunConfig
 
 
+# Khóa toàn cục để đảm bảo chỉ một luồng truy cập thư viện MT5 tại một thời điểm
+_mt5_lock = threading.Lock()
+
+
 # ------------------------------
 # MT5 connection helpers
 # ------------------------------
@@ -41,19 +46,25 @@ def connect(path: str | None = None) -> tuple[bool, str | None]:
     if mt5 is None:
         logger.error("MetaTrader5 module not installed.")
         return False, "MetaTrader5 module not installed (pip install MetaTrader5)"
-    try:
-        ok = mt5.initialize(path=path) if path else mt5.initialize()
-        if not ok:
-            err_code = mt5.last_error()
-            logger.error(f"mt5.initialize() failed with code {err_code}")
-            return False, f"initialize() failed: {err_code}"
-        logger.info("Kết nối MT5 thành công.")
-        return True, None
-    except Exception as e:
-        logger.exception("MT5 connect generated an exception")
-        return False, f"MT5 connect error: {e}"
-    finally:
-        logger.debug("Kết thúc connect MT5.")
+    with _mt5_lock:
+        try:
+            # Kiểm tra lại kết nối bên trong lock để tránh gọi initialize không cần thiết
+            if mt5.terminal_info():
+                logger.debug("MT5 đã được khởi tạo, bỏ qua.")
+                return True, None
+            
+            ok = mt5.initialize(path=path) if path else mt5.initialize()
+            if not ok:
+                err_code = mt5.last_error()
+                logger.error(f"mt5.initialize() failed with code {err_code}")
+                return False, f"initialize() failed: {err_code}"
+            logger.info("Kết nối MT5 thành công.")
+            return True, None
+        except Exception as e:
+            logger.exception("MT5 connect generated an exception")
+            return False, f"MT5 connect error: {e}"
+        finally:
+            logger.debug("Kết thúc connect MT5.")
 
 
 def ensure_initialized(path: str | None = None) -> bool:
@@ -72,17 +83,18 @@ def get_all_symbols() -> list[str]:
     if not ensure_initialized():
         logger.warning("MT5 chưa được khởi tạo, không thể lấy danh sách symbol.")
         return []
-    try:
-        symbols = mt5.symbols_get()
-        if symbols:
-            names = sorted([s.name for s in symbols])
-            logger.debug(f"Đã lấy được {len(names)} symbols.")
-            return names
-        logger.warning("Không lấy được symbol nào từ mt5.symbols_get().")
-        return []
-    except Exception as e:
-        logger.exception(f"Lỗi khi lấy danh sách symbol: {e}")
-        return []
+    with _mt5_lock:
+        try:
+            symbols = mt5.symbols_get()
+            if symbols:
+                names = sorted([s.name for s in symbols])
+                logger.debug(f"Đã lấy được {len(names)} symbols.")
+                return names
+            logger.warning("Không lấy được symbol nào từ mt5.symbols_get().")
+            return []
+        except Exception as e:
+            logger.exception(f"Lỗi khi lấy danh sách symbol: {e}")
+            return []
 
 
 # ------------------------------
@@ -190,54 +202,55 @@ def value_per_point(symbol: str, info_obj: Any | None = None) -> float | None:
     if mt5 is None:
         logger.warning("MetaTrader5 module not installed, cannot get value_per_point.")
         return None
-    try:
-        # Nếu không có info_obj, lấy từ MT5. Nếu có, nó có thể là dict hoặc object.
-        effective_info = info_obj if info_obj is not None else mt5.symbol_info(symbol)
-        if not effective_info:
-            logger.warning(f"Không tìm thấy thông tin symbol cho {symbol}.")
-            return None
-
-        point = float(info_get(effective_info, "point", 0.0) or 0.0)
-        if point <= 0:
-            logger.debug("Point size <= 0, không thể tính value_per_point.")
-            return None
-
-        tick_value = float(info_get(effective_info, "trade_tick_value", 0.0) or 0.0)
-        tick_size = float(info_get(effective_info, "trade_tick_size", 0.0) or 0.0)
-        if tick_value > 0 and tick_size > 0:
-            result = tick_value * (point / tick_size)
-            logger.debug(f"Tính value_per_point từ tick_value/tick_size: {result}")
-            return result
-
+    with _mt5_lock:
         try:
-            tick = mt5.symbol_info_tick(symbol)
-            mid = None
-            if tick:
-                bid = float(getattr(tick, "bid", 0.0) or 0.0)
-                ask = float(getattr(tick, "ask", 0.0) or 0.0)
-                mid = (bid + ask) / 2.0 if (bid and ask) else (ask or bid)
-            if mid and point > 0:
-                pr = mt5.order_calc_profit(
-                    mt5.ORDER_TYPE_BUY, symbol, 1.0, mid, mid + point
-                )
-                if isinstance(pr, (int, float)):
-                    result = abs(float(pr))
-                    logger.debug(f"Tính value_per_point từ order_calc_profit: {result}")
-                    return result
-        except Exception as e:
-            logger.debug(f"Lỗi khi tính value_per_point từ order_calc_profit: {e}")
-            pass
+            # Nếu không có info_obj, lấy từ MT5. Nếu có, nó có thể là dict hoặc object.
+            effective_info = info_obj if info_obj is not None else mt5.symbol_info(symbol)
+            if not effective_info:
+                logger.warning(f"Không tìm thấy thông tin symbol cho {symbol}.")
+                return None
 
-        csize = float(info_get(effective_info, "contract_size", 0.0) or 0.0)
-        if csize > 0:
-            result = csize * point
-            logger.debug(f"Tính value_per_point từ contract_size: {result}")
-            return result
-        logger.debug("Không thể tính value_per_point, trả về None.")
-        return None
-    except Exception as e:
-        logger.error(f"Lỗi ngoại lệ trong value_per_point: {e}")
-        return None
+            point = float(info_get(effective_info, "point", 0.0) or 0.0)
+            if point <= 0:
+                logger.debug("Point size <= 0, không thể tính value_per_point.")
+                return None
+
+            tick_value = float(info_get(effective_info, "trade_tick_value", 0.0) or 0.0)
+            tick_size = float(info_get(effective_info, "trade_tick_size", 0.0) or 0.0)
+            if tick_value > 0 and tick_size > 0:
+                result = tick_value * (point / tick_size)
+                logger.debug(f"Tính value_per_point từ tick_value/tick_size: {result}")
+                return result
+
+            try:
+                tick = mt5.symbol_info_tick(symbol)
+                mid = None
+                if tick:
+                    bid = float(getattr(tick, "bid", 0.0) or 0.0)
+                    ask = float(getattr(tick, "ask", 0.0) or 0.0)
+                    mid = (bid + ask) / 2.0 if (bid and ask) else (ask or bid)
+                if mid and point > 0:
+                    pr = mt5.order_calc_profit(
+                        mt5.ORDER_TYPE_BUY, symbol, 1.0, mid, mid + point
+                    )
+                    if isinstance(pr, (int, float)):
+                        result = abs(float(pr))
+                        logger.debug(f"Tính value_per_point từ order_calc_profit: {result}")
+                        return result
+            except Exception as e:
+                logger.debug(f"Lỗi khi tính value_per_point từ order_calc_profit: {e}")
+                pass
+
+            csize = float(info_get(effective_info, "contract_size", 0.0) or 0.0)
+            if csize > 0:
+                result = csize * point
+                logger.debug(f"Tính value_per_point từ contract_size: {result}")
+                return result
+            logger.debug("Không thể tính value_per_point, trả về None.")
+            return None
+        except Exception as e:
+            logger.error(f"Lỗi ngoại lệ trong value_per_point: {e}")
+            return None
 
 
 # ------------------------------
@@ -350,7 +363,8 @@ def adr_stats(symbol: str, n: int = 20) -> dict[str, float | None] | None:
     if mt5 is None:
         logger.warning("MetaTrader5 module not installed, cannot get adr_stats.")
         return None
-    bars = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 0, max(25, n + 2))
+    with _mt5_lock:
+        bars = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 0, max(25, n + 2))
     if bars is None or len(bars) < 5:
         logger.warning(f"Không đủ dữ liệu D1 để tính adr_stats cho {symbol}.")
         return None
@@ -488,10 +502,23 @@ def get_active_killzone(d: datetime, target_tz: str | None) -> tuple[bool, str |
 
 
 def _series_from_mt5(symbol: str, tf_code: int, bars: int) -> list[dict]:
+    """Lấy dữ liệu chuỗi thời gian từ MT5 với cơ chế thử lại."""
     logger.debug(f"Bắt đầu _series_from_mt5 cho symbol: {symbol}, tf_code: {tf_code}, bars: {bars}")
-    arr = (
-        mt5.copy_rates_from_pos(symbol, tf_code, 0, max(50, int(bars))) if mt5 else None
-    )
+    arr = None
+    # Cải tiến: Thêm vòng lặp thử lại để tăng độ tin cậy
+    for attempt in range(3):
+        with _mt5_lock:
+            arr = (
+                mt5.copy_rates_from_pos(symbol, tf_code, 0, max(50, int(bars)))
+                if mt5
+                else None
+            )
+        if arr is not None and len(arr) > 0:
+            logger.debug(f"Lấy rates thành công cho {symbol} {tf_code} ở lần thử {attempt + 1}.")
+            break
+        logger.warning(f"Lần thử {attempt + 1}/3: Không lấy được rates từ MT5 cho {symbol} {tf_code}. Chờ 0.2s...")
+        time.sleep(0.2)
+
     rows: list[dict] = []
     if arr is not None:
         for r in arr:
@@ -514,22 +541,25 @@ def _series_from_mt5(symbol: str, tf_code: int, bars: int) -> list[dict]:
     return rows
 
 
-def _hl_from(symbol: str, tf_code: int, bars: int) -> dict | None:
-    logger.debug(f"Bắt đầu _hl_from cho symbol: {symbol}, tf_code: {tf_code}, bars: {bars}")
-    data = mt5.copy_rates_from_pos(symbol, tf_code, 0, bars) if mt5 else None
-    if data is None or len(data) == 0:
-        logger.warning(f"Không lấy được dữ liệu HL từ MT5 cho {symbol} {tf_code}.")
+def _calculate_hl_from_series(
+    series: list[dict[str, Any]]
+) -> dict[str, float] | None:
+    """
+    Tính toán High, Low, Open từ một chuỗi dữ liệu nến đã có.
+    Đây là phương pháp thay thế an toàn hơn cho việc gọi _hl_from trực tiếp.
+    """
+    if not series:
         return None
-    
     try:
-        hi = max([float(x["high"]) for x in data])
-        lo = min([float(x["low"]) for x in data])
-        op = float(data[0]["open"])  # first bar open
-        result = {"open": op, "high": hi, "low": lo}
-        logger.debug(f"Đã lấy HL từ MT5 cho {symbol} {tf_code}. Kết quả: {result}")
-        return result
-    except Exception as e:
-        logger.error(f"Lỗi khi xử lý dữ liệu HL từ MT5 cho {symbol} {tf_code}: {e}")
+        # Sắp xếp để đảm bảo nến đầu tiên là nến cũ nhất
+        sorted_series = sorted(series, key=lambda x: x["time"])
+        first_bar = sorted_series[0]
+        op = float(first_bar["open"])
+        hi = max(float(bar["high"]) for bar in sorted_series)
+        lo = min(float(bar["low"]) for bar in sorted_series)
+        return {"open": op, "high": hi, "low": lo}
+    except (KeyError, IndexError, ValueError) as e:
+        logger.error(f"Lỗi khi tính toán HL từ series: {e}")
         return None
 
 
@@ -571,6 +601,28 @@ def _nearby_key_levels(
     return out
 
 
+def get_market_data_async(
+    cfg: "MT5Config",
+    plan: dict | None = None,
+) -> SafeData:
+    """
+    Hàm worker công khai để lấy dữ liệu thị trường, được thiết kế để chạy song song
+    với các tác vụ I/O khác.
+    Bản thân hàm này chạy tuần tự bên trong do khóa MT5 toàn cục.
+    """
+    try:
+        # Gọi hàm gốc và đảm bảo luôn trả về SafeData
+        result = get_market_data(cfg=cfg, return_json=False, plan=plan)
+        if isinstance(result, SafeData):
+            return result
+        # Trường hợp hiếm gặp khi get_market_data trả về chuỗi lỗi
+        logger.error(f"get_market_data trả về kiểu không mong muốn: {type(result)}")
+        return SafeData(None)
+    except Exception as e:
+        logger.exception(f"Lỗi nghiêm trọng trong luồng lấy dữ liệu MT5: {e}")
+        return SafeData(None)
+
+
 def get_market_data(
     cfg: "MT5Config",
     *,
@@ -587,58 +639,74 @@ def get_market_data(
         logger.warning("MetaTrader5 module not installed, cannot build MT5 context.")
         return SafeData(None)
 
-    info = mt5.symbol_info(symbol)
-    if not info:
-        logger.warning(f"Không tìm thấy thông tin symbol cho {symbol}.")
-        return SafeData(None)
-    if not getattr(info, "visible", True):
+    with _mt5_lock:
+        info = mt5.symbol_info(symbol)
+        if not info:
+            logger.warning(f"Không tìm thấy thông tin symbol cho {symbol}.")
+            return SafeData(None)
+
+        # Cải tiến: Luôn đảm bảo symbol được chọn và thêm độ trễ để MT5 đồng bộ.
+        # Đây là bước quan trọng để tránh lỗi "Không lấy được dữ liệu" từ copy_rates_from_pos.
         try:
-            mt5.symbol_select(symbol, True)
-            logger.debug(f"Đã chọn symbol '{symbol}' để hiển thị.")
+            if not mt5.symbol_select(symbol, True):
+                logger.warning(f"Không thể chọn symbol '{symbol}' trong Market Watch.")
+                # Không thoát ngay, vẫn thử lấy dữ liệu nhưng khả năng cao sẽ thất bại.
+            else:
+                logger.debug(f"Đã đảm bảo symbol '{symbol}' được chọn. Chờ 0.5s để đồng bộ.")
+                time.sleep(0.5) # Cho MT5 thời gian để chuẩn bị dữ liệu.
         except Exception as e:
-            logger.warning(f"Lỗi khi chọn symbol '{symbol}': {e}")
-            pass
-    acc = mt5.account_info()
-    tick = mt5.symbol_info_tick(symbol)
-    logger.debug("Đã lấy symbol info, account info, tick info.")
+            logger.error(f"Lỗi nghiêm trọng khi chọn symbol '{symbol}': {e}")
+            return SafeData(None) # Nếu chọn symbol lỗi, không thể tiếp tục.
+
+        acc = mt5.account_info()
+        tick = mt5.symbol_info_tick(symbol)
+        logger.debug("Đã lấy symbol info, account info, tick info.")
 
     # --- Broker Time ---
-    broker_time = datetime.now(timezone.utc) # Fallback
+    broker_time = datetime.now(timezone.utc)  # Fallback
     try:
         if tick and getattr(tick, "time", 0) > 0:
             broker_timestamp = int(getattr(tick, "time"))
             terminal_info = mt5.terminal_info()
-            if terminal_info:
+            # Cải tiến: Kiểm tra sự tồn tại của thuộc tính 'timezone' một cách an toàn
+            if terminal_info and hasattr(terminal_info, "timezone") and terminal_info.timezone:
                 broker_timezone = ZoneInfo(terminal_info.timezone)
-                broker_time = datetime.fromtimestamp(broker_timestamp, tz=broker_timezone)
+                broker_time = datetime.fromtimestamp(
+                    broker_timestamp, tz=broker_timezone
+                )
+            else:
+                logger.warning(
+                    "Không thể xác định múi giờ từ TerminalInfo (thiếu thuộc tính hoặc rỗng), sử dụng UTC."
+                )
     except Exception as e:
-        logger.warning(f"Không thể xác định thời gian broker chính xác, sử dụng UTC. Lỗi: {e}")
+        logger.warning(f"Lỗi khi xử lý thời gian broker, sử dụng UTC. Lỗi: {e}")
 
 
     # --- Fetch Open Positions ---
     positions_list = []
-    try:
-        positions = mt5.positions_get(symbol=symbol)
-        if positions:
-            for pos in positions:
-                pos_dict = {
-                    "ticket": pos.ticket,
-                    "symbol": pos.symbol,
-                    "type": "BUY" if pos.type == 0 else "SELL",
-                    "volume": pos.volume,
-                    "price_open": pos.price_open,
-                    "sl": pos.sl,
-                    "tp": pos.tp,
-                    "price_current": pos.price_current,
-                    "profit": pos.profit,
-                    "comment": pos.comment,
-                }
-                positions_list.append(pos_dict)
-            logger.debug(f"Đã lấy {len(positions_list)} lệnh đang mở.")
-    except Exception as e:
-        logger.error(f"Lỗi khi lấy lệnh đang mở: {e}")
-        # In case of any error, ensure the list is empty
-        positions_list = []
+    with _mt5_lock:
+        try:
+            positions = mt5.positions_get(symbol=symbol)
+            if positions:
+                for pos in positions:
+                    pos_dict = {
+                        "ticket": pos.ticket,
+                        "symbol": pos.symbol,
+                        "type": "BUY" if pos.type == 0 else "SELL",
+                        "volume": pos.volume,
+                        "price_open": pos.price_open,
+                        "sl": pos.sl,
+                        "tp": pos.tp,
+                        "price_current": pos.price_current,
+                        "profit": pos.profit,
+                        "comment": pos.comment,
+                    }
+                    positions_list.append(pos_dict)
+                logger.debug(f"Đã lấy {len(positions_list)} lệnh đang mở.")
+        except Exception as e:
+            logger.error(f"Lỗi khi lấy lệnh đang mở: {e}")
+            # In case of any error, ensure the list is empty
+            positions_list = []
 
     info_obj = {
         "digits": getattr(info, "digits", None),
@@ -688,7 +756,8 @@ def get_market_data(
         now_ts = int(time.time())
         for minutes in (5, 30):
             frm = now_ts - minutes * 60
-            ticks = mt5.copy_ticks_range(symbol, frm, now_ts, mt5.COPY_TICKS_INFO)
+            with _mt5_lock:
+                ticks = mt5.copy_ticks_range(symbol, frm, now_ts, mt5.COPY_TICKS_INFO)
             if ticks is None or len(ticks) < 5 or not info:
                 logger.warning(f"Không đủ dữ liệu tick cho {minutes}m để tính tick stats.")
                 if minutes == 5:
@@ -732,29 +801,70 @@ def get_market_data(
     }
     logger.debug("Đã lấy OHLCV series cho các khung thời gian.")
 
-    # Higher timeframe levels
-    daily = _hl_from(symbol, mt5.TIMEFRAME_D1, 2) or {}
+    # --- Higher timeframe levels ---
+    # Cải tiến logic: Tính toán các mức HTF từ dữ liệu H1 đã có để tăng độ tin cậy
+    # và tránh các lệnh gọi MT5 có thể bị treo.
+    logger.debug("Bắt đầu tính toán các mức khung thời gian lớn từ series H1.")
+    h1_series = series.get("H1", [])
+    today_str = broker_time.strftime("%Y-%m-%d")
+
+    # Lấy calendar week (tuần theo lịch)
+    year, week_num, _ = broker_time.isocalendar()
+
+    # Lọc nến H1 cho ngày, tuần, tháng hiện tại
+    today_h1 = [b for b in h1_series if b["time"].startswith(today_str)]
+
+    # Hàm kiểm tra tuần
+    def is_in_current_week(bar_time_str: str) -> bool:
+        try:
+            bar_dt = datetime.strptime(bar_time_str, "%Y-%m-%d %H:%M:%S")
+            bar_year, bar_week, _ = bar_dt.isocalendar()
+            return bar_year == year and bar_week == week_num
+        except ValueError:
+            return False
+
+    week_h1 = [b for b in h1_series if is_in_current_week(b["time"])]
+
+    # Tính toán HL từ series đã lọc
+    daily = _calculate_hl_from_series(today_h1) or {}
+    weekly = _calculate_hl_from_series(week_h1) or {}
+    
+    # Đối với dữ liệu của ngày/tuần trước, vẫn cần gọi MT5 nhưng đây là dữ liệu lịch sử
+    # đã hoàn chỉnh nên sẽ ổn định hơn.
     prev_day: dict[str, float] | None = None
-    try:
-        d2 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, 1)
-        if d2 is not None and len(d2) == 1:
-            prev_day = {"high": float(d2[0]["high"]), "low": float(d2[0]["low"])}
-            logger.debug(f"Đã lấy prev_day HL: {prev_day}")
-    except Exception as e:
-        prev_day = None
-        logger.warning(f"Lỗi khi lấy prev_day HL: {e}")
-    weekly = _hl_from(symbol, mt5.TIMEFRAME_W1, 1) or {}
+    with _mt5_lock:
+        try:
+            d2 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, 1)
+            if d2 is not None and len(d2) == 1:
+                prev_day = {"high": float(d2[0]["high"]), "low": float(d2[0]["low"])}
+                logger.debug(f"Đã lấy prev_day HL: {prev_day}")
+        except Exception as e:
+            prev_day = None
+            logger.warning(f"Lỗi khi lấy prev_day HL: {e}")
+
     prev_week: dict[str, float] | None = None
-    try:
-        w2 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_W1, 1, 1)
-        if w2 is not None and len(w2) == 1:
-            prev_week = {"high": float(w2[0]["high"]), "low": float(w2[0]["low"])}
-            logger.debug(f"Đã lấy prev_week HL: {prev_week}")
-    except Exception as e:
-        prev_week = None
-        logger.warning(f"Lỗi khi lấy prev_week HL: {e}")
-    monthly = _hl_from(symbol, mt5.TIMEFRAME_MN1, 1) or {}
-    logger.debug("Đã lấy higher timeframe levels.")
+    with _mt5_lock:
+        try:
+            w2 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_W1, 1, 1)
+            if w2 is not None and len(w2) == 1:
+                prev_week = {"high": float(w2[0]["high"]), "low": float(w2[0]["low"])}
+                logger.debug(f"Đã lấy prev_week HL: {prev_week}")
+        except Exception as e:
+            prev_week = None
+            logger.warning(f"Lỗi khi lấy prev_week HL: {e}")
+        
+    # Dữ liệu tháng vẫn có thể lấy trực tiếp vì ít thay đổi trong phiên
+    with _mt5_lock:
+        monthly_data = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_MN1, 0, 1)
+    monthly: dict[str, float] = {}
+    if monthly_data is not None and len(monthly_data) > 0:
+        monthly = {
+            "open": float(monthly_data[0]["open"]),
+            "high": float(monthly_data[0]["high"]),
+            "low": float(monthly_data[0]["low"]),
+        }
+
+    logger.debug("Đã tính toán xong các mức khung thời gian lớn.")
 
     # Enrich daily
     midnight_open = None
@@ -843,15 +953,16 @@ def get_market_data(
     adr = adr_stats(symbol, n=20)
     # day_open = daily.get("open") if daily else None
     prev_close = None
-    try:
-        d1_prev_close_arr = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, 1)
-        if d1_prev_close_arr is not None and len(d1_prev_close_arr) == 1:
-            prev_close = float(d1_prev_close_arr[0]["close"])  # type: ignore[index]
-            logger.debug(f"Prev day close: {prev_close}")
-    except Exception as e:
-        prev_close = None
-        logger.warning(f"Lỗi khi lấy prev_close: {e}")
-        pass
+    with _mt5_lock:
+        try:
+            d1_prev_close_arr = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, 1)
+            if d1_prev_close_arr is not None and len(d1_prev_close_arr) == 1:
+                prev_close = float(d1_prev_close_arr[0]["close"])  # type: ignore[index]
+                logger.debug(f"Prev day close: {prev_close}")
+        except Exception as e:
+            prev_close = None
+            logger.warning(f"Lỗi khi lấy prev_close: {e}")
+            pass
     day_range = None
     day_range_pct = None
     if daily and adr and adr.get("d20"):
@@ -1099,20 +1210,80 @@ def is_connected() -> bool:
     """Kiểm tra xem kết nối MT5 có đang hoạt động hay không."""
     if mt5 is None:
         return False
-    try:
-        # Lấy thông tin terminal để kiểm tra kết nối
-        info = mt5.terminal_info()
-        return info is not None
-    except Exception:
-        return False
+    with _mt5_lock:
+        try:
+            # Lấy thông tin terminal để kiểm tra kết nối
+            info = mt5.terminal_info()
+            return info is not None
+        except Exception:
+            return False
 
 
 def shutdown():
     """Ngắt kết nối khỏi terminal MetaTrader 5."""
     logger.info("Đang ngắt kết nối khỏi MetaTrader 5.")
-    if mt5 and is_connected():
-        mt5.shutdown()
-        logger.info("Đã ngắt kết nối MT5 thành công.")
+    with _mt5_lock:
+        if mt5 and mt5.terminal_info():
+            mt5.shutdown()
+            logger.info("Đã ngắt kết nối MT5 thành công.")
+
+
+def get_history_deals(symbol: str, days: int = 7) -> list[dict[str, Any]] | None:
+    """
+    Lấy lịch sử các giao dịch (deals) cho một symbol trong khoảng thời gian gần đây.
+
+    Args:
+        symbol (str): Tên symbol.
+        days (int): Số ngày gần nhất để tra cứu.
+
+    Returns:
+        Một danh sách các dictionary chứa thông tin deal, hoặc None nếu có lỗi.
+    """
+    logger.debug(f"Bắt đầu lấy lịch sử deals cho {symbol} trong {days} ngày qua.")
+    if not is_connected():
+        logger.warning("MT5 chưa kết nối, không thể lấy lịch sử deals.")
+        return None
+    with _mt5_lock:
+        try:
+            from_date = datetime.now() - timedelta(days=days)
+            deals = mt5.history_deals_get(from_date, datetime.now(), group=f"*{symbol}*")
+
+            if deals is None:
+                logger.warning(f"Không lấy được deals cho {symbol}. Lỗi: {mt5.last_error()}")
+                return []
+        except Exception as e:
+            logger.exception(f"Lỗi khi gọi history_deals_get cho {symbol}: {e}")
+            return None
+
+    try:
+        # Sắp xếp các giao dịch theo thời gian giảm dần và lấy 100 giao dịch gần nhất
+        sorted_deals = sorted(deals, key=lambda x: x.time, reverse=True)[:100]
+
+        # Chuyển đổi deal type từ số sang chuỗi dễ đọc
+        deal_type_map = {
+            0: "Buy", 1: "Sell", 2: "Balance", 3: "Credit", 4: "Charge",
+            5: "Correction", 6: "Bonus", 7: "Commission", 8: "Commission Daily",
+            9: "Commission Monthly", 10: "Agent Daily", 11: "Agent Monthly",
+            12: "Interest", 13: "Interest Rate", 14: "SO Compensation",
+            15: "SO Swap"
+        }
+
+        formatted_deals = [
+            {
+                "time": datetime.fromtimestamp(d.time).strftime('%Y-%m-%d %H:%M'),
+                "ticket": d.ticket,
+                "type": deal_type_map.get(d.type, f"Unknown({d.type})"),
+                "volume": f"{d.volume:.2f}",
+                "price": f"{d.price:.5f}",
+                "profit": f"{d.profit:.2f}",
+            }
+            for d in sorted_deals
+        ]
+        logger.debug(f"Đã định dạng {len(formatted_deals)} deals cho {symbol}.")
+        return formatted_deals
+    except Exception as e:
+        logger.exception(f"Lỗi khi lấy lịch sử deals cho {symbol}: {e}")
+        return None
 
 
 # ------------------------------
@@ -1297,31 +1468,32 @@ def order_send_smart(request: dict[str, Any], retries: int = 3, delay: float = 0
     }
 
     for attempt in range(retries):
-        try:
-            result = mt5.order_send(request)
-            
-            if result is None:
-                logger.error(f"(Attempt {attempt+1}/{retries}) Gửi lệnh thất bại, không có kết quả. Lỗi MT5: {mt5.last_error()}")
-                time.sleep(delay * (attempt + 1))
-                continue
+        with _mt5_lock:
+            try:
+                result = mt5.order_send(request)
+                
+                if result is None:
+                    last_error = mt5.last_error()
+                    logger.error(f"(Attempt {attempt+1}/{retries}) Gửi lệnh thất bại, không có kết quả. Lỗi MT5: {last_error}")
+                    # Không cần continue bên trong lock, vòng lặp sẽ xử lý
+                elif result.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"Gửi lệnh thành công. Ticket: {result.order}")
+                    return result
+                elif result.retcode in RETRYABLE_RETCODES:
+                    logger.warning(f"(Attempt {attempt+1}/{retries}) Gửi lệnh không thành công, sẽ thử lại. Retcode: {result.retcode}, Comment: {result.comment}")
+                    # Không cần continue bên trong lock
+                else:
+                    logger.error(f"Gửi lệnh không thành công, lỗi không thể thử lại. Retcode: {result.retcode}, Comment: {result.comment}")
+                    return result # Trả về kết quả lỗi không thể thử lại
 
-            if result.retcode == mt5.TRADE_RETCODE_DONE:
-                logger.info(f"Gửi lệnh thành công. Ticket: {result.order}")
-                return result
-            
-            if result.retcode in RETRYABLE_RETCODES:
-                logger.warning(f"(Attempt {attempt+1}/{retries}) Gửi lệnh không thành công, sẽ thử lại. Retcode: {result.retcode}, Comment: {result.comment}")
-                time.sleep(delay * (attempt + 1))
-                continue
-            else:
-                logger.error(f"Gửi lệnh không thành công, lỗi không thể thử lại. Retcode: {result.retcode}, Comment: {result.comment}")
-                return result # Trả về kết quả lỗi không thể thử lại
-
-        except Exception as e:
-            logger.exception(f"(Attempt {attempt+1}/{retries}) Lỗi nghiêm trọng khi gửi lệnh: {e}")
-            if attempt + 1 == retries:
-                return None # Trả về None sau khi hết số lần thử
-            time.sleep(delay * (attempt + 1))
+            except Exception as e:
+                logger.exception(f"(Attempt {attempt+1}/{retries}) Lỗi nghiêm trọng khi gửi lệnh: {e}")
+                if attempt + 1 == retries:
+                    return None # Trả về None sau khi hết số lần thử
+                # Không cần break, vòng lặp sẽ tiếp tục
+        
+        # Tạm dừng bên ngoài lock
+        time.sleep(delay * (attempt + 1))
             
     logger.error("Gửi lệnh thất bại sau tất cả các lần thử.")
     return None
@@ -1330,7 +1502,8 @@ def order_send_smart(request: dict[str, Any], retries: int = 3, delay: float = 0
 def close_position_partial(ticket: int, percentage: float) -> bool | None:
     """Đóng một phần vị thế."""
     logger.debug(f"Bắt đầu close_position_partial cho ticket {ticket}, percentage {percentage}")
-    pos = mt5.positions_get(ticket=ticket)
+    with _mt5_lock:
+        pos = mt5.positions_get(ticket=ticket)
     if not pos or len(pos) == 0:
         logger.error(f"Không tìm thấy vị thế với ticket {ticket}.")
         return False
@@ -1368,7 +1541,8 @@ def get_last_swing_low_high(symbol: str, timeframe: int, bars: int, pivot_streng
     Sử dụng thuật toán xác định điểm xoay (pivot point).
     """
     logger.debug(f"Bắt đầu get_last_swing_low_high cho {symbol}, timeframe {timeframe}, {bars} bars.")
-    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, bars)
+    with _mt5_lock:
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, bars)
     if rates is None or len(rates) < (2 * pivot_strength + 1):
         logger.warning("Không đủ dữ liệu nến để xác định swing low/high.")
         return None, None
@@ -1407,7 +1581,8 @@ def get_last_swing_low_high(symbol: str, timeframe: int, bars: int, pivot_streng
 def modify_position(ticket: int, sl: float | None = None, tp: float | None = None) -> bool | None:
     """Sửa đổi Stop Loss và/hoặc Take Profit cho một vị thế."""
     logger.debug(f"Bắt đầu modify_position cho ticket {ticket} với SL={sl}, TP={tp}")
-    pos = mt5.positions_get(ticket=ticket)
+    with _mt5_lock:
+        pos = mt5.positions_get(ticket=ticket)
     if not pos or len(pos) == 0:
         logger.error(f"Không tìm thấy vị thế với ticket {ticket}.")
         return False

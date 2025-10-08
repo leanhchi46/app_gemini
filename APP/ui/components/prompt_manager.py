@@ -11,7 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # Sắp xếp import theo quy tắc
 from APP.configs.constants import PATHS
@@ -121,94 +121,150 @@ class PromptManager:
 
     def reformat_prompt_area(self) -> None:
         """
-        Định dạng lại nội dung của khu vực nhập prompt đang được chọn.
+        Bắt đầu quá trình định dạng lại prompt trong một luồng nền.
         """
-        logger.debug("Bắt đầu định dạng lại prompt area.")
+        logger.debug("Yêu cầu định dạng lại prompt area.")
         try:
             if not self.app.prompt_nb:
                 return
             selected_tab_index = self.app.prompt_nb.index(self.app.prompt_nb.select())
-            if selected_tab_index == 0:
-                widget = self.app.prompt_no_entry_text
-                logger.debug("Định dạng lại tab 'No Entry'.")
-            else:
-                widget = self.app.prompt_entry_run_text
-                logger.debug("Định dạng lại tab 'Entry/Run'.")
+            
+            widget = self.app.prompt_no_entry_text if selected_tab_index == 0 else self.app.prompt_entry_run_text
 
             if widget:
-                raw = widget.get("1.0", "end")
-                pretty = self._normalize_prompt_text(raw)
-                widget.delete("1.0", "end")
-                widget.insert("1.0", pretty)
-                self.app.ui_status("Đã định dạng lại prompt.")
-            logger.debug("Định dạng lại prompt area thành công.")
+                raw_content = widget.get("1.0", "end")
+                self.app.ui_status("Đang định dạng prompt...")
+                # Chạy tác vụ CPU-bound trong luồng nền
+                self.app._run_in_background(self._reformat_prompt_worker, raw_content, widget)
+
         except Exception as e:
-            ui_builder.show_message(title="Lỗi định dạng prompt", message=f"Đã xảy ra lỗi: {e}")
-            logger.exception("Lỗi khi định dạng lại prompt area.")
+            ui_builder.show_message(title="Lỗi", message=f"Lỗi khi chuẩn bị định dạng prompt: {e}")
+            logger.exception("Lỗi khi lấy widget hoặc nội dung prompt.")
+
+    def _reformat_prompt_worker(self, raw_content: str, widget: Any) -> None:
+        """Worker chạy nền để chuẩn hóa văn bản prompt."""
+        logger.debug("Worker bắt đầu chuẩn hóa prompt.")
+        try:
+            pretty_content = self._normalize_prompt_text(raw_content)
+            
+            def update_ui():
+                if widget:
+                    widget.delete("1.0", "end")
+                    widget.insert("1.0", pretty_content)
+                    self.app.ui_status("Đã định dạng lại prompt.")
+                logger.debug("Định dạng lại prompt area thành công.")
+
+            ui_builder.enqueue(self.app, update_ui)
+
+        except Exception as e:
+            logger.exception("Lỗi trong worker định dạng prompt.")
+            ui_builder.enqueue(
+                self.app,
+                lambda: ui_builder.show_message(title="Lỗi định dạng prompt", message=f"Đã xảy ra lỗi: {e}")
+            )
+            ui_builder.enqueue(self.app, lambda: self.app.ui_status("Lỗi khi định dạng prompt."))
 
     def load_prompts_from_disk(self, silent: bool = False) -> None:
         """
-        Tải nội dung các file prompt từ đĩa và hiển thị trên UI.
-
-        Args:
-            silent: Nếu True, không hiển thị thông báo lỗi.
+        Bắt đầu quá trình tải nội dung các file prompt từ đĩa trong luồng nền.
         """
-        logger.debug(f"Bắt đầu tải prompts từ đĩa. Silent: {silent}")
+        logger.debug(f"Yêu cầu tải prompts từ đĩa. Silent: {silent}")
+        self.app._run_in_background(self._load_prompts_worker, silent)
+
+    def _load_prompts_worker(self, silent: bool) -> None:
+        """Worker chạy nền để đọc các file prompt."""
+        logger.debug("Worker bắt đầu đọc các file prompt.")
+        results = {}
+        errors = {}
+        
         files_to_load = {
-            "no_entry": (self.prompt_no_entry_path, self.app.prompt_no_entry_text),
-            "entry_run": (self.prompt_entry_run_path, self.app.prompt_entry_run_text),
+            "no_entry": self.prompt_no_entry_path,
+            "entry_run": self.prompt_entry_run_path,
         }
-        loaded_count = 0
-        for key, (path, widget) in files_to_load.items():
-            if not widget:
-                continue
+
+        for key, path in files_to_load.items():
             try:
                 if path.exists():
                     raw = path.read_text(encoding="utf-8", errors="ignore")
-                    text = self._normalize_prompt_text(raw)
-                    widget.delete("1.0", "end")
-                    widget.insert("1.0", text)
-                    loaded_count += 1
-                    logger.debug(f"Đã tải prompt từ file: {path.name}")
-                elif not silent:
-                    widget.delete("1.0", "end")
-                    widget.insert("1.0", f"[LỖI] Không tìm thấy file: {path.name}")
+                    results[key] = self._normalize_prompt_text(raw)
+                else:
                     logger.warning(f"Không tìm thấy file prompt: {path.name}")
+                    errors[key] = f"[LỖI] Không tìm thấy file: {path.name}"
             except Exception as e:
-                if not silent:
-                    ui_builder.show_message(title=f"Lỗi tải {path.name}", message=f"Đã xảy ra lỗi: {e}")
                 logger.exception(f"Lỗi khi tải prompt từ file '{path.name}'.")
+                errors[key] = f"[LỖI] Không thể đọc file: {e}"
+        
+        ui_builder.enqueue(self.app, lambda: self._update_prompts_ui(results, errors, silent))
+
+    def _update_prompts_ui(self, results: dict, errors: dict, silent: bool) -> None:
+        """Cập nhật các ô prompt trên luồng UI chính."""
+        logger.debug("Cập nhật UI với nội dung prompt đã tải.")
+        widgets = {
+            "no_entry": self.app.prompt_no_entry_text,
+            "entry_run": self.app.prompt_entry_run_text,
+        }
+        loaded_count = 0
+        for key, widget in widgets.items():
+            if not widget:
+                continue
+            
+            widget.delete("1.0", "end")
+            if key in results:
+                widget.insert("1.0", results[key])
+                loaded_count += 1
+            elif key in errors and not silent:
+                widget.insert("1.0", errors[key])
 
         if loaded_count > 0 and not silent:
             self.app.ui_status(f"Đã tải {loaded_count} prompt từ file.")
-        logger.debug("Kết thúc tải prompts từ đĩa.")
+        logger.debug("Kết thúc cập nhật UI cho prompts.")
 
     def save_current_prompt_to_disk(self) -> None:
         """
-        Lưu nội dung của prompt trên tab đang được chọn vào file tương ứng.
+        Lấy nội dung prompt và bắt đầu quá trình lưu vào file trong luồng nền.
         """
-        logger.debug("Bắt đầu lưu prompt hiện tại vào đĩa.")
+        logger.debug("Yêu cầu lưu prompt hiện tại vào đĩa.")
         try:
             if not self.app.prompt_nb:
                 return
             selected_tab_index = self.app.prompt_nb.index(self.app.prompt_nb.select())
+            
             if selected_tab_index == 0:
                 widget = self.app.prompt_no_entry_text
                 path = self.prompt_no_entry_path
-                logger.debug("Lưu prompt từ tab 'No Entry'.")
             else:
                 widget = self.app.prompt_entry_run_text
                 path = self.prompt_entry_run_path
-                logger.debug("Lưu prompt từ tab 'Entry/Run'.")
 
             if widget:
-                content = widget.get("1.0", "end-1c")  # -1c để bỏ qua newline cuối cùng
-                path.write_text(content, encoding="utf-8")
-                ui_builder.show_message(title="Lưu thành công", message=f"Đã lưu prompt vào {path.name}")
-            logger.info(f"Đã lưu prompt thành công vào: {path.name}")
+                content = widget.get("1.0", "end-1c")
+                self.app._run_in_background(self._save_prompt_worker, path, content)
+
         except Exception as e:
-            ui_builder.show_message(title="Lỗi lưu file", message=f"Đã xảy ra lỗi: {e}")
-            logger.exception("Lỗi khi lưu prompt vào file.")
+            # Lỗi này thường xảy ra nếu widget không tồn tại, không cần worker
+            ui_builder.show_message(title="Lỗi", message=f"Lỗi khi chuẩn bị lưu prompt: {e}")
+            logger.exception("Lỗi khi lấy nội dung prompt từ UI.")
+
+    def _save_prompt_worker(self, path, content) -> None:
+        """Worker chạy nền để ghi nội dung prompt vào file."""
+        logger.debug(f"Worker bắt đầu ghi prompt vào file: {path.name}")
+        try:
+            path.write_text(content, encoding="utf-8")
+            logger.info(f"Đã lưu prompt thành công vào: {path.name}")
+            ui_builder.enqueue(
+                self.app,
+                lambda: ui_builder.show_message(
+                    title="Lưu thành công", message=f"Đã lưu prompt vào {path.name}"
+                ),
+            )
+        except Exception as e:
+            logger.exception(f"Lỗi khi lưu prompt vào file '{path.name}'.")
+            ui_builder.enqueue(
+                self.app,
+                lambda: ui_builder.show_message(
+                    title="Lỗi lưu file", message=f"Đã xảy ra lỗi: {e}"
+                ),
+            )
 
     def get_prompts(self) -> dict[str, str]:
         """

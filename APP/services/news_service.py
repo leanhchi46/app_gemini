@@ -1,301 +1,363 @@
-# -*- coding: utf-8 -*-
-"""
-Module để lấy và xử lý các tin tức kinh tế có tác động mạnh từ Forex Factory.
-Sử dụng cloudscraper để vượt qua Cloudflare và regex để trích xuất dữ liệu.
-"""
-
 from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
+from typing import Any, Callable, Final, List, Optional
 
-import cloudscraper
-from bs4 import BeautifulSoup
+import pytz
 
-if TYPE_CHECKING:
-    pass
+from APP.configs.app_config import FMPConfig, NewsConfig, RunConfig, TEConfig
+from APP.services.fmp_service import FMPService
+from APP.services.te_service import TEService
 
 logger = logging.getLogger(__name__)
 
-# --- Constants ---
-FOREX_FACTORY_URL = "https://www.forexfactory.com/calendar"
-DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+# Ánh xạ tiền tệ và quốc gia/khu vực
+CURRENCY_COUNTRY_MAP: Final[dict[str, set[str]]] = {
+    "USD": {"United States", "US", "U.S.", "united states"},
+    "EUR": {"Euro Area", "Eurozone", "Germany", "France", "Italy", "Spain", "EU"},
+    "GBP": {"United Kingdom", "UK", "U.K."},
+    "JPY": {"Japan", "JP"},
+    "CAD": {"Canada", "CA"},
+    "AUD": {"Australia", "AU"},
+    "NZD": {"New Zealand", "NZ"},
+    "CHF": {"Switzerland", "CH"},
+    "CNY": {"China", "CN"},
 }
-IMPACT_MAP = {"high": "Red", "medium": "Orange", "low": "Yellow"}
-EXCLUDED_EVENT_KEYWORDS = (
-    "bank holiday", "holiday", "tentative", "all day",
-    "daylight", "speaks", "speech",
-)
 
-# --- Core Scraping Logic ---
+# Các sự kiện kinh tế quan trọng (từ khóa tìm kiếm trong tiêu đề)
+HIGH_IMPACT_KEYWORDS: Final[set[str]] = {
+    "interest rate", "cpi", "consumer price index", "nfp", "non-farm payroll",
+    "pmi", "purchasing managers", "retail sales", "gdp", "gross domestic product",
+    "unemployment rate", "inflation rate", "trade balance", "industrial production",
+    "business confidence", "consumer confidence", "ism", "ifo", "zew"
+}
 
-def _fetch_forex_factory_html() -> Optional[str]:
+
+class NewsService:
     """
-    Lấy nội dung HTML từ lịch của Forex Factory.
-    Sử dụng cloudscraper để xử lý các biện pháp bảo vệ của Cloudflare.
+    Dịch vụ chạy nền, tự động lấy và làm mới tin tức kinh tế định kỳ.
     """
-    logger.info("🌐 Đang lấy dữ liệu tin tức từ Forex Factory...")
-    try:
-        scraper = cloudscraper.create_scraper()
-        response = scraper.get(FOREX_FACTORY_URL, headers=DEFAULT_HEADERS, timeout=20)
-        response.raise_for_status()
-        logger.info("✅ Lấy thành công HTML từ Forex Factory.")
-        return response.text
-    except Exception:
-        logger.error("⚠️ Lỗi không xác định khi lấy dữ liệu từ Forex Factory", exc_info=True)
-        return None
 
-# --- Data Parsing and Normalization ---
-
-def _parse_html_data(html: str) -> List[Dict[str, Any]]:
-    """
-    Phân tích HTML từ Forex Factory để trích xuất các sự kiện tin tức.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    events: List[Dict[str, Any]] = []
-    
-    table = soup.find("table", class_="calendar__table")
-    if not table:
-        logger.error("Không tìm thấy bảng lịch trên trang Forex Factory.")
-        return events
-
-    rows = table.find_all("tr", class_="calendar__row")
-    current_date = None
-
-    for row in rows:
-        # Cập nhật ngày hiện tại
-        date_cell = row.find("td", class_="calendar__date")
-        # SỬA LỖI: Chỉ cần có class 'calendar__date' là đủ, không cần kiểm tra text.
-        if date_cell:
-            date_text = " ".join(date_cell.text.strip().split()) # Lấy toàn bộ text như "Mon Oct 6"
-            try:
-                # Cố gắng parse ngày từ text, bỏ qua các từ như "Mon", "Tue"
-                date_parts = date_text.split()
-                if len(date_parts) >= 2:
-                    # Lấy 2 phần cuối (ví dụ: "Oct 6")
-                    clean_date_text = " ".join(date_parts[-2:])
-                    current_date = datetime.strptime(f"{clean_date_text} {datetime.now().year}", "%b %d %Y").date()
-            except (ValueError, IndexError):
-                logger.warning(f"Không thể phân tích ngày từ chuỗi: '{date_text}'")
-                continue
+    def __init__(self):
+        """Khởi tạo dịch vụ ở trạng thái chưa hoạt động."""
+        self.news_config: Optional[NewsConfig] = None
+        self.fmp_config: Optional[FMPConfig] = None
+        self.te_config: Optional[TEConfig] = None
+        self.timezone_str: str = "Asia/Ho_Chi_Minh"
         
-        if not current_date:
-            continue
+        self.fmp_service: Optional[FMPService] = None
+        self.te_service: Optional[TEService] = None
 
-        # Bỏ qua các hàng không phải là sự kiện
-        if not row.find("td", class_="calendar__impact"):
-            continue
+        self._cache: list[dict[str, Any]] = []
+        self._cache_time: Optional[datetime] = None
+        self._dedup_ids: set[str] = set()
+        
+        # Threading attributes
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._worker_thread: Optional[threading.Thread] = None
+        self._update_callback: Optional[Callable[[List[dict[str, Any]]], None]] = None
 
-        try:
-            # Logic kiểm tra impact đã được sửa
-            impact_cell = row.find("td", class_="calendar__impact")
-            if not impact_cell:
-                continue
-            impact_span = impact_cell.find("span")
-            if not impact_span:
-                continue
+    def update_config(self, config: RunConfig):
+        """Cập nhật cấu hình cho dịch vụ một cách an toàn."""
+        with self._lock:
+            self.news_config = config.news
+            self.fmp_config = config.fmp
+            self.te_config = config.te
+            self.timezone_str = config.no_run.timezone
+            
+            # Khởi tạo lại các service con nếu cần
+            self.fmp_service = FMPService(config.fmp) if config.fmp and config.fmp.enabled else None
+            self.te_service = TEService(config.te) if config.te and config.te.enabled else None
+            logger.debug("Cấu hình NewsService đã được cập nhật.")
 
-            # Sửa lỗi pyright: Kiểm tra class an toàn hơn
-            span_classes = impact_span.get("class")
-            if not isinstance(span_classes, list) or "icon--ff-impact-red" not in span_classes:
-                continue
+    def set_update_callback(self, callback: Callable[[List[dict[str, Any]]], None]):
+        """Đăng ký một hàm callback để được gọi sau mỗi lần cache được cập nhật."""
+        self._update_callback = callback
 
-            # Sửa lỗi pyright: Kiểm tra sự tồn tại của cell trước khi lấy text
-            title_cell = row.find("td", class_="calendar__event")
-            if not title_cell:
-                continue
-            title = title_cell.text.strip()
+    def start(self):
+        """Khởi động luồng nền để làm mới tin tức tự động."""
+        if self._worker_thread and self._worker_thread.is_alive():
+            logger.warning("Luồng nền của NewsService đã chạy rồi.")
+            return
+        
+        self._stop_event.clear()
+        self._worker_thread = threading.Thread(target=self._background_worker, daemon=True)
+        self._worker_thread.start()
+        logger.info("Dịch vụ nền NewsService đã được khởi động.")
 
-            if not title or any(k in title.lower() for k in EXCLUDED_EVENT_KEYWORDS):
-                continue
-
-            # Sửa lỗi pyright: Kiểm tra sự tồn tại của cell trước khi lấy text
-            time_cell = row.find("td", class_="calendar__time")
-            if not time_cell:
-                continue
-            time_str = time_cell.text.strip()
-
-            if not time_str or "all-day" in time_str.lower():
-                continue
-
-            # Sửa lỗi: Xử lý thời gian "Tentative"
-            event_time = None
-            if "tentative" in time_str.lower():
-                # Gán thời gian mặc định là nửa đêm cho các sự kiện không chắc chắn
-                event_time = datetime.min.time()
+    def stop(self):
+        """Dừng luồng nền một cách an toàn."""
+        if self._worker_thread and self._worker_thread.is_alive():
+            logger.info("Đang yêu cầu dừng dịch vụ nền NewsService...")
+            self._stop_event.set()
+            self._worker_thread.join(timeout=5.0)
+            if self._worker_thread.is_alive():
+                logger.error("Luồng nền NewsService không dừng kịp thời.")
             else:
-                try:
-                    # Chuyển đổi thời gian như bình thường
-                    event_time = datetime.strptime(time_str, "%I:%M%p").time()
-                except ValueError:
-                    logger.warning(f"Không thể parse chuỗi thời gian: '{time_str}'. Bỏ qua sự kiện.")
-                    continue
+                logger.info("Dịch vụ nền NewsService đã dừng thành công.")
+        self._worker_thread = None
+
+    def _background_worker(self):
+        """Vòng lặp chính của luồng nền, chịu trách nhiệm làm mới cache định kỳ."""
+        logger.debug("Luồng nền NewsService bắt đầu, chờ 2 giây để config được tải.")
+        # Chờ một chút lúc khởi động để đảm bảo config ban đầu đã được áp dụng.
+        if self._stop_event.wait(timeout=2.0):
+            return  # Thoát nếu có tín hiệu dừng ngay lúc khởi động
+
+        while not self._stop_event.is_set():
+            try:
+                with self._lock:
+                    is_enabled = self.fmp_service is not None or self.te_service is not None
+                
+                if is_enabled:
+                    logger.info("Luồng nền: Bắt đầu làm mới cache tin tức...")
+                    self._fetch_and_process_events()
+                else:
+                    logger.debug("Luồng nền: Không có nhà cung cấp tin tức nào được bật, bỏ qua lần làm mới.")
+
+            except Exception:
+                logger.exception("Lỗi không mong muốn trong luồng nền của NewsService.")
             
-            if event_time is None:
+            with self._lock:
+                refresh_interval = self.news_config.cache_ttl_sec if self.news_config else 300
+            
+            # Đợi cho đến lần làm mới tiếp theo hoặc cho đến khi có tín hiệu dừng
+            if self._stop_event.wait(timeout=refresh_interval):
+                break # Thoát vòng lặp nếu có tín hiệu dừng
+        logger.debug("Luồng nền NewsService đã thoát khỏi vòng lặp.")
+
+    def is_in_news_blackout(
+        self, symbol: str, now: Optional[datetime] = None
+    ) -> tuple[bool, str | None]:
+        """
+        Kiểm tra xem có đang trong thời gian "cấm giao dịch" vì tin tức hay không.
+        Đọc trực tiếp từ cache.
+        """
+        with self._lock:
+            if not self.news_config or not self.news_config.block_enabled:
+                return False, None
+
+        now_utc = (now or datetime.now(pytz.utc)).astimezone(pytz.utc)
+        # Lấy danh sách sự kiện đã được lọc và sắp xếp sẵn từ cache
+        upcoming_events = self.get_upcoming_events(symbol, now_utc)
+
+        for event in upcoming_events:
+            event_time_utc = event["when_utc"]
+            start_blackout = event_time_utc - timedelta(minutes=self.news_config.block_before_min)
+            end_blackout = event_time_utc + timedelta(minutes=self.news_config.block_after_min)
+
+            if start_blackout <= now_utc <= end_blackout:
+                reason = (
+                    f"{event['title']} ({event.get('country', 'N/A')}) @ "
+                    f"{event['when_local'].strftime('%H:%M')}"
+                )
+                logger.warning("NO-TRADE: Đang trong thời gian cấm vì tin: %s", reason)
+                return True, reason
+        return False, None
+
+    def get_upcoming_events(
+        self, symbol: str, now: Optional[datetime] = None
+    ) -> list[dict[str, Any]]:
+        """
+        Lấy danh sách các sự kiện kinh tế quan trọng sắp tới cho một symbol từ cache.
+        """
+        now_utc = (now or datetime.now(pytz.utc)).astimezone(pytz.utc)
+        
+        with self._lock:
+            # Sao chép cache để tránh thay đổi dữ liệu gốc khi thêm 'when_local'
+            cached_events = list(self._cache)
+            local_timezone_str = self.timezone_str
+
+        allowed_countries = self._get_countries_for_symbol(symbol)
+        ho_chi_minh_tz = pytz.timezone(local_timezone_str)
+
+        upcoming_events = []
+        for event in cached_events:
+            event_time_utc = event.get("when_utc")
+            if not event_time_utc or event_time_utc < now_utc:
                 continue
-            dt_local = datetime.combine(current_date, event_time)
-            # Giả sử thời gian từ FF là giờ New York (ET), cần chuyển sang UTC rồi sang local
-            # Đây là một giả định đơn giản, thực tế cần xử lý múi giờ phức tạp hơn
-            dt_utc = dt_local.astimezone(timezone.utc)
 
-            # Sửa lỗi pyright: Kiểm tra sự tồn tại của cell trước khi lấy text
-            currency_cell = row.find("td", class_="calendar__currency")
-            currency = currency_cell.text.strip().upper() if currency_cell else None
-
-            events.append({
-                "when": dt_utc.astimezone(), # Chuyển sang múi giờ địa phương
-                "title": title,
-                "curr": currency,
-            })
-        except Exception:
-            logger.warning("Lỗi khi parse một hàng sự kiện từ Forex Factory", exc_info=True)
-            continue
+            event_country = event.get("country")
+            if not event_country or event_country not in allowed_countries:
+                continue
             
-    return events
+            # Tạo một bản sao của event để thêm các trường tính toán
+            processed_event = event.copy()
+            processed_event["when_local"] = event_time_utc.astimezone(ho_chi_minh_tz)
+            time_diff = event_time_utc - now_utc
+            processed_event["time_remaining"] = self._format_timedelta(time_diff)
+            upcoming_events.append(processed_event)
 
+        return sorted(upcoming_events, key=lambda x: x["when_utc"])
 
-def _dedup_and_sort_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Loại bỏ các sự kiện trùng lặp và sắp xếp theo thời gian."""
-    events.sort(key=lambda x: x["when"])
-    seen, dedup = set(), []
-    for x in events:
-        key = (x["title"], int(x["when"].timestamp()) // 60)
-        if key not in seen:
-            seen.add(key)
-            dedup.append(x)
-    return dedup
+    def get_news_analysis(self, symbol: str) -> dict[str, Any]:
+        """
+        Lấy phân tích tin tức tức thì từ cache.
+        """
+        try:
+            now_utc = datetime.now(pytz.utc)
+            is_in_blackout, reason = self.is_in_news_blackout(symbol=symbol, now=now_utc)
+            upcoming_events = self.get_upcoming_events(symbol=symbol, now=now_utc)
 
+            return {
+                "is_in_news_window": is_in_blackout,
+                "reason": reason,
+                "upcoming_events": upcoming_events[:3],  # Chỉ lấy 3 sự kiện gần nhất
+            }
+        except Exception as e:
+            logger.error(f"Lỗi khi phân tích tin tức từ cache cho '{symbol}': {e}", exc_info=True)
+            return {"error": "failed to analyze news from cache"}
 
-# --- Main Public Function ---
+    def _fetch_and_process_events(self):
+        """
+        Lấy và xử lý sự kiện từ TẤT CẢ các nhà cung cấp được kích hoạt.
+        Phương thức này giờ đây được gọi bởi luồng nền.
+        """
+        from concurrent.futures import ThreadPoolExecutor
 
-def get_forex_factory_news() -> List[Dict[str, Any]]:
-    """
-    Hàm chính để lấy, phân tích và xử lý tin tức từ Forex Factory.
-    """
-    logger.debug("Bắt đầu quy trình lấy tin tức bằng Forex Factory.")
-    
-    html_content = _fetch_forex_factory_html()
-    if not html_content:
-        return []
+        all_processed_events = []
         
-    parsed_events = _parse_html_data(html_content)
-    final_events = _dedup_and_sort_events(parsed_events)
-    
-    logger.info(f"Hoàn tất lấy tin tức, tìm thấy {len(final_events)} sự kiện có tác động mạnh.")
-    return final_events
+        with self._lock:
+            # Lấy một bản sao của các service để sử dụng trong phương thức này
+            fmp_service = self.fmp_service
+            te_service = self.te_service
 
+        if not fmp_service and not te_service:
+            logger.debug("Không có nhà cung cấp tin tức nào được kích hoạt.")
+            return
 
-# --- Utility and Logic Functions ---
+        self._dedup_ids.clear()
+        logger.debug("Đã xóa cache ID chống trùng lặp của tin tức.")
 
-def symbol_currencies(sym: str) -> set[str]:
-    """Phân tích một symbol giao dịch để tìm các tiền tệ liên quan."""
-    if not sym:
-        return set()
-    s = sym.upper()
-    tokens = set(re.findall(r"[A-Z]{3}", s))
-    if "XAU" in s or "GOLD" in s:
-        tokens.update({"XAU", "USD"})
-    if "XAG" in s or "SILVER" in s:
-        tokens.update({"XAG", "USD"})
-    if any(k in s for k in ("USOIL", "WTI", "BRENT", "UKOIL")):
-        tokens.update({"USD"})
-    if any(k in s for k in ("US30", "US500", "US100", "DJI", "SPX", "NAS100", "NDX")):
-        tokens.update({"USD"})
-    if any(k in s for k in ("DE40", "GER40", "DAX")):
-        tokens.update({"EUR"})
-    if any(k in s for k in ("UK100", "FTSE")):
-        tokens.update({"GBP"})
-    if any(k in s for k in ("JP225", "NIK", "NKY")):
-        tokens.update({"JPY"})
-    return {t for t in tokens if len(t) == 3 and t.isalpha()}
+        raw_fmp_data = None
+        raw_te_data = None
 
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="NewsFetcher") as executor:
+            future_fmp = executor.submit(fmp_service.get_economic_calendar) if fmp_service else None
+            future_te = executor.submit(te_service.get_calendar_events) if te_service else None
 
-def is_within_news_window(
-    events: List[Dict[str, Any]],
-    symbol: str,
-    minutes_before: int,
-    minutes_after: int,
-    *,
-    now: Optional[datetime] = None,
-) -> Tuple[bool, Optional[str]]:
-    """Kiểm tra xem thời điểm hiện tại có nằm trong cửa sổ tin tức của một symbol không."""
-    now_local = (now or datetime.now()).astimezone()
-    allowed_currencies = symbol_currencies(symbol)
-    
-    for ev in events:
-        if allowed_currencies and ev.get("curr") and ev["curr"] not in allowed_currencies:
-            continue
+            if future_fmp:
+                try:
+                    raw_fmp_data = future_fmp.result(timeout=15)
+                except Exception as e:
+                    logger.error(f"Lỗi khi lấy tin tức từ FMP: {e}", exc_info=True)
 
-        event_time = ev["when"]
-        start_window = event_time - timedelta(minutes=max(0, minutes_before))
-        end_window = event_time + timedelta(minutes=max(0, minutes_after))
+            if future_te:
+                try:
+                    raw_te_data = future_te.result(timeout=15)
+                except Exception as e:
+                    logger.warning(f"Không thể lấy tin tức từ Trading Economics: {e}")
 
-        if start_window <= now_local <= end_window:
-            why = f"{ev['title']}" + (f" [{ev['curr']}]" if ev.get("curr") else "")
-            logger.info(f"Phát hiện trong cửa sổ tin tức: {why} @ {event_time.strftime('%H:%M')}")
-            return True, f"{why} @ {event_time.strftime('%Y-%m-%d %H:%M')}"
+        if raw_fmp_data:
+            all_processed_events.extend(self._transform_fmp_data(raw_fmp_data))
+        if raw_te_data:
+            all_processed_events.extend(self._transform_te_data(raw_te_data))
+
+        new_cache = self._filter_high_impact(all_processed_events)
+        
+        with self._lock:
+            self._cache = new_cache
+            self._cache_time = datetime.now(pytz.utc)
+            logger.info(f"Cache được cập nhật với {len(self._cache)} sự kiện quan trọng.")
             
-    return False, None
+            # Lấy callback ra để gọi bên ngoài lock
+            callback = self._update_callback
+            # Tạo bản sao của cache để gửi đi, đảm bảo an toàn
+            cache_copy = list(self._cache)
 
+        # Gọi callback sau khi đã giải phóng lock
+        if callback:
+            try:
+                callback(cache_copy)
+                logger.debug("Callback cập nhật tin tức đã được gọi.")
+            except Exception:
+                logger.exception("Lỗi khi thực thi callback cập nhật tin tức.")
 
-def within_news_window_cached(
-    symbol: str,
-    minutes_before: int,
-    minutes_after: int,
-    *,
-    cache_events: Optional[List[Dict[str, Any]]],
-    cache_fetch_time: Optional[float],
-    ttl_sec: int = 300,
-    now: Optional[datetime] = None,
-) -> Tuple[bool, Optional[str], List[Dict[str, Any]], float]:
-    """
-    Kiểm tra cửa sổ tin tức sử dụng cache, làm mới nếu cache hết hạn.
-    """
-    cur_ts = time.time()
-    events: List[Dict[str, Any]]
-    fetch_ts: float
+    def _transform_fmp_data(self, events: list[dict]) -> list[dict]:
+        """Chuyển đổi dữ liệu từ FMP API (thực chất là investpy)."""
+        transformed = []
+        for event in events:
+            try:
+                date_str = event.get("date")
+                time_str = event.get("time")
+                event_title = event.get("event")
 
-    if not cache_events or (cur_ts - (cache_fetch_time or 0.0)) > ttl_sec:
-        logger.debug("Cache tin tức hết hạn hoặc không tồn tại, đang fetch lại.")
-        events = get_forex_factory_news()
-        fetch_ts = cur_ts
-    else:
-        logger.debug("Sử dụng cache tin tức hiện có.")
-        events = cache_events
-        fetch_ts = cache_fetch_time or 0.0
+                if not all([date_str, time_str, event_title]): continue
+                event_id = f"investpy_{date_str}_{time_str}_{event_title}"
+                if event_id in self._dedup_ids: continue
+                if time_str.lower() == "all day": continue
+                
+                time_str_cleaned = time_str.strip()
+                datetime_str = f"{date_str} {time_str_cleaned}"
+                dt_naive = datetime.strptime(datetime_str, "%d/%m/%Y %H:%M")
+                dt_utc = pytz.utc.localize(dt_naive)
 
-    ok, why = is_within_news_window(
-        events, symbol, minutes_before, minutes_after, now=now
-    )
-    return ok, why, events, fetch_ts
+                transformed.append({
+                    "id": event_id, "when_utc": dt_utc, "title": event_title,
+                    "country": event.get("zone"), "impact": event.get("importance"),
+                    "source": "investpy"
+                })
+                self._dedup_ids.add(event_id)
+            except (ValueError, KeyError, TypeError) as e:
+                logger.warning(f"Bỏ qua sự kiện investpy không hợp lệ: {event}. Lỗi: {e}")
+        return transformed
 
+    def _transform_te_data(self, events: list[dict]) -> list[dict]:
+        """Chuyển đổi dữ liệu từ Trading Economics API."""
+        transformed = []
+        for event in events:
+            try:
+                event_id = f"te_{event.get('CalendarId', '')}"
+                if not event.get('CalendarId') or event_id in self._dedup_ids: continue
 
-def next_events_for_symbol(
-    events: List[Dict[str, Any]],
-    symbol: str,
-    *,
-    now: Optional[datetime] = None,
-    limit: int = 3,
-) -> List[Dict[str, Any]]:
-    """
-    Trả về các sự kiện quan trọng sắp tới cho một symbol cụ thể.
-    """
-    try:
-        now_local = (now or datetime.now()).astimezone()
-        allowed_currencies = symbol_currencies(symbol)
-        
-        future_events = []
-        for ev in events or []:
-            if ev.get("when") and ev["when"] > now_local:
-                if not allowed_currencies or (ev.get("curr") and ev["curr"] in allowed_currencies):
-                    future_events.append(ev)
-        
-        future_events.sort(key=lambda x: x["when"])
-        return future_events[:max(0, limit)]
-    except Exception:
-        logger.error("Lỗi trong next_events_for_symbol.", exc_info=True)
-        return []
+                dt_utc = datetime.strptime(str(event["Date"]), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=pytz.utc)
+                transformed.append({
+                    "id": event_id, "when_utc": dt_utc, "title": event.get("Event"),
+                    "country": event.get("Country"), "impact": event.get("Importance"), "source": "TE"
+                })
+                self._dedup_ids.add(event_id)
+            except (ValueError, KeyError, TypeError) as e:
+                logger.warning(f"Bỏ qua sự kiện TE không hợp lệ: {event}. Lỗi: {e}")
+        return transformed
+
+    def _filter_high_impact(self, events: list[dict]) -> list[dict]:
+        """Lọc các sự kiện có impact cao hoặc có trong danh sách ưu tiên."""
+        high_impact_events = []
+        for event in events:
+            impact = str(event.get("impact", "")).lower()
+            title = str(event.get("title", "")).lower()
+            is_high = impact in {"high", "3"}
+            is_priority = any(keyword in title for keyword in HIGH_IMPACT_KEYWORDS)
+            if is_high or is_priority:
+                high_impact_events.append(event)
+        return high_impact_events
+
+    def _symbol_to_currencies(self, sym: str) -> set[str]:
+        """Phân tích symbol để tìm các tiền tệ liên quan."""
+        s = (sym or "").upper()
+        tokens = set(re.findall(r"[A-Z]{3}", s))
+        if "XAU" in s or "GOLD" in s: tokens.add("USD")
+        if any(k in s for k in ("US30", "SPX", "NDX")): tokens.add("USD")
+        return tokens
+
+    def _get_countries_for_symbol(self, symbol: str) -> set[str]:
+        """Lấy danh sách các quốc gia/khu vực liên quan đến một symbol."""
+        currencies = self._symbol_to_currencies(symbol)
+        countries = set()
+        for curr in currencies:
+            countries.update(CURRENCY_COUNTRY_MAP.get(curr, set()))
+        return countries
+
+    def _format_timedelta(self, td: timedelta) -> str:
+        """Định dạng timedelta thành chuỗi 'Xh Ym' dễ đọc."""
+        total_seconds = int(td.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"

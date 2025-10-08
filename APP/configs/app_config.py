@@ -108,6 +108,21 @@ class AutoTradeConfig:
 
 
 @dataclass(frozen=True)
+class FMPConfig:
+    """Cấu hình cho Financial Modeling Prep API."""
+    enabled: bool
+    api_key: str
+
+
+@dataclass(frozen=True)
+class TEConfig:
+    """Cấu hình cho Trading Economics API."""
+    enabled: bool
+    api_key: str
+    skip_ssl_verify: bool = False
+
+
+@dataclass(frozen=True)
 class NewsConfig:
     """Cấu hình liên quan đến tin tức."""
     block_enabled: bool
@@ -140,6 +155,15 @@ class ApiConfig:
 
 
 @dataclass(frozen=True)
+class ChartConfig:
+    """Cấu hình cho tab biểu đồ."""
+    timeframe: str = "M15"
+    num_candles: int = 150
+    chart_type: str = "Nến"
+    refresh_interval_secs: int = 5
+
+
+@dataclass(frozen=True)
 class RunConfig:
     """
     Snapshot cấu hình đã được nhóm lại cho một lần chạy phân tích.
@@ -154,7 +178,10 @@ class RunConfig:
     no_trade: NoTradeConfig
     auto_trade: AutoTradeConfig
     news: NewsConfig
+    fmp: FMPConfig
+    te: TEConfig
     persistence: PersistenceConfig
+    chart: ChartConfig = field(default_factory=ChartConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
