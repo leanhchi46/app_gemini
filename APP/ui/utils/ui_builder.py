@@ -53,6 +53,7 @@ def _create_labeled_spinbox(
 
 def _create_listbox_with_controls(
     parent: tk.Widget,
+    app: "AppUI",
     title: str,
     listbox_attr_name: str,
     callbacks: Dict[str, Callable[[], None]],
@@ -66,7 +67,8 @@ def _create_listbox_with_controls(
 
     listbox = tk.Listbox(col_frame, exportselection=False)
     listbox.grid(row=1, column=0, sticky="nsew")
-    setattr(parent, listbox_attr_name, listbox)
+    # Sửa lỗi nghiêm trọng: Gán widget vào đối tượng `app` chính, không phải `parent`.
+    setattr(app, listbox_attr_name, listbox)
 
     scrollbar = ttk.Scrollbar(col_frame, orient="vertical", command=listbox.yview)
     listbox.configure(yscrollcommand=scrollbar.set)
@@ -87,7 +89,13 @@ def _create_listbox_with_controls(
     if delete_cmd:
         ttk.Button(buttons_frame, text="Xoá", command=delete_cmd).pack(side="left", padx=6)
     if folder_cmd:
-        ttk.Button(buttons_frame, text="Thư mục", command=folder_cmd).pack(side="left", padx=6)
+        ttk.Button(buttons_frame, text="Thư mục", command=folder_cmd).pack(side="left")
+    
+    # Thêm nút làm mới thủ công để gỡ lỗi
+    refresh_cmd = callbacks.get("refresh")
+    if refresh_cmd:
+        ttk.Button(buttons_frame, text="Làm mới", command=refresh_cmd).pack(side="right", padx=(6, 0))
+
 
     return col_frame
 
@@ -198,10 +206,29 @@ def _build_report_tab(app: "AppUI") -> None:
     archives.columnconfigure(1, weight=1)
     archives.rowconfigure(0, weight=1)
 
-    hist_frame = _create_listbox_with_controls(archives, "History (.md)", "history_list", {"preview": app.history_manager.preview_history_selected, "open": app.history_manager.open_history_selected, "delete": app.history_manager.delete_history_selected, "folder": app.history_manager.open_reports_folder})
+    # Cập nhật: Loại bỏ callback "preview" vì FileListView đã tự xử lý sự kiện bind.
+    # Các callback khác hoạt động nhờ lớp tương thích trong HistoryManager.
+    hist_callbacks = {
+        "open": app.history_manager.open_history_selected,
+        "delete": app.history_manager.delete_history_selected,
+        "folder": app.history_manager.open_reports_folder,
+        "refresh": app.history_manager.refresh_history_list, # Thêm callback làm mới
+    }
+    hist_frame = _create_listbox_with_controls(
+        archives, app, "History (.md)", "history_list", hist_callbacks
+    )
     hist_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
 
-    json_frame = _create_listbox_with_controls(archives, "JSON (ctx_*.json)", "json_list", {"preview": app.history_manager.preview_json_selected, "open": app.history_manager.open_json_selected, "delete": app.history_manager.delete_json_selected, "folder": app.history_manager.open_json_folder})
+    # Cập nhật: open_json_folder được thay thế bằng open_reports_folder.
+    json_callbacks = {
+        "open": app.history_manager.open_json_selected,
+        "delete": app.history_manager.delete_json_selected,
+        "folder": app.history_manager.open_reports_folder,
+        "refresh": app.history_manager.refresh_json_list, # Thêm callback làm mới
+    }
+    json_frame = _create_listbox_with_controls(
+        archives, app, "JSON (ctx_*.json)", "json_list", json_callbacks
+    )
     json_frame.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
 
     # Right Panel
