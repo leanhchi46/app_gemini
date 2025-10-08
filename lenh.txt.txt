@@ -1,12 +1,28 @@
  sử dụng cú pháp PlantUML để mô tả nó
 ------------------------------------------
+bạn hãy kiểm tra lại các logic trong toàn dự án @/APP và đề xuất cho tôi nên tách thêm các logic nào chạy luồng độc lập hay không? Tôi nghĩ chạy đa luồng trong toàn dự án sẽ giảm thiểu thời gian và tránh treo phần mềm.
+tôi muốn kiểm tra logic đồng bộ với toàn dự án @/APP để tránh lỗi. 
+tôi muốn toàn bộ dự án được liên kết logic với nhau chứ không phải sửa cục bộ.
+Kiểm tra @problems sau mỗi lần hoàn thành file để đảm bảo không bị lỗi code.
+Chú ý: cập nhật UI (giao diện) để đúng với logic.
+---------------------------------------------------
+bạn hãy kiểm tra lại các logic trong toàn dự án @/APP và rà soát thêm các logic khác ngoài logic chính sau đó đề xuất cho tôi nên tách thêm các logic nào chạy luồng độc lập hay không? Tôi nghĩ chạy đa luồng trong toàn dự án sẽ giảm thiểu thời gian và tránh treo phần mềm.
+tôi muốn kiểm tra logic đồng bộ với toàn dự án @/APP để tránh lỗi.
+tôi muốn toàn bộ dự án được liên kết logic với nhau chứ không phải sửa cục bộ.
+Kiểm tra @problems sau mỗi lần hoàn thành file để đảm bảo không bị lỗi code.
+Chú ý: cập nhật UI (giao diện) để đúng với logic.
+-----------------------------------------
+Rà soát các Logic khác và Kế hoạch Tiếp theo:
+-------------------------
+
 khởi chạy dự án bằng python APP/main.py, đọc @terminal để check lỗi và fix lỗi cho đến khi hết lỗi.
 nếu có lỗi đọc kỹ và Kiểm tra đồng bộ với toàn dự án @/APP để tránh lỗi. 
 tôi muốn toàn bộ dự án được liên kết logic với nhau chứ không phải sửa cục bộ.
 Kiểm tra @problems sau mỗi lần hoàn thành file để đảm bảo không bị lỗi code.
 Chú ý: cập nhật UI (giao diện) để đúng với logic.
 ------------------------------------
-tôi muốn kiểm tra logic đồng bộ với toàn dự án @/APP để tránh lỗi. 
+tôi muốn kiểm tra logic đồng bộ với toàn dự án @/APP để tránh lỗi.
+V 
 tôi muốn toàn bộ dự án được liên kết logic với nhau chứ không phải sửa cục bộ.
 Kiểm tra @problems sau mỗi lần hoàn thành file để đảm bảo không bị lỗi code.
 Chú ý: cập nhật UI (giao diện) để đúng với logic.
@@ -47,3 +63,27 @@ Kiểm tra đồng bộ với toàn dự án @/APP để tránh lỗi
 ---------------------
 tôi muốn chú thích 1. Mô tả chức năng và 2. Đánh giá Logic và Code của file  vào file rule-tool.txt để cline ghi nhớ
 ------------------------------------------------------
+cài môi trường .venv/Scripts/Activate.ps1
+Tôi đã kiểm tra và thấy rằng thư mục môi trường ảo `.venv` không tồn tại. Để cài đặt và kích hoạt môi trường ảo, bạn cần thực hiện các bước sau:
+
+1.  **Tạo môi trường ảo**:
+    Chạy lệnh sau trong terminal của bạn:
+    ```bash
+    python -m venv .venv
+    ```
+    Lệnh này sẽ tạo một thư mục `.venv` chứa môi trường ảo.
+
+2.  **Kích hoạt môi trường ảo**:
+    Sau khi môi trường ảo được tạo, bạn có thể kích hoạt nó bằng lệnh sau (dành cho PowerShell trên Windows):
+    ```powershell
+    .venv\Scripts\Activate.ps1
+    ```
+    Nếu bạn đang sử dụng Command Prompt hoặc Git Bash, lệnh sẽ khác.
+
+3.  **Cài đặt các gói phụ thuộc**:
+    Sau khi kích hoạt môi trường ảo, bạn cần cài đặt các gói phụ thuộc của dự án. Đảm bảo bạn có file `requirements.txt` trong thư mục gốc của dự án, sau đó chạy:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+Bạn có muốn tôi chuyển sang chế độ Act Mode để thực hiện các bước này không?
