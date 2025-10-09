@@ -31,7 +31,6 @@ from APP.configs.app_config import (ApiConfig, AutoTradeConfig, ChartConfig,
                                     PersistenceConfig, RunConfig, TEConfig,
                                     TelegramConfig, UploadConfig)
 from APP.configs.constants import FILES, MODELS, PATHS
-from APP.core.analysis_worker import AnalysisWorker
 from APP.services import gemini_service, mt5_service
 from APP.services.news_service import NewsService
 from APP.ui.components.chart_tab import ChartTab
@@ -40,6 +39,7 @@ from APP.ui.components.news_tab import NewsTab
 from APP.ui.components.prompt_manager import PromptManager
 from APP.ui.utils import ui_builder
 from APP.ui.utils.timeframe_detector import TimeframeDetector
+from APP.ui.controllers import AnalysisController, NewsController
 from APP.utils import general_utils
 from APP.utils.safe_data import SafeData
 from APP.utils.threading_utils import ThreadingManager
@@ -168,7 +168,19 @@ class AppUI:
         # Locks, Events, and Queues
         self._trade_log_lock = threading.Lock()
         self.ui_queue: queue.Queue[Any] = queue.Queue()
-        self.stop_event = threading.Event()
+
+        # Facade điều phối đa luồng mới
+        self.analysis_controller = AnalysisController(self.threading_manager, self.ui_queue)
+        self.news_service = NewsService()
+        self.news_service.set_update_callback(self._on_news_updated)
+        self.news_controller = NewsController(
+            threading_manager=self.threading_manager,
+            news_service=self.news_service,
+            ui_queue=self.ui_queue,
+            backlog_limit=50,
+        )
+        self._current_session_id: Optional[str] = None
+        self._news_polling_started = False
 
         # UI Widget Attributes (khai báo trước để pyright nhận diện)
         self.tree: Optional[ttk.Treeview] = None
@@ -210,19 +222,12 @@ class AppUI:
         self.stop_flag = False
         self.results: list[dict] = []
         self.combined_report_text = ""
-        self.active_worker_thread: Optional[threading.Thread] = None
-        self.active_executor = None
         self._autorun_job: Optional[str] = None
         self._mt5_reconnect_job: Optional[str] = None
         self._mt5_check_connection_job: Optional[str] = None
 
         # Initialize Tkinter variables
         self._init_tk_variables()
-
-        # Khởi tạo các service chạy nền
-        self.news_service = NewsService()
-        self.news_service.set_update_callback(self._on_news_updated)
-        self.news_service.start()
 
         # Initialize component managers BEFORE building the UI
         # This is crucial because the UI builder needs access to these managers.
@@ -306,24 +311,20 @@ class AppUI:
         if self._mt5_check_connection_job:
             self.root.after_cancel(self._mt5_check_connection_job)
 
-        # 2. Gửi tín hiệu dừng cho luồng worker
-        self.stop_event.set()
-        self.stop_flag = True # Giữ lại để tương thích ngược
-        
-        # 3. Chờ luồng worker kết thúc (với timeout)
-        if self.active_worker_thread and self.active_worker_thread.is_alive():
-            logger.debug("Đang chờ luồng AnalysisWorker kết thúc...")
-            self.active_worker_thread.join(timeout=5.0)
-            if self.active_worker_thread.is_alive():
-                logger.warning("Luồng AnalysisWorker không kết thúc kịp thời.")
+        # 2. Gửi tín hiệu dừng cho các controller nền
+        if self._current_session_id:
+            logger.info("Yêu cầu hủy session phân tích %s trong quá trình shutdown.", self._current_session_id)
+            self.stop_flag = True
+            self.analysis_controller.stop_session(self._current_session_id)
 
-        # 4. Dừng các thành phần UI và services
+        if self.news_controller:
+            self.news_controller.stop_polling()
+
+        # 3. Dừng các thành phần UI phụ thuộc controller
         if self.chart_tab:
             self.chart_tab.stop()
-        if self.news_service:
-            self.news_service.stop()
 
-        # 5. Lưu cấu hình
+        # 4. Lưu cấu hình
         try:
             config_data = self._collect_config_data()
             workspace_config.save_config_to_file(config_data)
@@ -331,13 +332,17 @@ class AppUI:
         except Exception:
             logger.exception("Lỗi khi lưu cấu hình workspace trong quá trình tắt.")
 
-        # 6. Ngắt kết nối MT5
+        # 5. Ngắt kết nối MT5
         mt5_service.shutdown()
 
-        # 7. Tắt ThreadingManager
-        self.threading_manager.shutdown(wait=True, timeout=2.0)
-        
-        # 8. Phá hủy cửa sổ UI
+        # 6. Chờ các nhóm task nền hoàn tất trước khi tắt executor
+        self.threading_manager.await_idle("analysis.session", timeout=10.0)
+        self.threading_manager.await_idle("analysis.upload", timeout=5.0)
+        self.threading_manager.await_idle("news.polling", timeout=5.0)
+        self.threading_manager.await_idle("chart.refresh", timeout=5.0)
+        self.threading_manager.shutdown(wait=True, timeout=5.0)
+
+        # 7. Phá hủy cửa sổ UI
         self.root.destroy()
         logger.info("Ứng dụng đã đóng thành công.")
 
@@ -911,13 +916,15 @@ class AppUI:
             ui_builder.enqueue(self, lambda: self.ui_status("Lỗi khi tải workspace."))
 
     # --- Action Methods ---
-    def start_analysis(self):
-        """Bắt đầu một phiên phân tích mới."""
-        logger.info("Yêu cầu bắt đầu phân tích từ UI.")
+    def start_analysis(self, *, source: str = "manual"):
+        """Bắt đầu một phiên phân tích mới thông qua AnalysisController."""
+
+        logger.info("Yêu cầu bắt đầu phân tích từ UI (source=%s).", source)
         if self.is_running:
             self.show_error_message("Đang chạy", "Một phân tích khác đang chạy.")
             logger.warning("Yêu cầu bắt đầu phân tích bị từ chối: một tiến trình khác đang chạy.")
             return
+
         folder = self.folder_path.get()
         if not folder or not Path(folder).is_dir():
             self.show_error_message("Lỗi", "Vui lòng chọn một thư mục hợp lệ.")
@@ -926,27 +933,30 @@ class AppUI:
 
         self.is_running = True
         self.stop_flag = False
-        self.stop_event.clear() # Reset lại event trước mỗi lần chạy
         ui_builder.toggle_controls_state(self, "disabled")
+
         cfg = self._snapshot_config()
         self.run_config = cfg
 
         # Cập nhật cấu hình cho các service trước khi chạy
         self._update_services_config()
 
-        worker_instance = AnalysisWorker(app=self, cfg=cfg, stop_event=self.stop_event)
-        self.active_worker_thread = threading.Thread(target=worker_instance.run, daemon=True)
-        self.active_worker_thread.start()
-        logger.info("Đã khởi tạo và bắt đầu luồng AnalysisWorker.")
+        session_prefix = "autorun" if source == "autorun" else "manual"
+        session_id = datetime.now().strftime(f"{session_prefix}-%Y%m%d-%H%M%S")
+        self._current_session_id = session_id
+        self.analysis_controller.start_session(session_id, self, cfg)
+        self.ui_status("Đang chạy phân tích...")
+        logger.info("Đã gửi phiên phân tích %s tới ThreadingManager.", session_id)
 
     def stop_analysis(self):
-        """Gửi tín hiệu dừng cho luồng worker đang chạy."""
-        if not self.is_running:
+        """Gửi tín hiệu dừng cho phiên phân tích hiện tại."""
+
+        if not self.is_running or not self._current_session_id:
             return
-        logger.info("Yêu cầu dừng phân tích từ UI.")
+
+        logger.info("Yêu cầu dừng phân tích từ UI (session=%s).", self._current_session_id)
         self.stop_flag = True
-        if self.active_executor:
-            self.active_executor.shutdown(wait=False, cancel_futures=True)
+        self.analysis_controller.stop_session(self._current_session_id)
         self.ui_status("Đang dừng...")
 
     def choose_folder(self):
@@ -1247,6 +1257,7 @@ class AppUI:
         """Hoàn tất tác vụ khi bị dừng."""
         self.is_running = False
         self.stop_flag = False
+        self._current_session_id = None
         self.ui_status("Đã dừng bởi người dùng.")
         self.ui_progress(0)
         ui_builder.toggle_controls_state(self, "normal")
@@ -1256,6 +1267,7 @@ class AppUI:
         """Hoàn tất tác vụ khi chạy xong."""
         self.is_running = False
         self.stop_flag = False
+        self._current_session_id = None
         self.ui_status("Hoàn tất.")
         self.ui_progress(100)
         ui_builder.toggle_controls_state(self, "normal")
@@ -1329,7 +1341,7 @@ class AppUI:
 
         logger.info("Autorun tick worker: Điều kiện hợp lệ, yêu cầu bắt đầu phân tích trên luồng UI.")
         # Yêu cầu start_analysis chạy trên luồng chính để đảm bảo an toàn cho UI
-        self.ui_queue.put(self.start_analysis)
+        self.ui_queue.put(lambda: self.start_analysis(source="autorun"))
 
     # --- MT5 Methods ---
     def _pick_mt5_terminal(self):
@@ -1426,6 +1438,29 @@ class AppUI:
         current_config = self._snapshot_config()
         if self.news_service:
             self.news_service.update_config(current_config)
+        if self.news_controller:
+            if not self._news_polling_started:
+                # Khởi động polling ngay lần đầu tiên có cấu hình hợp lệ
+                self.news_controller.start_polling(self._handle_news_refresh_payload)
+                self._news_polling_started = True
+            else:
+                # Các lần cập nhật tiếp theo chỉ cần kích hoạt refresh lại
+                self.news_controller.trigger_autorun(force=True)
+
+    def _handle_news_refresh_payload(self, payload: Dict[str, Any]) -> None:
+        """Cập nhật trạng thái UI khi NewsController hoàn tất một vòng refresh."""
+
+        events = payload.get("events", [])
+        source = payload.get("source", "unknown")
+        priority = payload.get("priority", "autorun")
+        latency = payload.get("latency_sec", 0.0)
+
+        self.news_events = events
+        self.news_fetch_time = latency
+        status = f"Tin tức cập nhật ({source}/{priority}, {len(events)} sự kiện)."
+        if latency:
+            status += f" Độ trễ: {latency:.2f}s."
+        self.ui_status(status)
 
     def _on_news_updated(self, events: List[Dict[str, Any]]):
         """
