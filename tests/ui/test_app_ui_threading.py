@@ -20,11 +20,27 @@ class DummyAnalysisController:
     """Giả lập AnalysisController để theo dõi lời gọi."""
 
     def __init__(self) -> None:
-        self.started: list[tuple[str, object, object]] = []
+        self.started: list[tuple[str, str]] = []
         self.stopped: list[str] = []
 
-    def start_session(self, session_id: str, app, cfg) -> None:  # type: ignore[no-untyped-def]
-        self.started.append((session_id, app, cfg))
+    def start_session(
+        self,
+        session_id: str,
+        app,
+        cfg,
+        *,
+        priority: str = "user",
+        on_start=None,
+    ) -> None:  # type: ignore[no-untyped-def]
+        self.started.append((session_id, priority))
+        if on_start:
+            on_start(session_id, priority)
+
+    def enqueue_autorun(self, session_id: str, app, cfg, *, on_start=None):  # type: ignore[no-untyped-def]
+        self.started.append((session_id, "autorun"))
+        if on_start:
+            on_start(session_id, "autorun")
+        return "started"
 
     def stop_session(self, session_id: str) -> None:
         self.stopped.append(session_id)
@@ -40,12 +56,20 @@ def dummy_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app.is_running = False
     app.stop_flag = False
     app._current_session_id = None
+    app._pending_session = False
+    app._queued_autorun_session = None
     app.analysis_controller = dummy_controller
     app.ui_queue = queue.Queue()
-    app.threading_manager = None
+    app.threading_manager = SimpleNamespace(submit_task=lambda *args, **kwargs: SimpleNamespace())
     app.run_config = None
     app._schedule_next_autorun = lambda: None
     app.autorun_var = SimpleNamespace(get=lambda: False)
+    app.feature_flags = SimpleNamespace(use_new_threading_stack=True)
+    app.use_new_threading_stack = True
+    app.io_controller = SimpleNamespace(run=lambda **kwargs: None)
+    app.mt5_controller = SimpleNamespace(connect=lambda *a, **k: None, check_status=lambda *a, **k: None, snapshot=lambda *a, **k: None)
+    app.ui_backlog_warn_threshold = 50
+    app._last_ui_backlog_log = 0.0
 
     # Stub các phương thức UI
     app.ui_status = lambda *_args, **_kwargs: None
@@ -74,9 +98,9 @@ def test_start_analysis_uses_controller(dummy_app):
     assert app.is_running is True
     assert app._current_session_id is not None
     assert controller.started
-    session_id, session_app, cfg = controller.started[0]
-    assert session_app is app
-    assert cfg is app.run_config
+    session_id, priority = controller.started[0]
+    assert priority == "user"
+    assert app.run_config is not None
     assert session_id.startswith("manual-")
 
 

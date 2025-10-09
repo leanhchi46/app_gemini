@@ -10,7 +10,7 @@ Tài liệu này đối chiếu tiến độ thực tế với Work Breakdown St
 | 8.2 | ChartTab refactor | Hoàn tất | `ChartController` điều phối task group `chart.refresh`, backlog guard được test. |
 | 8.3 | NewsService refactor | Hoàn tất | `NewsController` + timeout provider 20s, ưu tiên người dùng qua `refresh_now`. |
 | 8.4 | AnalysisWorker refactor | Hoàn tất | `AnalysisController` quản lý session, pipeline dùng `CancelToken` và giới hạn upload ≤10 ảnh. |
-| 8.5 | AppUI tích hợp & shutdown | **Đang dở dang** | AppUI đã dùng controller cho start/stop nhưng vẫn còn nhiều lời gọi `submit_task` legacy, chưa có feature flag tổng & UI queue monitor. |
+| 8.5 | AppUI tích hợp & shutdown | Hoàn tất | AppUI dùng facade IO/MT5 mới, autorun ưu tiên người dùng, shutdown dialog + UI queue monitor và feature flag rollback đã kích hoạt. |
 
 ## Chi tiết theo hạng mục
 
@@ -35,14 +35,12 @@ Tài liệu này đối chiếu tiến độ thực tế với Work Breakdown St
 - Unit test đảm bảo `stop_session` cancel cả `analysis.session` lẫn `analysis.upload` như checklist.【F:tests/core/test_analysis_controller.py†L64-L76】
 
 ### 8.5 Module AppUI & Shutdown
-- AppUI đã gọi `AnalysisController` trong `start_analysis/stop_analysis`, đáp ứng yêu cầu ưu tiên thao tác người dùng.【F:APP/ui/app_ui.py†L918-L960】
-- Tuy nhiên vẫn còn nhiều worker UI sử dụng `threading_manager.submit_task` legacy (`_scan_folder_worker`, export, MT5, v.v.), nên checklist "UI chỉ tương tác qua Facade" chưa đạt.【F:APP/ui/app_ui.py†L989-L1026】
-- Chưa có feature flag tổng `USE_NEW_THREADING_STACK`, UI queue monitor hay cập nhật shutdown dialog như mục 8.5.2-8.5.3; cần triển khai tiếp để đáp ứng bảng checklist.【F:docs/multithreading_refactor_plan.md†L301-L314】
+- AppUI tương tác với tất cả worker nền thông qua `AnalysisController`, `IOController`, `MT5Controller`, bảo đảm không còn lời gọi `submit_task` trực tiếp.【F:APP/ui/app_ui.py†L262-L1660】【F:APP/ui/controllers/io_controller.py†L1-L66】【F:APP/ui/controllers/mt5_controller.py†L1-L88】
+- Autorun ưu tiên thao tác người dùng thông qua hàng đợi trong `AnalysisController.enqueue_autorun`, có unit test mô phỏng race condition.【F:APP/core/analysis_controller.py†L18-L134】【F:tests/core/test_analysis_controller.py†L76-L105】
+- Quy trình shutdown hiển thị `ShutdownDialog`, log backlog UI, chờ toàn bộ TaskGroup qua `await_idle` rồi mới hạ executor; test end-to-end xác nhận thứ tự gọi.【F:APP/ui/app_ui.py†L252-L362】【F:APP/ui/utils/ui_builder.py†L640-L726】【F:tests/ui/test_app_ui_shutdown.py†L1-L73】
+- README mô tả facade mới, UI queue monitor và feature flag rollback phục vụ đội vận hành.【F:README.md†L1-L53】
 
 ## Đề xuất bước tiếp theo
-1. **Hoàn tất 8.5.1**: thay thế các lời gọi `threading_manager.submit_task` còn lại trong AppUI bằng facade chuyên trách (tạo thêm controller cho MT5/file I/O nếu cần) và bổ sung feature flag tổng cho phép rollback.【F:APP/ui/app_ui.py†L989-L1026】【F:docs/multithreading_refactor_plan.md†L301-L314】
-2. **Triển khai 8.5.2**: hiện thực hoá hàng đợi ưu tiên Autorun vs thao tác tay dựa trên API controller mới, kèm unit test mô phỏng race condition như hướng dẫn.【F:docs/multithreading_refactor_plan.md†L303-L333】
-3. **Triển khai 8.5.3**: sử dụng `ThreadingManager.await_idle`/`shutdown` trong quy trình đóng app, bổ sung dialog tiến trình và logging backlog UI, đồng thời viết test end-to-end theo checklist.【F:APP/utils/threading_utils.py†L217-L242】【F:docs/multithreading_refactor_plan.md†L303-L337】
-4. **8.5.4 Tài liệu**: cập nhật README/hướng dẫn vận hành để mô tả facade mới, UI queue monitor và feature flag rollback theo checklist tài liệu.【F:docs/multithreading_refactor_plan.md†L301-L314】
-
-Hoàn thành các hạng mục trên sẽ kết thúc Sprint 6 trong kế hoạch và thoả tiêu chí tổng thể của dự án.【F:docs/multithreading_refactor_plan.md†L353-L361】
+1. Theo dõi QA regression với cả hai chế độ feature flag (`USE_NEW_THREADING_STACK=0/1`) trước khi phát hành chính thức.
+2. Thu thập feedback thực tế về ShutdownDialog và ngưỡng backlog để tinh chỉnh `ui_backlog_warn_threshold` nếu cần.
+3. Chuẩn bị checklist rollout production (scripts bật/tắt flag, hướng dẫn giám sát log) cho buổi handover với đội vận hành.【F:docs/multithreading_test_plan.md†L90-L123】

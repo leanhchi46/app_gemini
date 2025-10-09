@@ -66,6 +66,7 @@ def test_start_session_records_metadata(controller):
     ctrl.start_session("sess-1", app=None, cfg=None)
     assert tm.submitted[0]["kwargs"]["group"] == "analysis.session"
     assert tm.submitted[0]["kwargs"]["metadata"]["session_id"] == "sess-1"
+    assert tm.submitted[0]["kwargs"]["metadata"]["priority"] == "user"
 
 
 def test_stop_session_triggers_cancel(controller):
@@ -74,3 +75,29 @@ def test_stop_session_triggers_cancel(controller):
     ctrl.stop_session("sess-2")
     assert "analysis.upload" in tm.cancelled
     assert "analysis.session" in tm.cancelled
+
+
+def test_autorun_is_queued_until_manual_finishes(controller):
+    ctrl, tm = controller
+    started: list[tuple[str, str]] = []
+    ctrl.start_session("manual-1", app=None, cfg=None, on_start=lambda sid, pri: started.append((sid, pri)))
+
+    status = ctrl.enqueue_autorun(
+        "autorun-1",
+        app=None,
+        cfg=None,
+        on_start=lambda sid, pri: started.append((sid, pri)),
+    )
+
+    assert status == "queued"
+    assert len(tm.submitted) == 1  # chỉ có phiên manual đang chạy
+
+    # Giải phóng future của phiên manual để kích hoạt autorun
+    tm.submitted[0]["record"].future.set_result({"status": "done"})
+
+    while not ctrl._ui_queue.empty():
+        ctrl._ui_queue.get_nowait()()
+
+    assert len(tm.submitted) == 2
+    assert tm.submitted[1]["kwargs"]["metadata"]["priority"] == "autorun"
+    assert started[-1] == ("autorun-1", "autorun")

@@ -18,12 +18,14 @@ from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
+from time import monotonic
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
 from google.api_core import exceptions
 
 from APP.configs import workspace_config
+from APP.configs.feature_flags import FEATURE_FLAGS
 from APP.configs.app_config import (ApiConfig, AutoTradeConfig, ChartConfig,
                                     ContextConfig, FMPConfig, FolderConfig,
                                     ImageProcessingConfig, MT5Config,
@@ -39,7 +41,8 @@ from APP.ui.components.news_tab import NewsTab
 from APP.ui.components.prompt_manager import PromptManager
 from APP.ui.utils import ui_builder
 from APP.ui.utils.timeframe_detector import TimeframeDetector
-from APP.ui.controllers import AnalysisController, NewsController
+from APP.ui.controllers import (AnalysisController, IOController,
+                                MT5Controller, NewsController)
 from APP.utils import general_utils
 from APP.utils.safe_data import SafeData
 from APP.utils.threading_utils import ThreadingManager
@@ -82,6 +85,8 @@ class AppUI:
 
         # Threading Manager
         self.threading_manager = ThreadingManager()
+        self.feature_flags = FEATURE_FLAGS
+        self.use_new_threading_stack = self.feature_flags.use_new_threading_stack
 
         # Component Managers (initialized below)
         self.history_manager: HistoryManager
@@ -168,6 +173,10 @@ class AppUI:
         # Locks, Events, and Queues
         self._trade_log_lock = threading.Lock()
         self.ui_queue: queue.Queue[Any] = queue.Queue()
+        self.ui_backlog_warn_threshold = 50
+        self._last_ui_backlog_log = 0.0
+        self._pending_session = False
+        self._queued_autorun_session: Optional[str] = None
 
         # Facade điều phối đa luồng mới
         self.analysis_controller = AnalysisController(self.threading_manager, self.ui_queue)
@@ -179,6 +188,8 @@ class AppUI:
             ui_queue=self.ui_queue,
             backlog_limit=50,
         )
+        self.io_controller = IOController(self.threading_manager, enabled=self.use_new_threading_stack)
+        self.mt5_controller = MT5Controller(self.threading_manager, enabled=self.use_new_threading_stack)
         self._current_session_id: Optional[str] = None
         self._news_polling_started = False
 
@@ -261,19 +272,20 @@ class AppUI:
 
     def _run_in_background(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Future:
         """
-        Chạy một tác vụ trong luồng nền bằng cách sử dụng ThreadingManager.
-
-        Đây là một phương thức tiện ích để các thành phần con có thể dễ dàng
-        gửi các tác vụ mà không cần truy cập trực tiếp vào threading_manager.
-
-        Args:
-            func (Callable): Hàm hoặc phương thức cần thực thi.
-            *args: Các đối số vị trí cho hàm.
-            **kwargs: Các đối số từ khóa cho hàm.
-
-        Returns:
-            Future: Một đối tượng Future đại diện cho việc thực thi tác vụ.
+        Chạy worker nền thông qua IOController để thống nhất logging/feature flag.
         """
+
+        task_name = getattr(func, "__name__", "anonymous")
+        record = self.io_controller.run(
+            worker=func,
+            args=args,
+            kwargs=kwargs,
+            group="ui.misc",
+            name=f"ui.misc.{task_name}",
+            metadata={"component": "ui", "operation": task_name},
+        )
+        if record:
+            return record.future
         return self.threading_manager.submit_task(func, *args, **kwargs)
 
     def _check_api_key_on_startup(self):
@@ -305,6 +317,10 @@ class AppUI:
         self.is_shutting_down = True
         logger.info("Bắt đầu quy trình tắt ứng dụng an toàn.")
 
+        shutdown_dialog = ui_builder.create_shutdown_dialog(self.root) if self.use_new_threading_stack else None
+        if shutdown_dialog:
+            shutdown_dialog.update_progress("Đang chuẩn bị dừng các tác vụ nền...", 5)
+
         # 1. Dừng các tác vụ lặp lại
         if self._autorun_job:
             self.root.after_cancel(self._autorun_job)
@@ -324,6 +340,9 @@ class AppUI:
         if self.chart_tab:
             self.chart_tab.stop()
 
+        if shutdown_dialog:
+            shutdown_dialog.update_progress("Đang lưu cấu hình và ngắt kết nối...", 25)
+
         # 4. Lưu cấu hình
         try:
             config_data = self._collect_config_data()
@@ -335,6 +354,14 @@ class AppUI:
         # 5. Ngắt kết nối MT5
         mt5_service.shutdown()
 
+        backlog = self.ui_queue.qsize()
+        logger.info("UI queue backlog khi shutdown: %s", backlog)
+        if backlog > self.ui_backlog_warn_threshold:
+            logger.warning("UI queue backlog vượt ngưỡng trong quá trình shutdown.")
+
+        if shutdown_dialog:
+            shutdown_dialog.update_progress("Đang chờ tác vụ nền hoàn tất...", 60)
+
         # 6. Chờ các nhóm task nền hoàn tất trước khi tắt executor
         self.threading_manager.await_idle("analysis.session", timeout=10.0)
         self.threading_manager.await_idle("analysis.upload", timeout=5.0)
@@ -342,8 +369,13 @@ class AppUI:
         self.threading_manager.await_idle("chart.refresh", timeout=5.0)
         self.threading_manager.shutdown(wait=True, timeout=5.0)
 
+        if shutdown_dialog:
+            shutdown_dialog.update_progress("Hoàn tất. Đang đóng cửa sổ...", 95)
+
         # 7. Phá hủy cửa sổ UI
         self.root.destroy()
+        if shutdown_dialog:
+            shutdown_dialog.close()
         logger.info("Ứng dụng đã đóng thành công.")
 
     def _init_tk_variables(self):
@@ -873,7 +905,13 @@ class AppUI:
         logger.info("Yêu cầu lưu workspace từ UI.")
         self.ui_status("Đang lưu workspace...")
         config_data = self._collect_config_data()
-        self.threading_manager.submit_task(self._save_workspace_worker, config_data)
+        self.io_controller.run(
+            worker=self._save_workspace_worker,
+            args=(config_data,),
+            group="ui.workspace",
+            name="ui.workspace.save",
+            metadata={"component": "ui", "operation": "save_workspace"},
+        )
 
     def _save_workspace_worker(self, config_data: dict):
         """Worker chạy nền để ghi file workspace."""
@@ -891,7 +929,12 @@ class AppUI:
         """Bắt đầu quá trình tải cấu hình workspace trong luồng nền."""
         logger.info("Yêu cầu tải workspace từ UI.")
         self.ui_status("Đang tải workspace...")
-        self.threading_manager.submit_task(self._load_workspace_worker)
+        self.io_controller.run(
+            worker=self._load_workspace_worker,
+            group="ui.workspace",
+            name="ui.workspace.load",
+            metadata={"component": "ui", "operation": "load_workspace"},
+        )
 
     def _load_workspace_worker(self):
         """Worker chạy nền để đọc file workspace."""
@@ -916,13 +959,18 @@ class AppUI:
             ui_builder.enqueue(self, lambda: self.ui_status("Lỗi khi tải workspace."))
 
     # --- Action Methods ---
-    def start_analysis(self, *, source: str = "manual"):
+    def start_analysis(self, *, source: str = "manual") -> None:
         """Bắt đầu một phiên phân tích mới thông qua AnalysisController."""
 
         logger.info("Yêu cầu bắt đầu phân tích từ UI (source=%s).", source)
-        if self.is_running:
-            self.show_error_message("Đang chạy", "Một phân tích khác đang chạy.")
-            logger.warning("Yêu cầu bắt đầu phân tích bị từ chối: một tiến trình khác đang chạy.")
+
+        if source == "autorun":
+            self._request_autorun_start()
+            return
+
+        if self.is_running or self._pending_session:
+            self.show_error_message("Đang chạy", "Một phân tích khác đang chạy hoặc đang được xếp lịch.")
+            logger.warning("Bỏ qua start_analysis vì đang có phiên khác xử lý.")
             return
 
         folder = self.folder_path.get()
@@ -931,22 +979,24 @@ class AppUI:
             logger.error("Yêu cầu bắt đầu phân tích bị từ chối: thư mục không hợp lệ.")
             return
 
-        self.is_running = True
-        self.stop_flag = False
-        ui_builder.toggle_controls_state(self, "disabled")
-
         cfg = self._snapshot_config()
-        self.run_config = cfg
-
-        # Cập nhật cấu hình cho các service trước khi chạy
         self._update_services_config()
+        session_id = datetime.now().strftime("manual-%Y%m%d-%H%M%S")
+        self._queued_autorun_session = None
+        self._pending_session = True
 
-        session_prefix = "autorun" if source == "autorun" else "manual"
-        session_id = datetime.now().strftime(f"{session_prefix}-%Y%m%d-%H%M%S")
-        self._current_session_id = session_id
-        self.analysis_controller.start_session(session_id, self, cfg)
-        self.ui_status("Đang chạy phân tích...")
-        logger.info("Đã gửi phiên phân tích %s tới ThreadingManager.", session_id)
+        def _on_start(sid: str, priority: str) -> None:
+            self._handle_session_started(sid, priority, cfg, source)
+
+        self.analysis_controller.start_session(
+            session_id,
+            self,
+            cfg,
+            priority="user",
+            on_start=_on_start,
+        )
+        self.ui_status("Đang chuẩn bị chạy phân tích...")
+        logger.info("Đã gửi yêu cầu khởi động phiên %s (manual).", session_id)
 
     def stop_analysis(self):
         """Gửi tín hiệu dừng cho phiên phân tích hiện tại."""
@@ -958,6 +1008,71 @@ class AppUI:
         self.stop_flag = True
         self.analysis_controller.stop_session(self._current_session_id)
         self.ui_status("Đang dừng...")
+        self._queued_autorun_session = None
+        self._pending_session = False
+
+    def _request_autorun_start(self) -> None:
+        """Xử lý yêu cầu autorun với cơ chế ưu tiên người dùng."""
+
+        if self.is_running or self._pending_session:
+            logger.info("Autorun bỏ qua vì đang có phiên chạy hoặc đang khởi động.")
+            self._schedule_next_autorun()
+            return
+        if self._queued_autorun_session:
+            logger.debug(
+                "Đã có autorun đang chờ (%s), không enqueue thêm.",
+                self._queued_autorun_session,
+            )
+            return
+
+        folder = self.folder_path.get()
+        if not folder or not Path(folder).is_dir():
+            logger.warning("Autorun bỏ qua vì thư mục không hợp lệ.")
+            self.ui_status("Autorun bỏ qua: thư mục chưa hợp lệ.")
+            self._schedule_next_autorun()
+            return
+
+        cfg = self._snapshot_config()
+        self._update_services_config()
+        session_id = datetime.now().strftime("autorun-%Y%m%d-%H%M%S")
+
+        def _on_start(sid: str, priority: str) -> None:
+            self._queued_autorun_session = None
+            self._handle_session_started(sid, priority, cfg, "autorun")
+
+        status = self.analysis_controller.enqueue_autorun(
+            session_id,
+            self,
+            cfg,
+            on_start=_on_start,
+        )
+        if status == "queued":
+            self._queued_autorun_session = session_id
+            self._pending_session = False
+            self.ui_status("Autorun đã xếp hàng, sẽ chạy sau khi tác vụ hiện tại hoàn tất.")
+            logger.info("Autorun %s được xếp hàng chờ.", session_id)
+        else:
+            self._pending_session = True
+            logger.info("Autorun %s bắt đầu ngay lập tức.", session_id)
+
+    def _handle_session_started(self, session_id: str, priority: str, cfg: RunConfig, source: str) -> None:
+        """Cập nhật trạng thái UI khi một phiên thực sự bắt đầu."""
+
+        self.is_running = True
+        self._pending_session = False
+        self.stop_flag = False
+        self._current_session_id = session_id
+        self.run_config = cfg
+        ui_builder.toggle_controls_state(self, "disabled")
+
+        if priority == "autorun":
+            message = "Autorun đang chạy phân tích..."
+        else:
+            message = "Đang chạy phân tích..."
+        self.ui_status(message)
+        logger.info(
+            "Phiên %s bắt đầu (priority=%s, source=%s).", session_id, priority, source
+        )
 
     def choose_folder(self):
         """Mở hộp thoại cho người dùng chọn thư mục chứa ảnh."""
@@ -986,8 +1101,15 @@ class AppUI:
         if self.detail_text:
             self.ui_detail_replace("Báo cáo tổng hợp sẽ hiển thị tại đây.")
 
-        # Chạy tác vụ quét thư mục trong một luồng riêng
-        self.threading_manager.submit_task(self._scan_folder_worker, folder)
+        # Chạy tác vụ quét thư mục trong một luồng riêng thông qua facade
+        self.io_controller.run(
+            worker=self._scan_folder_worker,
+            args=(folder,),
+            group="ui.io.scan",
+            name="ui.io.scan_folder",
+            metadata={"component": "ui", "operation": "scan_folder"},
+            cancel_previous=True,
+        )
 
     def _scan_folder_worker(self, folder: str):
         """
@@ -1056,7 +1178,13 @@ class AppUI:
             return
 
         self.ui_status("Đang xuất báo cáo Markdown...")
-        self.threading_manager.submit_task(self._export_markdown_worker, out_path_str, self.combined_report_text)
+        self.io_controller.run(
+            worker=self._export_markdown_worker,
+            args=(out_path_str, self.combined_report_text),
+            group="ui.io.export",
+            name="ui.io.export_markdown",
+            metadata={"component": "ui", "operation": "export_markdown"},
+        )
 
     def _export_markdown_worker(self, path_str: str, content: str):
         """Worker chạy nền để ghi báo cáo ra file Markdown."""
@@ -1135,7 +1263,14 @@ class AppUI:
             return
 
         # Chạy trong luồng riêng để không làm treo UI
-        self.threading_manager.submit_task(self._update_model_list_worker, api_key)
+        self.io_controller.run(
+            worker=self._update_model_list_worker,
+            args=(api_key,),
+            group="ui.io.models",
+            name="ui.io.update_models",
+            metadata={"component": "ui", "operation": "update_models"},
+            cancel_previous=True,
+        )
 
     def _update_model_list_worker(self, api_key: str):
         """
@@ -1258,6 +1393,8 @@ class AppUI:
         self.is_running = False
         self.stop_flag = False
         self._current_session_id = None
+        self._pending_session = False
+        self._queued_autorun_session = None
         self.ui_status("Đã dừng bởi người dùng.")
         self.ui_progress(0)
         ui_builder.toggle_controls_state(self, "normal")
@@ -1268,6 +1405,8 @@ class AppUI:
         self.is_running = False
         self.stop_flag = False
         self._current_session_id = None
+        self._pending_session = False
+        self._queued_autorun_session = None
         self.ui_status("Hoàn tất.")
         self.ui_progress(100)
         ui_builder.toggle_controls_state(self, "normal")
@@ -1296,7 +1435,7 @@ class AppUI:
 
     def _schedule_next_autorun(self):
         """Lên lịch cho lần chạy tự động tiếp theo."""
-        if not self.autorun_var.get() or self.is_running:
+        if not self.autorun_var.get() or self.is_running or self._pending_session:
             return
         interval_ms = self.autorun_seconds_var.get() * 1000
         logger.debug(f"Lên lịch chạy tự động tiếp theo sau {interval_ms}ms.")
@@ -1310,12 +1449,17 @@ class AppUI:
         logger.info("Autorun tick: Kích hoạt worker kiểm tra.")
         # Chỉ kích hoạt worker nếu chưa có phân tích nào chạy,
         # để tránh tạo ra quá nhiều luồng không cần thiết.
-        if not self.is_running:
-            self.threading_manager.submit_task(self._autorun_tick_worker)
-        else:
-            logger.warning("Autorun tick: Bỏ qua vì một phân tích khác đã đang chạy.")
-            # Vẫn phải lên lịch lại cho lần chạy tiếp theo
+        if self.is_running or self._pending_session:
+            logger.warning("Autorun tick: Bỏ qua vì đang có phiên chạy hoặc đang khởi động.")
             self._schedule_next_autorun()
+            return
+
+        self.io_controller.run(
+            worker=self._autorun_tick_worker,
+            group="ui.autorun",
+            name="ui.autorun.guard",
+            metadata={"component": "analysis", "operation": "autorun_guard"},
+        )
 
     def _autorun_tick_worker(self):
         """
@@ -1325,8 +1469,8 @@ class AppUI:
         logger.debug("Autorun tick worker: Bắt đầu kiểm tra điều kiện.")
         
         # Kiểm tra lại is_running bên trong luồng để tránh race condition
-        if self.is_running:
-            logger.warning("Autorun tick worker: Bỏ qua vì phân tích vừa được bắt đầu.")
+        if self.is_running or self._pending_session:
+            logger.warning("Autorun tick worker: Bỏ qua vì đang có tiến trình chạy.")
             self.ui_queue.put(self._schedule_next_autorun)
             return
 
@@ -1341,7 +1485,7 @@ class AppUI:
 
         logger.info("Autorun tick worker: Điều kiện hợp lệ, yêu cầu bắt đầu phân tích trên luồng UI.")
         # Yêu cầu start_analysis chạy trên luồng chính để đảm bảo an toàn cho UI
-        self.ui_queue.put(lambda: self.start_analysis(source="autorun"))
+        self.ui_queue.put(self._request_autorun_start)
 
     # --- MT5 Methods ---
     def _pick_mt5_terminal(self):
@@ -1377,7 +1521,7 @@ class AppUI:
             return
 
         self.ui_status("Đang kết nối đến MT5...")
-        self.threading_manager.submit_task(self._mt5_connect_worker, path)
+        self.mt5_controller.connect(path, self._mt5_connect_worker)
 
     def _mt5_connect_worker(self, path: str):
         """Worker để thực hiện kết nối MT5."""
@@ -1402,7 +1546,7 @@ class AppUI:
 
         if self.mt5_enabled_var.get():
             # Chạy kiểm tra trong luồng nền
-            self.threading_manager.submit_task(self._mt5_check_connection_worker)
+            self.mt5_controller.check_status(self._mt5_check_connection_worker)
 
         # Lên lịch cho lần kiểm tra tiếp theo
         self._mt5_check_connection_job = self.root.after(15000, self._schedule_mt5_connection_check)
@@ -1429,7 +1573,7 @@ class AppUI:
             return
         
         self.ui_status("Đang lấy snapshot dữ liệu MT5...")
-        self.threading_manager.submit_task(self._mt5_snapshot_worker)
+        self.mt5_controller.snapshot(self._mt5_snapshot_worker)
 
     def _update_services_config(self):
         """
@@ -1523,7 +1667,13 @@ class AppUI:
             return
 
         self.ui_status("Đang tải file .env...")
-        self.threading_manager.submit_task(self._load_env_worker, env_path_str)
+        self.io_controller.run(
+            worker=self._load_env_worker,
+            args=(env_path_str,),
+            group="ui.io.env",
+            name="ui.io.load_env",
+            metadata={"component": "ui", "operation": "load_env"},
+        )
 
     def _load_env_worker(self, env_path: str):
         """Worker chạy nền để đọc và áp dụng các biến từ file .env."""
@@ -1584,7 +1734,13 @@ class AppUI:
             return
         
         self.ui_status("Đang lưu API keys...")
-        self.threading_manager.submit_task(self._save_api_safe_worker, keys_to_save)
+        self.io_controller.run(
+            worker=self._save_api_safe_worker,
+            args=(keys_to_save,),
+            group="ui.io.api_keys",
+            name="ui.io.save_api_keys",
+            metadata={"component": "ui", "operation": "save_api_keys"},
+        )
 
     def _save_api_safe_worker(self, keys_to_save: dict):
         """Worker chạy nền để mã hóa và ghi API keys vào file."""
@@ -1605,7 +1761,12 @@ class AppUI:
         """Bắt đầu quá trình xóa API key an toàn trong luồng nền."""
         logger.debug("Yêu cầu xóa API keys.")
         self.ui_status("Đang xóa API keys...")
-        self.threading_manager.submit_task(self._delete_api_safe_worker)
+        self.io_controller.run(
+            worker=self._delete_api_safe_worker,
+            group="ui.io.api_keys",
+            name="ui.io.delete_api_keys",
+            metadata={"component": "ui", "operation": "delete_api_keys"},
+        )
 
     def _delete_api_safe_worker(self):
         """Worker chạy nền để xóa file API key."""
@@ -1649,7 +1810,12 @@ class AppUI:
             message="Bạn có chắc chắn muốn xóa file workspace hiện tại không?",
         ):
             self.ui_status("Đang xóa workspace...")
-            self.threading_manager.submit_task(self._delete_workspace_worker)
+            self.io_controller.run(
+                worker=self._delete_workspace_worker,
+                group="ui.workspace",
+                name="ui.workspace.delete",
+                metadata={"component": "ui", "operation": "delete_workspace"},
+            )
 
     def _delete_workspace_worker(self):
         """Worker chạy nền để xóa file workspace."""
