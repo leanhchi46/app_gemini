@@ -67,3 +67,111 @@
 | Tần suất làm mới UI | Muốn đồng bộ theo tick thời gian thực của MT5. | Cần nghiên cứu điều chỉnh `refresh_secs_var` xuống theo tick (ví dụ 1s hoặc hook realtime API) và giảm `ui_queue` poll 100ms nếu cần; bổ sung cơ chế skip frame khi backlog để tránh nghẽn UI.【F:APP/ui/components/chart_tab.py†L302-L304】【F:APP/ui/utils/ui_builder.py†L650-L665】 |
 | Đóng ứng dụng | Phải đảm bảo tất cả tác vụ nền hoàn tất trước khi thoát. | `ThreadingManager.shutdown` cần `join` sạch mọi luồng/future, có timeout và hiển thị tiến trình đóng; cân nhắc modal cảnh báo nếu có tác vụ lâu (ví dụ lưu báo cáo).【F:APP/ui/app_ui.py†L304-L338】【F:APP/core/analysis_worker.py†L430-L475】 |
 
+## 7. Kiến trúc đa luồng đề xuất
+
+### 7.1 Sơ đồ khối cấp cao
+
+```
++-----------------+       +-------------------+       +------------------+
+|      AppUI      | <---> |  ThreadingManager | <---> |  Worker Pools    |
++-----------------+       +-------------------+       +------------------+
+        |                          |                           |
+        | UI Queue / Facade APIs   | TaskGroup APIs            | Specialized
+        v                          v                           v
+  +-------------+        +-------------------+        +----------------------+
+  |  ChartTab   |<------>|  AnalysisWorker   |<------>| External Services    |
+  +-------------+        +-------------------+        +----------------------+
+        |                           |                          |
+        v                           v                          v
+  NewsService Facade        MT5 Data Facade             Storage/AI Clients
+```
+
+* **AppUI**: vẫn giữ luồng chính, chỉ tương tác qua Facade bất đồng bộ và nhận cập nhật qua `ui_queue` với cơ chế giám sát mới.
+* **ThreadingManager 2.0**: chịu trách nhiệm quản lý `TaskGroup`, timeout, retry, cancel, metrics.
+* **Worker Pools**: tách thành các nhóm chuyên biệt (CPU-bound cho AI, I/O-bound cho MT5/news, short-lived UI tasks) để tránh nghẽn.
+* **Facade chuyên biệt**: `AnalysisController`, `NewsController`, `ChartController` cung cấp API tương tác với ThreadingManager.
+
+### 7.2 Chiến lược TaskGroup & điều khiển vòng đời
+
+| TaskGroup | Thành phần | Loại tác vụ | Chính sách timeout | Chính sách retry | Cơ chế dừng |
+| --- | --- | --- | --- | --- | --- |
+| `analysis.session` | `AnalysisWorker` (các stage 1-6) | CPU/I/O hỗn hợp | Timeout tổng `analysis_timeout` (mặc định 5 phút), sub-timeout cho Stage 2 (AI streaming, 60s không có token) | Retry toàn phiên = 0 (ngừng ngay, báo lỗi); từng ảnh upload retry 2 lần backoff tuyến tính | `cancel_group` khi `stop_event` hoặc Autorun bị huỷ; join cưỡng bức sau 10s với log cảnh báo |
+| `analysis.upload` | Upload ảnh song song | I/O | Timeout 30s/ảnh | Retry 2 lần, delay 1s/2s | Kế thừa `cancel_group` từ session, dừng ngay khi session cancel |
+| `ui.short` | Các worker UI nhẹ (quét thư mục, export nhỏ) | I/O nhanh | Timeout 10s mặc định, caller có thể override | Retry 1 lần nếu lỗi I/O tạm thời | `cancel_task` riêng lẻ khi đóng ứng dụng hoặc người dùng hủy |
+| `chart.refresh` | `_info_worker`, `_chart_drawing_worker` | MT5 I/O | Timeout 10s cho MT5 query; hủy nếu quá 2 lần liên tiếp timeout | Retry vô hạn nhưng theo chính sách degrade (giảm tần suất khi MT5 lỗi) | Stop khi tab đóng hoặc ứng dụng tắt; join với grace 5s |
+| `news.polling` | `NewsService` fetch | I/O | Timeout 20s mỗi provider | Retry 3 lần với exponential backoff; fallback cache | Stop khi app shutdown; join 5s, log nếu vượt |
+
+`ThreadingManager` mới hỗ trợ:
+
+* `create_task_group(name, *, max_concurrency, queue_limit, on_state_change)` trả về context quản lý tác vụ.
+* `submit(group, callable, *, cancel_token, timeout, retry_policy, metadata)` đăng ký tác vụ với metadata phục vụ logging.
+* `cancel_group(name, reason)` hủy mọi tác vụ đang chạy/chờ trong nhóm; đảm bảo propagate `cancel_token`.
+* `await_idle(group, deadline)` dùng khi đóng ứng dụng để chờ nhóm rỗng.
+
+### 7.3 Luồng đời tác vụ mẫu
+
+1. **Khởi tạo**
+   * UI gọi Facade (ví dụ `AnalysisController.start_session(request)`).
+   * Facade chuẩn hóa input, tạo `cancel_token`, đăng ký `TaskGroupContext` và phát sự kiện telemetry "scheduled".
+   * `ThreadingManager` push task vào hàng chờ nhóm tương ứng.
+2. **Thực thi**
+   * Worker lấy task từ nhóm, bọc trong `with cancel_scope, timeout_scope`.
+   * Task báo tiến độ định kỳ qua `ui_queue.enqueue(UpdatePayload)`; hệ thống đo độ trễ và log warning nếu backlog > ngưỡng.
+   * Khi gặp lỗi recoverable, `RetryPolicy` quyết định có retry hay không; mọi retry đều ghi log `warning` với attempt.
+3. **Hủy bỏ**
+   * Người dùng bấm "Dừng" → Facade gọi `cancel_group("analysis.session", reason="user_stop")` + set `cancel_token`.
+   * Từng worker phát hiện `cancel_token.is_cancelled()` hoặc nhận `CancelledError` (từ timeout scope) và chuyển sang giai đoạn cleanup.
+4. **Cleanup**
+   * Task chạy khối `finally`: đóng file, rollback upload dang dở, ghi log "cancelled".
+   * Facade gửi cập nhật UI "stopped" với timestamp, metrics (thời gian chạy, số ảnh thành công/thất bại).
+
+### 7.4 Facade/API mới
+
+| Facade | API chính | Mô tả | Ghi chú triển khai |
+| --- | --- | --- | --- |
+| `AnalysisController` | `start_session(request)`, `stop_session(session_id)`, `get_status(session_id)` | Quản lý vòng đời phân tích; map sang TaskGroup `analysis.session`. | `start_session` trả về `session_id`; `stop_session` gọi cancel + cập nhật UI. |
+| `ChartController` | `start_stream(symbol)`, `stop_stream(symbol)`, `request_snapshot(symbol, options)` | Điều phối tick realtime và snapshot MT5. | `start_stream` đăng ký listener, worker push data qua Facade để UI nhận. |
+| `NewsController` | `start_polling()`, `stop_polling()`, `refresh_now()` | Điều phối NewsService, cho phép refresh thủ công ưu tiên người dùng. | `refresh_now` enqueue task ưu tiên cao bỏ qua lịch TTL. |
+| `ThreadingManager` (mới) | `create_task_group`, `submit`, `cancel_group`, `cancel_task`, `await_idle`, `shutdown(force=False)` | Lõi điều phối đa luồng. | Hỗ trợ hook telemetry & logging tiêu chuẩn. |
+| `UIQueueMonitor` | `start()`, `stop()`, `get_metrics()` | Đo backlog UI, log cảnh báo >N mục hoặc callback lỗi. | Chạy trên luồng UI, flush metrics sang logger/telemetry. |
+
+### 7.5 Logging & Monitoring
+
+* **Chuẩn metadata**: mọi task đăng ký `metadata={"component": ..., "task": ..., "session_id": ...}` để logger format `%{component}/%{task}`.
+* **Level**:
+  * `INFO`: Task scheduled, started, completed, cancelled (với duration, retry_count).
+  * `WARNING`: Timeout, retry, backlog UI > ngưỡng, cancel cưỡng bức khi shutdown.
+  * `ERROR`: Lỗi không recoverable, task fail sau retry cuối.
+* **Telemetry hooks**: ThreadingManager phát sự kiện `task_scheduled`, `task_started`, `task_completed` để tích hợp Grafana/Prometheus (khi có).
+* **UI queue monitor**: đo `len(queue)` mỗi 100ms; nếu >50, log warning và phát tín hiệu backpressure (ChartController có thể giảm tần suất refresh tạm thời).
+* **Audit trail**: ghi file JSON (rolling) chứa lịch sử task quan trọng (analysis session, autorun) phục vụ QA.
+
+### 7.6 Ảnh hưởng cấu hình & tương thích
+
+| Mục | Ảnh hưởng | Backward compatibility | Biện pháp giảm thiểu |
+| --- | --- | --- | --- |
+| Timeout mới (MT5 10s, News 20s, upload 30s) | Cần expose cấu hình (UI/`config.json`) | Mặc định đặt theo đề xuất, cho phép override để không phá workflow cũ | Hiển thị cảnh báo khi hit timeout để người dùng điều chỉnh |
+| Realtime chart (tick-based) | Tăng tần suất worker chart | UI cũ vẫn hoạt động nếu chọn chế độ "legacy" refresh 5s | Cho phép toggle "Realtime" vs "Interval" trong UI |
+| TaskGroup queue limit | Có thể từ chối task nếu backlog quá lớn | Facade trả về thông báo lỗi thân thiện, hướng dẫn thử lại | Log metrics để tinh chỉnh limit |
+| Shutdown strict join | App đóng chậm hơn nếu còn tác vụ dài | Giữ option "Force quit" để vẫn cho phép thoát nhanh | Hiển thị dialog tiến trình khi đóng |
+
+### 7.7 Rủi ro & kiểm soát
+
+* **Deadlock giữa Facade và UI**: đảm bảo mọi callback UI chạy trên luồng chính và không gọi ngược lại Facade đồng bộ; thêm tài liệu hướng dẫn dev.
+* **Starvation khi ưu tiên người dùng**: Autorun bị trì hoãn vô hạn nếu người dùng thao tác liên tục; cần logic reschedule sau X phút để nhắc nhở.
+* **Chi phí refactor cao**: phân tách Facade & TaskGroup đòi hỏi chỉnh sửa rộng; lên kế hoạch rollout từng module (Analysis → Chart → News).
+* **Telemetry overload**: log quá nhiều khi poll realtime; thêm sampling/tần suất báo cáo.
+
+### 7.8 Checklist triển khai
+
+- [ ] Thiết kế và implement `ThreadingManager` mới với hỗ trợ TaskGroup, cancel token, timeout, retry.
+- [ ] Xây dựng Facade `AnalysisController`, `ChartController`, `NewsController` và migrate AppUI sử dụng.
+- [ ] Cập nhật `AnalysisWorker` để tôn trọng cancel ngay lập tức và tái cấu trúc stage theo TaskGroup.
+- [ ] Tách chart workers thành stream realtime + snapshot với timeout và degrade mode.
+- [ ] Điều chỉnh NewsService sử dụng TaskGroup và timeout/backoff mới.
+- [ ] Tích hợp UI Queue Monitor và logging chuẩn hóa metadata.
+- [ ] Bổ sung cấu hình UI/JSON cho timeout, realtime toggle, queue limit.
+- [ ] Viết tài liệu hướng dẫn QA/Product về hành vi mới (stop nhanh, autorun ưu tiên người dùng, shutdown).
+- [ ] Cập nhật bộ kiểm thử/tài liệu đảm bảo backward compatibility (legacy refresh, force quit).
+
+
