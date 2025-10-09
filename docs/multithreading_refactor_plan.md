@@ -161,17 +161,209 @@
 * **Starvation khi ưu tiên người dùng**: Autorun bị trì hoãn vô hạn nếu người dùng thao tác liên tục; cần logic reschedule sau X phút để nhắc nhở.
 * **Chi phí refactor cao**: phân tách Facade & TaskGroup đòi hỏi chỉnh sửa rộng; lên kế hoạch rollout từng module (Analysis → Chart → News).
 * **Telemetry overload**: log quá nhiều khi poll realtime; thêm sampling/tần suất báo cáo.
+* **Sai cấu hình timeout**: cấu hình quá thấp có thể khiến phiên phân tích bị cắt ngắn; cần giám sát và hiệu chỉnh trong quá trình rollout, cung cấp fallback để tăng nhanh khi nhận phản hồi người dùng.
+* **Lệch trạng thái cancel**: Facade phải idempotent, mọi API `stop_*` nên có kiểm tra trạng thái trước khi gửi cancel để tránh cancel nhầm phiên đã hoàn tất.
 
-### 7.8 Checklist triển khai
+## 8. Kế hoạch triển khai (Work Breakdown Structure)
 
-- [ ] Thiết kế và implement `ThreadingManager` mới với hỗ trợ TaskGroup, cancel token, timeout, retry.
-- [ ] Xây dựng Facade `AnalysisController`, `ChartController`, `NewsController` và migrate AppUI sử dụng.
-- [ ] Cập nhật `AnalysisWorker` để tôn trọng cancel ngay lập tức và tái cấu trúc stage theo TaskGroup.
-- [ ] Tách chart workers thành stream realtime + snapshot với timeout và degrade mode.
-- [ ] Điều chỉnh NewsService sử dụng TaskGroup và timeout/backoff mới.
-- [ ] Tích hợp UI Queue Monitor và logging chuẩn hóa metadata.
-- [ ] Bổ sung cấu hình UI/JSON cho timeout, realtime toggle, queue limit.
-- [ ] Viết tài liệu hướng dẫn QA/Product về hành vi mới (stop nhanh, autorun ưu tiên người dùng, shutdown).
-- [ ] Cập nhật bộ kiểm thử/tài liệu đảm bảo backward compatibility (legacy refresh, force quit).
+### 8.1 Giai đoạn tổng quan
 
+| Mã WBS | Mô tả | Phụ thuộc | Deliverable | Tiêu chí "done" |
+| --- | --- | --- | --- | --- |
+| 8.1.1 | Chuẩn bị nền tảng ThreadingManager 2.0 (TaskGroup, cancel token, metrics API) | Tài liệu kiến trúc hoàn tất | Branch `threading-manager-core` với unit test pass | `ThreadingManager` mới có test coverage ≥80% và backward shim hoạt động |
+| 8.1.2 | Thiết lập bộ công cụ QA (mock threading manager, fake UI queue, fixtures MT5/news) | 8.1.1 | Thư viện test trong `tests/threading/` | Fixtures chạy ổn định trong CI |
+| 8.1.3 | Lộ trình module tuần tự: ChartTab → NewsService → AnalysisWorker → AppUI | 8.1.2 | Checklist triển khai theo từng module | Product/QA duyệt timeline |
 
+> **Nguyên tắc chuyển giai đoạn**: chỉ chuyển sang module tiếp theo khi module hiện tại đạt đủ tiêu chí "done" và PR đã merge vào nhánh chính, tránh drift kiến trúc.
+
+### 8.2 Module ChartTab (WBS 8.2.x)
+
+| Mã | Hạng mục | Bước refactor chính | File ảnh hưởng (dự kiến) | Thay đổi API | Kiểm thử bắt buộc | Rollback plan |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8.2.1 | Thiết kế Facade `ChartController` | Tạo lớp mới bọc logic MT5/refresh, di chuyển `ThreadingManager` call | `APP/ui/components/chart_tab.py`, `APP/ui/controllers/chart_controller.py` (mới) | Public API mới `start_stream`, `stop_stream`, `request_snapshot` | Unit test facade mock ThreadingManager; contract test UI queue | Giữ lớp cũ song song, cung cấp flag `USE_CHART_FACADE` |
+| 8.2.2 | Refactor worker luồng info/chart sang TaskGroup `chart.refresh` | Bóc tách `_info_worker_thread`, `_chart_drawing_worker` → submit qua facade | `APP/ui/components/chart_tab.py`, `APP/ui/utils/ui_builder.py` | UI gọi facade thay vì trực tiếp `ThreadingManager.submit_task` | Integration test mô phỏng realtime tick (mock MT5) | Toggle flag quay lại luồng cũ, giữ code cũ 1 sprint |
+| 8.2.3 | Đồng bộ tick realtime & backpressure UI | Gắn timer mới, cập nhật `refresh_secs_var` logic, UI queue monitor | `APP/ui/components/chart_tab.py`, `APP/ui/utils/ui_builder.py` | Prop event `ChartUpdateRateChanged` cho AppUI | Performance test stress 1s tick, UI backlog monitor | Revert config về refresh 5s, disable realtime |
+| 8.2.4 | Logging & metrics | Thêm metadata khi submit task, hook UI queue monitor | `APP/ui/components/chart_tab.py`, `APP/utils/threading_utils.py` | API logging thống nhất (đặt `component=chart`) | Verify log format qua unit snapshot, integration check metrics | Rollback = tắt logging mới bằng feature flag |
+
+**Checklist PR/Code review (đính kèm trong PR mẫu ChartTab)**
+
+1. [ ] Facade `ChartController` có docstring mô tả từng API và metadata task.
+2. [ ] Mọi call `ThreadingManager.submit_task` trong ChartTab chuyển qua facade.
+3. [ ] Có ít nhất 1 unit test mock `ThreadingManager` xác nhận `cancel_token` propagate.
+4. [ ] UI queue callback sử dụng `ui_builder.enqueue_safe` (nếu có) và log warning khi backlog > ngưỡng.
+5. [ ] Config realtime tick có thể bật/tắt qua cấu hình người dùng.
+
+**Template PR đề xuất**
+
+```
+## Summary
+- migrate ChartTab to ChartController facade + chart.refresh task group
+- enable realtime tick scheduling with UI queue backpressure guard
+- add logging/metrics metadata for chart tasks
+
+## Testing
+- [command] (describe)
+```
+
+**Hướng dẫn test**
+
+* **Unit**: sử dụng fixture `MockThreadingManager` (từ 8.1.2) để assert rằng `submit` được gọi với `group="chart.refresh"`, `timeout=10s` và metadata chứa symbol.
+* **Integration**: mock MT5 client trả về tick mỗi 100ms; kiểm tra UI queue nhận cập nhật tối đa 10 mục (assert backlog monitor).
+* **Regression**: bật flag legacy để đảm bảo chế độ cũ vẫn chạy.
+
+**Timeline & tiêu chí done**
+
+* Thời lượng 1 sprint (~1 tuần).
+* Tiêu chí done: PR merge, demo realtime tick cho QA, thông số backlog UI < 50 ở test stress, không còn lời gọi trực tiếp tới `ThreadingManager` trong ChartTab.
+
+### 8.3 Module NewsService (WBS 8.3.x)
+
+| Mã | Hạng mục | Bước refactor chính | File ảnh hưởng (dự kiến) | Thay đổi API | Kiểm thử bắt buộc | Rollback plan |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8.3.1 | Facade `NewsController` | Đóng gói start/stop/refresh; điều phối TaskGroup `news.polling` | `APP/services/news_service.py`, `APP/ui/controllers/news_controller.py` (mới) | Public API `start_polling`, `stop_polling`, `refresh_now`, callback tiêu chuẩn | Unit test mock ThreadingManager, verify cancel token & TTL override | Feature flag `USE_NEWS_CONTROLLER`, giữ start/stop cũ |
+| 8.3.2 | Chuẩn hóa worker & timeout | Thay `ThreadPoolExecutor` nội bộ bằng TaskGroup, áp dụng timeout 20s/provider | `APP/services/news_service.py` | Config mới `news_timeout_sec`, metadata logging | Integration test mô phỏng provider chậm, đảm bảo cancel sau timeout | Revert config, fallback executor cũ |
+| 8.3.3 | Ưu tiên thao tác tay vs autorun | Thêm queue ưu tiên khi `refresh_now` được gọi | `APP/ui/app_ui.py`, `APP/ui/controllers/news_controller.py` | API `refresh_now` trả về future để UI disable nút | UI test mô phỏng user spam refresh | Switch flag vô hiệu hóa ưu tiên |
+| 8.3.4 | Monitoring & metrics | Hook telemetry `news.polling` duration, retry count | `APP/services/news_service.py`, `APP/utils/threading_utils.py` | API logging `component=news` | Unit test snapshot log, integration log tail | Tắt telemetry bằng config |
+
+**Checklist PR/Code review**
+
+1. [ ] `NewsService` không tự tạo thread; mọi worker đều đi qua ThreadingManager.
+2. [ ] Timeout cấu hình được qua `config.json` và override bởi QA.
+3. [ ] `refresh_now` ưu tiên user được kiểm chứng bằng test.
+4. [ ] Retry/backoff log đầy đủ metadata.
+5. [ ] Shutdown đảm bảo gọi `await_idle("news.polling")` trước khi thoát.
+
+**Template PR**
+
+```
+## Summary
+- migrate NewsService to NewsController + news.polling task group
+- implement provider timeout/backoff with user-priority refresh
+- add telemetry hooks for news polling lifecycle
+
+## Testing
+- [command]
+```
+
+**Hướng dẫn test**
+
+* **Unit**: mock provider trả về dữ liệu, verify `retry_policy` áp dụng exponential backoff và stop sau 3 lần.
+* **Integration**: sử dụng fixture server giả lập chậm (sleep > timeout) để chắc chắn cancel và log warning.
+* **End-to-end**: QA script chạy autorun + refresh thủ công, đảm bảo user click được phục vụ trước.
+
+**Timeline & tiêu chí done**
+
+* Dự kiến 1 sprint.
+* Done khi autorun & refresh tay không race, metrics news xuất hiện trong dashboard dev, QA xác nhận timeout hợp lý.
+
+### 8.4 Module AnalysisWorker (WBS 8.4.x)
+
+| Mã | Hạng mục | Bước refactor chính | File ảnh hưởng (dự kiến) | Thay đổi API | Kiểm thử bắt buộc | Rollback plan |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8.4.1 | Facade `AnalysisController` & session state | Tạo controller quản lý session, mapping TaskGroup `analysis.session` | `APP/core/analysis_worker.py`, `APP/core/analysis_controller.py` (mới), `APP/ui/app_ui.py` | API `start_session`, `stop_session`, `get_status` | Unit test session lifecycle với mock ThreadingManager | Feature flag `USE_ANALYSIS_CONTROLLER`, fallback call cũ |
+| 8.4.2 | Refactor stage pipeline với cancel/token | Chuyển `stop_event` sang `cancel_token`, propagate tới từng stage | `APP/core/analysis_worker.py` | Stage API nhận `context` chứa token, timeout; dọn dẹp sau cancel | Integration test cancel giữa stage upload/AI streaming; assert cleanup chạy | Giữ branch cũ cho pipeline, toggle qua config |
+| 8.4.3 | Upload & AI streaming concurrency | Thay `ThreadPoolExecutor` nội bộ bằng TaskGroup `analysis.upload`; batch ≤10 ảnh | `APP/core/analysis_worker.py` | API upload nhận `UploadRequest` với retry policy | Stress test 10 ảnh, cancel mid-run, ensure immediate stop | Revert sang executor cũ nếu lỗi |
+| 8.4.4 | Logging, metrics, audit trail | Ghi log start/stop, duration, số ảnh thành công, AI token | `APP/core/analysis_worker.py`, `APP/utils/threading_utils.py` | API update UI gửi payload có metrics | Unit test snapshot log, integration check audit JSON | Disable audit module để rollback |
+
+**Checklist PR/Code review**
+
+1. [ ] Bấm "Dừng" lập tức cancel session (assert test).
+2. [ ] Không còn tham chiếu trực tiếp `stop_event`; thay bằng `cancel_token`.
+3. [ ] Upload worker tôn trọng giới hạn ảnh ≤10 và retry tối đa 2 lần.
+4. [ ] UI cập nhật trạng thái thông qua facade events, không truy cập trực tiếp worker.
+5. [ ] Audit trail ghi nhận session_id, trạng thái cuối, thời lượng.
+
+**Template PR**
+
+```
+## Summary
+- refactor AnalysisWorker pipeline to AnalysisController + cancel-aware stages
+- enforce upload task group with bounded concurrency and retry
+- emit structured metrics/audit events for analysis sessions
+
+## Testing
+- [command]
+```
+
+**Hướng dẫn test**
+
+* **Unit**: mock ThreadingManager để kiểm tra `cancel_group` được gọi khi `stop_session`.
+* **Integration**: test streaming AI dừng ngay lập tức khi gọi `stop_session`, verify UI queue nhận sự kiện `stopped`.
+* **Performance**: benchmark xử lý 10 ảnh trong giới hạn timeout đề xuất.
+
+**Timeline & tiêu chí done**
+
+* 2 sprint do phạm vi lớn.
+* Done khi QA chứng nhận nút "Dừng" đáp ứng kỳ vọng, stress test 10 ảnh thành công, audit trail lưu trữ chính xác.
+
+### 8.5 Module AppUI & Shutdown (WBS 8.5.x)
+
+| Mã | Hạng mục | Bước refactor chính | File ảnh hưởng (dự kiến) | Thay đổi API | Kiểm thử bắt buộc | Rollback plan |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8.5.1 | Tích hợp Facade vào UI (Analysis/Chart/News) | Thay toàn bộ call trực tiếp bằng facade mới | `APP/ui/app_ui.py`, `APP/ui/utils/ui_builder.py` | UI nhận `session_id`, events; autorun ưu tiên user | UI automation test start/stop, autorun priority | Feature flag tổng `USE_NEW_THREADING_STACK` |
+| 8.5.2 | Autorun prioritization & queue policy | Cập nhật logic enqueue `start_analysis` ưu tiên user | `APP/ui/app_ui.py` | API autorun dùng `AnalysisController.enqueue_autorun()` | Integration test scenario user vs autorun | Re-enable logic cũ nếu cần |
+| 8.5.3 | Shutdown & graceful join | Gọi `await_idle` cho mọi TaskGroup, hiển thị progress modal | `APP/ui/app_ui.py`, `APP/utils/threading_utils.py` | API mới `ThreadingManager.shutdown(force=False, deadline=...)` | End-to-end test đóng app khi có task đang chạy | Fallback `force=True` bỏ qua join |
+| 8.5.4 | Documentation & training | Cập nhật guide dev, manual QA | `docs/`, `README` | API usage doc | Review doc với team | Không cần rollback |
+
+**Checklist PR/Code review**
+
+1. [ ] UI chỉ tương tác với Facade layer, không submit task trực tiếp.
+2. [ ] Autorun nhường người dùng (test chứng minh).
+3. [ ] Shutdown dialog hiển thị tiến trình và không đóng trước khi tất cả task hoàn thành.
+4. [ ] UI queue monitor báo cáo metrics.
+5. [ ] Feature flag tổng cho phép rollback toàn bộ kiến trúc mới.
+
+**Template PR**
+
+```
+## Summary
+- integrate AppUI with new threading facades and autorun priority rules
+- implement graceful shutdown awaiting all task groups
+- update documentation & feature flags for rollout
+
+## Testing
+- [command]
+```
+
+**Hướng dẫn test**
+
+* **Unit**: mock Facade để kiểm tra AppUI gọi đúng API; autorun không enqueue khi user đang chạy.
+* **Integration**: automation script mở app, chạy autorun + manual run, đóng app khi đang có task → xác nhận modal và join.
+* **Regression**: bật feature flag cũ để đảm bảo UI legacy hoạt động.
+
+**Timeline & tiêu chí done**
+
+* 1 sprint.
+* Done khi demo shutdown an toàn, autorun ưu tiên user, feature flag rollback hoạt động.
+
+### 8.6 Hướng dẫn viết unit/integration test tổng quát
+
+1. **Mock ThreadingManager**
+   * Cung cấp fixture `MockThreadingManager` với API `submit`, `cancel_group`, `await_idle` lưu call history.
+   * Hỗ trợ context manager giả lập timeout/cancel bằng cách ném `CancelledError`.
+2. **Mock cancel token / stop_event**
+   * Tạo lớp `FakeCancelToken` với phương thức `cancel()`, `is_cancelled()`; inject vào facade khi test.
+3. **UI queue giả lập**
+   * Dùng queue Python đơn giản + helper `drain_ui_queue(queue)` để assert callback số lượng, không cần Tkinter thật.
+4. **MT5/news provider fake**
+   * Sử dụng server giả lập (aiohttp/Flask) hoặc stub class trả về dữ liệu kịch bản.
+5. **Coverage**
+   * Mỗi PR phải đính kèm báo cáo coverage ≥70% cho module sửa đổi.
+
+### 8.7 Mốc timeline tổng thể
+
+| Sprint | Mục tiêu | Deliverable | Tiêu chí chuyển tiếp |
+| --- | --- | --- | --- |
+| Sprint 1 | Hoàn thiện ThreadingManager core + công cụ test (8.1.x) | Merge nền tảng, tài liệu test | Unit test pass, QA đồng ý fixtures |
+| Sprint 2 | ChartTab rollout (8.2.x) | PR ChartTab merged, realtime demo | QA ký duyệt realtime |
+| Sprint 3 | NewsService rollout (8.3.x) | NewsController merged, timeout hoạt động | Metrics news trong dashboard |
+| Sprint 4-5 | AnalysisWorker refactor (8.4.x) | AnalysisController + cancel pipeline | QA xác nhận nút Dừng đạt yêu cầu |
+| Sprint 6 | AppUI integration & shutdown (8.5.x) | UI tích hợp, feature flag | End-to-end regression pass |
+
+### 8.8 Tiêu chí tổng thể hoàn tất dự án
+
+* Tất cả feature flag mới có thể tắt để quay lại hành vi cũ trong ≤5 phút.
+* Telemetry task-level hiển thị trong dashboard.
+* QA checklist cho từng module được tick đầy đủ.
+* Documentation cập nhật phản ánh kiến trúc mới.
+* Không còn TODO mở liên quan tới cancel/timeout trong codebase.
