@@ -57,11 +57,13 @@
 | MT5 snapshot timeout | 20s | Executor tạm thời trong `_mt5_snapshot_worker`.【F:APP/ui/app_ui.py†L1449-L1464】
 | News fetch timeout | 15s mỗi provider | `ThreadPoolExecutor` trong `NewsService`.|【F:APP/services/news_service.py†L240-L255】
 
-## 6. Thông tin cần Product/QA làm rõ
-1. **Kỳ vọng khi người dùng bấm “Dừng”**: có cần hủy toàn bộ upload/AI streaming ngay lập tức hay chấp nhận chạy tới hết vòng hiện tại? Xác định yêu cầu UX trước khi thiết kế cancel chi tiết.【F:APP/ui/app_ui.py†L942-L950】
-2. **Ưu tiên khi Autorun trùng với thao tác tay**: nếu người dùng bấm chạy trong lúc Autorun đang chờ, có được phép song song hay phải bỏ qua? Cần quy tắc rõ để tránh race condition khi enqueue start_analysis.【F:APP/ui/app_ui.py†L1298-L1332】
-3. **Giới hạn thời gian cho các dịch vụ MT5 & tin tức**: có threshold SLA nào (ví dụ tối đa chờ bao lâu) để thiết kế timeout/hủy bỏ hợp lý?【F:APP/ui/components/chart_tab.py†L305-L466】【F:APP/services/news_service.py†L216-L255】
-4. **Quy mô dữ liệu ảnh tối đa**: để xác định lại kích thước thread pool, chiến lược batch upload và kiểm soát bộ nhớ trong `AnalysisWorker` khi xử lý hàng trăm ảnh.【F:APP/core/analysis_worker.py†L284-L341】
-5. **Tần suất làm mới UI mong muốn**: cần QA xác nhận xem poll 100ms và refresh 5s của ChartTab có đáp ứng không, hay cần đồng bộ với MT5 tick thời gian thực?【F:APP/ui/components/chart_tab.py†L302-L304】【F:APP/ui/utils/ui_builder.py†L650-L665】
-6. **Hành vi khi đóng ứng dụng**: có yêu cầu đảm bảo tất cả tác vụ nền hoàn tất (ví dụ lưu báo cáo) hay có thể hủy bỏ nhanh? Điều này ảnh hưởng tới chiến lược `ThreadingManager.shutdown` và join thread.【F:APP/ui/app_ui.py†L304-L338】【F:APP/core/analysis_worker.py†L430-L475】
+## 6. Thông tin cần Product/QA làm rõ (cập nhật phản hồi)
+| Chủ đề | Phản hồi từ Product/QA | Kế hoạch hành động / Lưu ý thêm |
+| --- | --- | --- |
+| Hành vi nút "Dừng" trong phân tích | Bấm "Dừng" phải hủy toàn bộ upload và AI streaming ngay lập tức. | Cần thiết kế lại `stop_analysis` để luôn `set()` `stop_event`, hủy Future đang chờ và ngắt luồng streaming thay vì để chạy tới hết vòng hiện tại.【F:APP/ui/app_ui.py†L942-L950】【F:APP/core/analysis_worker.py†L284-L341】 |
+| Xung đột Autorun vs thao tác tay | Ưu tiên thao tác của người dùng; Autorun phải nhường và không được chạy song song. | Thiết kế hàng đợi ưu tiên hoặc khóa trạng thái để worker Autorun kiểm tra lại trước khi enqueue, bảo đảm chỉ một phiên phân tích chạy tại một thời điểm.【F:APP/ui/app_ui.py†L1298-L1332】 |
+| Timeout cho dịch vụ MT5 & tin tức | Product chưa có ngưỡng cụ thể và mong muốn lấy đủ dữ liệu; đề nghị đặt timeout mặc định 10s cho truy vấn MT5 (đủ dài cho tick chậm nhưng không làm treo UI) và 20s cho từng nguồn tin tức, kèm retry giới hạn để tránh backlog vô hạn. | Cần xác nhận lại với Product/QA; khi triển khai, cấu hình timeout nên có thể thay đổi (config/UI) và log cảnh báo khi bị cắt ngắn để theo dõi SLA thực tế.【F:APP/ui/components/chart_tab.py†L305-L466】【F:APP/services/news_service.py†L216-L255】 |
+| Quy mô dữ liệu ảnh tối đa | Tối đa hiện tại 4 ảnh, tương lai không quá 10 ảnh. | Có thể giữ `upload_workers` mặc định 4 nhưng thêm guard để giới hạn queue và cân nhắc batch upload ≤10 ảnh; tài nguyên bộ nhớ có thể được tính toán dựa trên giới hạn này.【F:APP/core/analysis_worker.py†L284-L341】 |
+| Tần suất làm mới UI | Muốn đồng bộ theo tick thời gian thực của MT5. | Cần nghiên cứu điều chỉnh `refresh_secs_var` xuống theo tick (ví dụ 1s hoặc hook realtime API) và giảm `ui_queue` poll 100ms nếu cần; bổ sung cơ chế skip frame khi backlog để tránh nghẽn UI.【F:APP/ui/components/chart_tab.py†L302-L304】【F:APP/ui/utils/ui_builder.py†L650-L665】 |
+| Đóng ứng dụng | Phải đảm bảo tất cả tác vụ nền hoàn tất trước khi thoát. | `ThreadingManager.shutdown` cần `join` sạch mọi luồng/future, có timeout và hiển thị tiến trình đóng; cân nhắc modal cảnh báo nếu có tác vụ lâu (ví dụ lưu báo cáo).【F:APP/ui/app_ui.py†L304-L338】【F:APP/core/analysis_worker.py†L430-L475】 |
 
