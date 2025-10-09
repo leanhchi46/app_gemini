@@ -1,94 +1,263 @@
 # -*- coding: utf-8 -*-
-"""
-Module quản lý luồng tập trung cho ứng dụng.
+"""Tiện ích quản lý luồng tập trung cho ứng dụng."""
 
-Cung cấp một lớp ThreadingManager để quản lý ThreadPoolExecutor,
-giúp đơn giản hóa việc chạy các tác vụ nền và đảm bảo tắt ứng dụng an toàn.
-"""
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, Future, as_completed
-from typing import Callable, Any, List, Tuple, Dict
+from concurrent.futures import (
+    CancelledError,
+    Future,
+    ThreadPoolExecutor,
+    TimeoutError,
+    as_completed,
+)
+from dataclasses import dataclass, field
+from threading import Event, Lock
+from time import monotonic, sleep
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class CancelToken:
+    """Đại diện cho tín hiệu hủy bỏ truyền giữa các tác vụ nền."""
+
+    _event: Event = field(default_factory=Event)
+
+    def cancel(self) -> None:
+        """Thiết lập trạng thái hủy."""
+
+        self._event.set()
+
+    def is_cancelled(self) -> bool:
+        """Kiểm tra token đã bị hủy chưa."""
+
+        return self._event.is_set()
+
+    def raise_if_cancelled(self) -> None:
+        """Ném CancelledError nếu token đã bị hủy."""
+
+        if self.is_cancelled():
+            raise CancelledError()
+
+
+@dataclass
+class TaskRecord:
+    """Theo dõi trạng thái từng Future trong ThreadingManager."""
+
+    future: Future
+    token: CancelToken
+    name: str
+    group: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    created_at: float = field(default_factory=monotonic)
+
+
 class ThreadingManager:
-    """
-    Lớp quản lý tập trung cho các tác vụ chạy trong luồng nền.
+    """Lớp bao bọc ThreadPoolExecutor với cơ chế quản lý nhóm."""
 
-    Sử dụng một ThreadPoolExecutor để quản lý và tái sử dụng các luồng,
-    cung cấp một giao diện đơn giản để gửi tác vụ và xử lý việc tắt ứng dụng.
-    """
-
-    def __init__(self, max_workers: int = 10):
-        """
-        Khởi tạo ThreadingManager.
-
-        Args:
-            max_workers (int): Số lượng luồng tối đa trong pool.
-        """
-        logger.info(f"Khởi tạo ThreadPoolExecutor với tối đa {max_workers} luồng.")
+    def __init__(self, max_workers: int = 10) -> None:
+        logger.info("Khởi tạo ThreadPoolExecutor với tối đa %s luồng.", max_workers)
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="AppWorker")
+        self._lock = Lock()
+        self._groups: Dict[str, List[TaskRecord]] = {}
 
+    # ------------------------------------------------------------------
+    # API mới với group/metadata/cancel token
+    # ------------------------------------------------------------------
+    def submit(
+        self,
+        *,
+        func: Callable[..., Any],
+        args: Optional[Tuple[Any, ...]] = None,
+        kwargs: Optional[Dict[str, Any]] = None,
+        group: str = "default",
+        name: Optional[str] = None,
+        cancel_token: Optional[CancelToken] = None,
+        timeout: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> TaskRecord:
+        """Gửi task với khả năng quản lý vòng đời chi tiết."""
+
+        args = args or ()
+        kwargs = kwargs or {}
+        metadata = metadata or {}
+        task_name = name or getattr(func, "__name__", "anonymous")
+        token = cancel_token or CancelToken()
+
+        logger.debug("Gửi task '%s' vào nhóm '%s' (metadata=%s)", task_name, group, metadata)
+
+        def _runner() -> Any:
+            start = monotonic()
+            try:
+                token.raise_if_cancelled()
+                result = func(*args, cancel_token=token, **kwargs)
+                logger.debug(
+                    "Task '%s' (group=%s) hoàn tất sau %.2fs",
+                    task_name,
+                    group,
+                    monotonic() - start,
+                )
+                return result
+            except CancelledError:
+                logger.info(
+                    "Task '%s' (group=%s) bị hủy sau %.2fs",
+                    task_name,
+                    group,
+                    monotonic() - start,
+                )
+                raise
+            except Exception:
+                logger.exception("Task '%s' (group=%s) gặp lỗi.", task_name, group)
+                raise
+
+        future = self._executor.submit(_runner)
+        record = TaskRecord(
+            future=future,
+            token=token,
+            name=task_name,
+            group=group,
+            metadata=metadata,
+        )
+
+        with self._lock:
+            self._groups.setdefault(group, []).append(record)
+
+        future.add_done_callback(lambda _: self._cleanup_record(group, record))
+
+        if timeout:
+            self._executor.submit(self._monitor_timeout, record, timeout)
+
+        return record
+
+    def _monitor_timeout(self, record: TaskRecord, timeout: float) -> None:
+        """Theo dõi timeout của task và chủ động cancel."""
+
+        deadline = record.created_at + timeout
+        while monotonic() < deadline:
+            if record.future.done():
+                return
+            sleep(0.05)
+        if record.future.done():
+            return
+        logger.warning(
+            "Task '%s' (group=%s) vượt timeout %.2fs → cancel",
+            record.name,
+            record.group,
+            timeout,
+        )
+        record.token.cancel()
+        record.future.cancel()
+
+    def _cleanup_record(self, group: str, record: TaskRecord) -> None:
+        """Dọn danh sách nhóm khi future kết thúc."""
+
+        with self._lock:
+            records = self._groups.get(group)
+            if not records:
+                return
+            if record in records:
+                records.remove(record)
+            if not records:
+                self._groups.pop(group, None)
+
+    # ------------------------------------------------------------------
+    # API legacy để tương thích các module cũ
+    # ------------------------------------------------------------------
     def submit_task(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Future:
-        """
-        Gửi một tác vụ để thực thi trong một luồng nền.
+        """Hàm tương thích cũ (sẽ bỏ sau khi refactor xong)."""
 
-        Args:
-            func (Callable): Hàm hoặc phương thức cần thực thi.
-            *args: Các đối số vị trí cho hàm.
-            **kwargs: Các đối số từ khóa cho hàm.
+        logger.debug("[legacy] submit_task gọi trực tiếp executor: %s", getattr(func, "__name__", func))
+        return self._executor.submit(func, *args, **kwargs)
 
-        Returns:
-            Future: Một đối tượng Future đại diện cho việc thực thi tác vụ.
-        """
-        logger.debug(f"Gửi tác vụ '{func.__name__}' vào thread pool.")
-        future = self._executor.submit(func, *args, **kwargs)
-        return future
+    # ------------------------------------------------------------------
+    # Điều khiển nhóm tác vụ
+    # ------------------------------------------------------------------
+    def cancel_group(self, group: str) -> None:
+        """Hủy tất cả task thuộc một nhóm."""
 
-    def shutdown(self, wait: bool = True, timeout: float | None = None):
-        """
-        Tắt ThreadPoolExecutor một cách an toàn.
+        with self._lock:
+            records = list(self._groups.get(group, []))
+        for record in records:
+            logger.info("Cancel group '%s' → task '%s'", group, record.name)
+            record.token.cancel()
+            record.future.cancel()
 
-        Args:
-            wait (bool): True để chờ tất cả các tác vụ hoàn thành.
-            timeout (float | None): Thời gian tối đa (giây) để chờ.
-                                    Nếu None, sẽ chờ vô thời hạn nếu wait=True.
-        """
-        logger.info(f"Yêu cầu tắt ThreadPoolExecutor (wait={wait}, timeout={timeout}).")
-        # Python 3.9+ có cancel_futures=True, nhưng shutdown với timeout là đủ tốt.
+    def await_idle(self, group: Optional[str] = None, timeout: Optional[float] = None) -> bool:
+        """Chờ tới khi nhóm (hoặc toàn bộ) task rỗng."""
+
+        deadline = None if timeout is None else monotonic() + timeout
+        while True:
+            with self._lock:
+                if group:
+                    pending = [rec.future for rec in self._groups.get(group, []) if not rec.future.done()]
+                else:
+                    pending = [rec.future for records in self._groups.values() for rec in records if not rec.future.done()]
+            if not pending:
+                return True
+            if deadline is not None and monotonic() > deadline:
+                logger.warning("await_idle hết thời gian cho group=%s", group or "<all>")
+                return False
+            for fut in list(pending):
+                try:
+                    fut.result(timeout=0.05)
+                except TimeoutError:
+                    continue
+                except CancelledError:
+                    continue
+                except Exception:
+                    logger.exception("Task trong group %s kết thúc với lỗi.", group or "<all>")
+
+    def new_cancel_token(self) -> CancelToken:
+        """Tạo CancelToken mới (phục vụ test)."""
+
+        return CancelToken()
+
+    def shutdown(
+        self,
+        *,
+        wait: bool = True,
+        timeout: Optional[float] = None,
+        force: bool = False,
+    ) -> None:
+        """Đóng ThreadPoolExecutor và dọn dẹp các nhóm task."""
+
+        logger.info(
+            "ThreadingManager.shutdown(wait=%s, timeout=%s, force=%s)",
+            wait,
+            timeout,
+            force,
+        )
+
+        if force:
+            with self._lock:
+                records = [rec for recs in self._groups.values() for rec in recs]
+            for record in records:
+                record.token.cancel()
+                record.future.cancel()
+        elif wait:
+            self.await_idle(timeout=timeout)
+
         self._executor.shutdown(wait=wait)
-        logger.info("ThreadPoolExecutor đã được tắt.")
 
 
-def run_in_parallel(tasks: List[Tuple[Callable, Tuple, Dict]]) -> Dict[str, Any]:
-    """
-    Thực thi một danh sách các tác vụ song song và trả về kết quả.
+def run_in_parallel(tasks: List[Tuple[Callable[..., Any], Tuple[Any, ...], Dict[str, Any]]]) -> Dict[str, Any]:
+    """Giữ nguyên helper cũ để tương thích với pipeline chưa refactor."""
 
-    Args:
-        tasks: Một danh sách các tuple, mỗi tuple chứa:
-               (hàm_cần_gọi, tuple_đối_số_vị_trí, dict_đối_số_từ_khóa)
-
-    Returns:
-        Một dictionary chứa kết quả, với key là tên của hàm và value là kết quả trả về.
-    """
-    results = {}
-    # Sử dụng một executor tạm thời cho nhóm tác vụ này
+    results: Dict[str, Any] = {}
     with ThreadPoolExecutor(max_workers=len(tasks) or 1) as executor:
-        future_to_func_name = {
-            executor.submit(func, *args, **kwargs): func.__name__
-            for func, args, kwargs in tasks
+        future_to_name = {
+            executor.submit(func, *args, **kwargs): getattr(func, "__name__", f"task_{idx}")
+            for idx, (func, args, kwargs) in enumerate(tasks)
         }
 
-        for future in as_completed(future_to_func_name):
-            func_name = future_to_func_name[future]
+        for future in as_completed(future_to_name):
+            name = future_to_name[future]
             try:
-                result = future.result()
-                results[func_name] = result
-                logger.debug(f"Tác vụ song song '{func_name}' đã hoàn thành.")
+                results[name] = future.result()
+                logger.debug("Task song song '%s' hoàn tất thành công.", name)
             except Exception:
-                logger.exception(f"Tác vụ song song '{func_name}' đã gặp lỗi.")
-                results[func_name] = None  # Ghi nhận lỗi
+                logger.exception("Task song song '%s' gặp lỗi.", name)
+                results[name] = None
     return results

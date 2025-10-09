@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import tkinter as tk
+from time import monotonic
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import TYPE_CHECKING, Any, Callable, Dict, List
@@ -649,6 +650,14 @@ def build_ui(app: "AppUI") -> None:
 
 def poll_ui_queue(app: "AppUI") -> None:
     """Lấy và thực thi các hàm cập nhật UI từ hàng đợi một cách an toàn."""
+    backlog = app.ui_queue.qsize()
+    if backlog > app.ui_backlog_warn_threshold:
+        now = monotonic()
+        if now - app._last_ui_backlog_log > 1.0:
+            logger.warning(
+                "UI queue backlog=%s vượt ngưỡng=%s", backlog, app.ui_backlog_warn_threshold
+            )
+            app._last_ui_backlog_log = now
     try:
         while not app.ui_queue.empty():
             callback = app.ui_queue.get_nowait()
@@ -718,6 +727,47 @@ def ask_confirmation(title: str, message: str) -> bool:
     """Hiển thị hộp thoại xác nhận và trả về lựa chọn của người dùng."""
     from tkinter import messagebox
     return messagebox.askyesno(title, message)
+
+
+class ShutdownDialog(tk.Toplevel):
+    """Hiển thị tiến trình shutdown để người dùng nắm trạng thái."""
+
+    def __init__(self, parent: tk.Tk | tk.Widget | None) -> None:
+        super().__init__(parent)
+        self.title("Đang đóng ứng dụng")
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(False, False)
+
+        self.progress_var = tk.DoubleVar(value=0.0)
+
+        frame = ttk.Frame(self, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        self.status_label = ttk.Label(frame, text="Đang xử lý...", anchor="w")
+        self.status_label.pack(fill="x", pady=(0, 8))
+
+        progress = ttk.Progressbar(frame, mode="determinate", maximum=100, variable=self.progress_var)
+        progress.pack(fill="x")
+
+    def update_progress(self, message: str, percent: float) -> None:
+        """Cập nhật thông tin hiển thị."""
+
+        self.status_label.config(text=message)
+        self.progress_var.set(percent)
+        self.update_idletasks()
+
+    def close(self) -> None:
+        """Đóng hộp thoại."""
+
+        self.grab_release()
+        self.destroy()
+
+
+def create_shutdown_dialog(parent: tk.Tk | tk.Widget | None) -> ShutdownDialog:
+    """Tạo và trả về dialog shutdown mới."""
+
+    return ShutdownDialog(parent)
 
 
 def toggle_controls_state(app: "AppUI", state: str) -> None:

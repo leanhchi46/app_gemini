@@ -129,6 +129,7 @@ class NewsConfig:
     block_before_min: int
     block_after_min: int
     cache_ttl_sec: int
+    provider_timeout_sec: int = 20
 
 
 @dataclass(frozen=True)

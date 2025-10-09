@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
-import time
+from concurrent.futures import CancelledError, TimeoutError
 from datetime import datetime, timedelta
+from threading import Lock
+from time import monotonic
 from typing import Any, Callable, Final, List, Optional
 
 import pytz
@@ -12,6 +13,7 @@ import pytz
 from APP.configs.app_config import FMPConfig, NewsConfig, RunConfig, TEConfig
 from APP.services.fmp_service import FMPService
 from APP.services.te_service import TEService
+from APP.utils.threading_utils import CancelToken, ThreadingManager
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +59,10 @@ class NewsService:
         self._dedup_ids: set[str] = set()
         
         # Threading attributes
-        self._lock = threading.Lock()
-        self._stop_event = threading.Event()
-        self._worker_thread: Optional[threading.Thread] = None
+        self._lock = Lock()
         self._update_callback: Optional[Callable[[List[dict[str, Any]]], None]] = None
+        self._last_refresh: Optional[datetime] = None
+        self._last_latency_sec: float = 0.0
 
     def update_config(self, config: RunConfig):
         """Cập nhật cấu hình cho dịch vụ một cách an toàn."""
@@ -79,57 +81,27 @@ class NewsService:
         """Đăng ký một hàm callback để được gọi sau mỗi lần cache được cập nhật."""
         self._update_callback = callback
 
-    def start(self):
-        """Khởi động luồng nền để làm mới tin tức tự động."""
-        if self._worker_thread and self._worker_thread.is_alive():
-            logger.warning("Luồng nền của NewsService đã chạy rồi.")
-            return
-        
-        self._stop_event.clear()
-        self._worker_thread = threading.Thread(target=self._background_worker, daemon=True)
-        self._worker_thread.start()
-        logger.info("Dịch vụ nền NewsService đã được khởi động.")
+    # Các phương thức dưới đây giữ lại để tương thích với code cũ.
 
-    def stop(self):
-        """Dừng luồng nền một cách an toàn."""
-        if self._worker_thread and self._worker_thread.is_alive():
-            logger.info("Đang yêu cầu dừng dịch vụ nền NewsService...")
-            self._stop_event.set()
-            self._worker_thread.join(timeout=5.0)
-            if self._worker_thread.is_alive():
-                logger.error("Luồng nền NewsService không dừng kịp thời.")
-            else:
-                logger.info("Dịch vụ nền NewsService đã dừng thành công.")
-        self._worker_thread = None
+    def start(self):  # pragma: no cover - chỉ tồn tại cho tương thích
+        logger.warning("NewsService.start() không còn tạo luồng nền. Hãy dùng NewsController.start_polling().")
 
-    def _background_worker(self):
-        """Vòng lặp chính của luồng nền, chịu trách nhiệm làm mới cache định kỳ."""
-        logger.debug("Luồng nền NewsService bắt đầu, chờ 2 giây để config được tải.")
-        # Chờ một chút lúc khởi động để đảm bảo config ban đầu đã được áp dụng.
-        if self._stop_event.wait(timeout=2.0):
-            return  # Thoát nếu có tín hiệu dừng ngay lúc khởi động
+    def stop(self):  # pragma: no cover - chỉ tồn tại cho tương thích
+        logger.warning("NewsService.stop() không còn tác dụng trong kiến trúc mới.")
 
-        while not self._stop_event.is_set():
-            try:
-                with self._lock:
-                    is_enabled = self.fmp_service is not None or self.te_service is not None
-                
-                if is_enabled:
-                    logger.info("Luồng nền: Bắt đầu làm mới cache tin tức...")
-                    self._fetch_and_process_events()
-                else:
-                    logger.debug("Luồng nền: Không có nhà cung cấp tin tức nào được bật, bỏ qua lần làm mới.")
+    def get_cache_ttl(self) -> int:
+        """Trả về TTL hiện tại của cache tin tức (giây)."""
 
-            except Exception:
-                logger.exception("Lỗi không mong muốn trong luồng nền của NewsService.")
-            
-            with self._lock:
-                refresh_interval = self.news_config.cache_ttl_sec if self.news_config else 300
-            
-            # Đợi cho đến lần làm mới tiếp theo hoặc cho đến khi có tín hiệu dừng
-            if self._stop_event.wait(timeout=refresh_interval):
-                break # Thoát vòng lặp nếu có tín hiệu dừng
-        logger.debug("Luồng nền NewsService đã thoát khỏi vòng lặp.")
+        with self._lock:
+            return self.news_config.cache_ttl_sec if self.news_config else 300
+
+    def get_timeout_sec(self) -> int:
+        """Trả về timeout mặc định cho từng provider."""
+
+        with self._lock:
+            if self.news_config and hasattr(self.news_config, "provider_timeout_sec"):
+                return getattr(self.news_config, "provider_timeout_sec")
+        return 20
 
     def is_in_news_blackout(
         self, symbol: str, now: Optional[datetime] = None
@@ -203,80 +175,154 @@ class NewsService:
             now_utc = datetime.now(pytz.utc)
             is_in_blackout, reason = self.is_in_news_blackout(symbol=symbol, now=now_utc)
             upcoming_events = self.get_upcoming_events(symbol=symbol, now=now_utc)
+            with self._lock:
+                last_refresh = self._last_refresh
+                latency = self._last_latency_sec
 
             return {
                 "is_in_news_window": is_in_blackout,
                 "reason": reason,
                 "upcoming_events": upcoming_events[:3],  # Chỉ lấy 3 sự kiện gần nhất
+                "last_refresh_utc": last_refresh,
+                "latency_sec": latency,
             }
         except Exception as e:
             logger.error(f"Lỗi khi phân tích tin tức từ cache cho '{symbol}': {e}", exc_info=True)
             return {"error": "failed to analyze news from cache"}
 
-    def _fetch_and_process_events(self):
-        """
-        Lấy và xử lý sự kiện từ TẤT CẢ các nhà cung cấp được kích hoạt.
-        Phương thức này giờ đây được gọi bởi luồng nền.
-        """
-        from concurrent.futures import ThreadPoolExecutor
+    def refresh(
+        self,
+        *,
+        threading_manager: ThreadingManager,
+        cancel_token: CancelToken,
+        priority: str,
+        timeout_sec: int,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Làm mới cache tin tức thông qua ThreadingManager."""
 
-        all_processed_events = []
-        
+        start_time = monotonic()
+        now_utc = datetime.now(pytz.utc)
+
         with self._lock:
-            # Lấy một bản sao của các service để sử dụng trong phương thức này
+            ttl = self.news_config.cache_ttl_sec if self.news_config else 300
+            last_time = self._cache_time
+            cache_copy = list(self._cache)
+
+        cache_age = (now_utc - last_time).total_seconds() if last_time else None
+        if not force and cache_age is not None and cache_age < ttl:
+            logger.debug(
+                "NewsService dùng cache (age=%.1fs < ttl=%ss, priority=%s).",
+                cache_age,
+                ttl,
+                priority,
+            )
+            return {
+                "events": cache_copy,
+                "source": "cache",
+                "priority": priority,
+                "ttl": ttl,
+                "latency_sec": 0.0,
+            }
+
+        cancel_token.raise_if_cancelled()
+        events = self._collect_events(
+            threading_manager=threading_manager,
+            cancel_token=cancel_token,
+            timeout_sec=timeout_sec,
+            priority=priority,
+        )
+        cancel_token.raise_if_cancelled()
+
+        filtered_events = self._filter_high_impact(events)
+
+        with self._lock:
+            self._cache = filtered_events
+            self._cache_time = now_utc
+            self._last_refresh = now_utc
+            self._last_latency_sec = monotonic() - start_time
+            callback = self._update_callback
+            cache_copy = list(self._cache)
+
+        if callback:
+            try:
+                callback(cache_copy)
+            except Exception:
+                logger.exception("Lỗi khi thực thi callback cập nhật tin tức.")
+
+        logger.info(
+            "NewsService làm mới cache (%d sự kiện, priority=%s, source=network, latency=%.2fs)",
+            len(cache_copy),
+            priority,
+            self._last_latency_sec,
+        )
+
+        return {
+            "events": cache_copy,
+            "source": "network",
+            "priority": priority,
+            "ttl": ttl,
+            "latency_sec": self._last_latency_sec,
+        }
+
+    def _collect_events(
+        self,
+        *,
+        threading_manager: ThreadingManager,
+        cancel_token: CancelToken,
+        timeout_sec: int,
+        priority: str,
+    ) -> list[dict[str, Any]]:
+        """Thu thập dữ liệu thô từ các provider đã bật."""
+
+        with self._lock:
             fmp_service = self.fmp_service
             te_service = self.te_service
 
         if not fmp_service and not te_service:
             logger.debug("Không có nhà cung cấp tin tức nào được kích hoạt.")
-            return
+            return []
 
+        tasks = []
+        if fmp_service:
+            tasks.append(("fmp", fmp_service.get_economic_calendar, self._transform_fmp_data))
+        if te_service:
+            tasks.append(("te", te_service.get_calendar_events, self._transform_te_data))
+
+        provider_records: list[tuple[str, Callable[[list[dict]], list[dict]], Any]] = []
         self._dedup_ids.clear()
-        logger.debug("Đã xóa cache ID chống trùng lặp của tin tức.")
 
-        raw_fmp_data = None
-        raw_te_data = None
+        for provider_name, fetch_fn, transform_fn in tasks:
 
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="NewsFetcher") as executor:
-            future_fmp = executor.submit(fmp_service.get_economic_calendar) if fmp_service else None
-            future_te = executor.submit(te_service.get_calendar_events) if te_service else None
+            def provider_worker(cancel_token: CancelToken, fn=fetch_fn) -> list[dict]:
+                cancel_token.raise_if_cancelled()
+                return fn()
 
-            if future_fmp:
-                try:
-                    raw_fmp_data = future_fmp.result(timeout=15)
-                except Exception as e:
-                    logger.error(f"Lỗi khi lấy tin tức từ FMP: {e}", exc_info=True)
+            record = threading_manager.submit(
+                func=provider_worker,
+                group="news.polling",
+                name=f"news.provider.{provider_name}",
+                cancel_token=cancel_token,
+                timeout=timeout_sec,
+                metadata={"component": "news", "provider": provider_name, "priority": priority},
+            )
+            provider_records.append((provider_name, transform_fn, record))
 
-            if future_te:
-                try:
-                    raw_te_data = future_te.result(timeout=15)
-                except Exception as e:
-                    logger.warning(f"Không thể lấy tin tức từ Trading Economics: {e}")
-
-        if raw_fmp_data:
-            all_processed_events.extend(self._transform_fmp_data(raw_fmp_data))
-        if raw_te_data:
-            all_processed_events.extend(self._transform_te_data(raw_te_data))
-
-        new_cache = self._filter_high_impact(all_processed_events)
-        
-        with self._lock:
-            self._cache = new_cache
-            self._cache_time = datetime.now(pytz.utc)
-            logger.info(f"Cache được cập nhật với {len(self._cache)} sự kiện quan trọng.")
-            
-            # Lấy callback ra để gọi bên ngoài lock
-            callback = self._update_callback
-            # Tạo bản sao của cache để gửi đi, đảm bảo an toàn
-            cache_copy = list(self._cache)
-
-        # Gọi callback sau khi đã giải phóng lock
-        if callback:
+        aggregated: list[dict[str, Any]] = []
+        for provider_name, transform_fn, record in provider_records:
             try:
-                callback(cache_copy)
-                logger.debug("Callback cập nhật tin tức đã được gọi.")
-            except Exception:
-                logger.exception("Lỗi khi thực thi callback cập nhật tin tức.")
+                raw_data = record.future.result(timeout=timeout_sec)
+                cancel_token.raise_if_cancelled()
+                if raw_data:
+                    aggregated.extend(transform_fn(raw_data))
+            except CancelledError:
+                logger.info("Provider %s bị hủy do cancel token.", provider_name)
+            except TimeoutError:
+                logger.warning("Provider %s vượt quá timeout %ss.", provider_name, timeout_sec)
+            except Exception as exc:
+                logger.warning("Provider %s gặp lỗi: %s", provider_name, exc)
+
+        return aggregated
 
     def _transform_fmp_data(self, events: list[dict]) -> list[dict]:
         """Chuyển đổi dữ liệu từ FMP API (thực chất là investpy)."""
