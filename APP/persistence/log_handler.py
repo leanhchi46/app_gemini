@@ -52,6 +52,7 @@ def setup_logging(config: Optional[LoggingConfig] = None) -> None:
         # Tạo handler xoay vòng
         rotating_handler = RotatingFileHandler(
             log_file,
+            mode="w",
             maxBytes=max_bytes,
             backupCount=cfg.log_rotation_backup_count,
             encoding="utf-8",
@@ -68,6 +69,10 @@ def setup_logging(config: Optional[LoggingConfig] = None) -> None:
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             handlers=[rotating_handler, logging.StreamHandler(sys.stdout)],
         )
+
+        # Ẩn các log không cần thiết từ các thư viện bên thứ ba
+        logging.getLogger("matplotlib.font_manager").setLevel(logging.INFO)
+        logging.getLogger("PIL.PngImagePlugin").setLevel(logging.INFO)
         logger.info(
             f"Đã cấu hình logging xoay vòng. File log: {log_file}, "
             f"Size: {cfg.log_rotation_size_mb}MB, Backups: {cfg.log_rotation_backup_count}"
