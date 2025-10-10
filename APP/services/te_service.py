@@ -26,9 +26,19 @@ class TEService:
             config: Đối tượng cấu hình TEConfig chứa API key.
         """
         self.config = config
+        api_key = (self.config.api_key or "").strip()
+
+        if not api_key:
+            raise ValueError("API key cho Trading Economics không được bỏ trống")
+
+        login_key, login_format = self._prepare_login_args(api_key)
+
         try:
-            te.login(self.config.api_key)
-            logger.info("Đăng nhập thành công vào Trading Economics API.")
+            te.login(login_key)
+            logger.info(
+                "Đăng nhập thành công vào Trading Economics API với định dạng key %s.",
+                login_format,
+            )
         except Exception as e:
             logger.error("Lỗi khi đăng nhập vào Trading Economics API: %s", e)
             # Ném lại ngoại lệ để ngăn việc khởi tạo nếu không có key
@@ -84,3 +94,19 @@ class TEService:
             # Luôn khôi phục lại hàm gốc
             ssl._create_default_https_context = original_create_context
             logger.debug("Đã khôi phục context SSL mặc định.")
+
+    @staticmethod
+    def _prepare_login_args(api_key: str) -> Tuple[str, str]:
+        """Chuẩn hóa API key để tương thích với tradingeconomics.login."""
+
+        login_format = "single key"
+        if ":" in api_key:
+            username, password = api_key.split(":", 1)
+            username = username.strip()
+            password = password.strip()
+            if not username or not password:
+                raise ValueError("API key Trading Economics không hợp lệ – thiếu username hoặc password")
+            api_key = f"{username}:{password}"
+            login_format = "username/password"
+
+        return api_key, login_format

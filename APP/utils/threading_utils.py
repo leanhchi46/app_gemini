@@ -25,6 +25,7 @@ class CancelToken:
     """Đại diện cho tín hiệu hủy bỏ truyền giữa các tác vụ nền."""
 
     _event: Event = field(default_factory=Event)
+    _parent: Optional["CancelToken"] = None
 
     def cancel(self) -> None:
         """Thiết lập trạng thái hủy."""
@@ -32,15 +33,24 @@ class CancelToken:
         self._event.set()
 
     def is_cancelled(self) -> bool:
-        """Kiểm tra token đã bị hủy chưa."""
+        """Kiểm tra token đã bị hủy chưa (bao gồm cả token cha)."""
 
-        return self._event.is_set()
+        if self._event.is_set():
+            return True
+        if self._parent:
+            return self._parent.is_cancelled()
+        return False
 
     def raise_if_cancelled(self) -> None:
         """Ném CancelledError nếu token đã bị hủy."""
 
         if self.is_cancelled():
             raise CancelledError()
+
+    def derive(self) -> "CancelToken":
+        """Tạo token con chia sẻ trạng thái hủy từ token hiện tại."""
+
+        return CancelToken(_parent=self)
 
 
 @dataclass
@@ -85,7 +95,7 @@ class ThreadingManager:
         kwargs = kwargs or {}
         metadata = metadata or {}
         task_name = name or getattr(func, "__name__", "anonymous")
-        token = cancel_token or CancelToken()
+        token = cancel_token.derive() if cancel_token else CancelToken()
 
         logger.debug("Gửi task '%s' vào nhóm '%s' (metadata=%s)", task_name, group, metadata)
 
