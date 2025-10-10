@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import inspect
 from concurrent.futures import (
     CancelledError,
     Future,
@@ -92,7 +93,25 @@ class ThreadingManager:
             start = monotonic()
             try:
                 token.raise_if_cancelled()
-                result = func(*args, cancel_token=token, **kwargs)
+                call_kwargs = dict(kwargs)
+                inject_token = False
+                if "cancel_token" not in call_kwargs:
+                    try:
+                        signature = inspect.signature(func)
+                    except (TypeError, ValueError):
+                        signature = None
+
+                    if signature and "cancel_token" in signature.parameters:
+                        try:
+                            bound = signature.bind_partial(*args, **call_kwargs)
+                            inject_token = "cancel_token" not in bound.arguments
+                        except TypeError:
+                            inject_token = True
+
+                if inject_token:
+                    call_kwargs["cancel_token"] = token
+
+                result = func(*args, **call_kwargs)
                 logger.debug(
                     "Task '%s' (group=%s) hoàn tất sau %.2fs",
                     task_name,
