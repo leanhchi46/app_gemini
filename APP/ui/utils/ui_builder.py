@@ -760,7 +760,10 @@ class ShutdownDialog(tk.Toplevel):
     def close(self) -> None:
         """Đóng hộp thoại."""
 
-        self.grab_release()
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
         self.destroy()
 
 

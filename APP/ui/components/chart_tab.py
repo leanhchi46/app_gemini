@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
+from dataclasses import replace
 from datetime import datetime
 from tkinter import ttk
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -378,8 +379,9 @@ class ChartTab:
         if not mt5_service.is_connected():
             return {"mt5_data": None, "status_message": "MT5 chưa kết nối."}
 
-        current_config = self.app._snapshot_config()
-        current_config.mt5.symbol = stream_config.symbol
+        snapshot_config = self.app._snapshot_config()
+        updated_mt5 = replace(snapshot_config.mt5, symbol=stream_config.symbol)
+        current_config = replace(snapshot_config, mt5=updated_mt5)
 
         cancel_token.raise_if_cancelled()
         safe_mt5_data = mt5_service.get_market_data(current_config.mt5)

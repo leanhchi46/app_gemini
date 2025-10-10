@@ -66,26 +66,28 @@ class FileListView:
         Bắt đầu quá trình làm mới danh sách tệp trong một luồng nền.
         """
         self.logger.debug(f"Yêu cầu làm mới danh sách cho '{self.file_glob}'")
+        base_folder_str = (self.app.folder_path.get() or "").strip()
+        if not base_folder_str:
+            self.logger.warning("Thư mục gốc chưa được đặt, bỏ qua làm mới danh sách.")
+            self.listbox.delete(0, "end")
+            self._file_paths.clear()
+            self.listbox.insert("end", f"Chưa chọn thư mục cho {self.file_type_name}.")
+            return
+
         # Xóa danh sách hiện tại ngay lập tức để người dùng biết quá trình bắt đầu
         self.listbox.delete(0, "end")
         self._file_paths.clear()
         self.listbox.insert("end", "Đang tải...")
 
         # Chạy tác vụ I/O nặng trong một luồng riêng
-        self.app._run_in_background(self._refresh_worker)
+        self.app._run_in_background(self._refresh_worker, base_folder_str)
 
-    def _refresh_worker(self) -> None:
+    def _refresh_worker(self, base_folder_str: str) -> None:
         """
         Worker chạy nền để quét, sắp xếp và chuẩn bị dữ liệu danh sách tệp.
         """
         self.logger.debug(f"Worker bắt đầu quét tệp cho '{self.file_glob}'")
         try:
-            base_folder_str = self.app.folder_path.get()
-            if not base_folder_str:
-                self.logger.warning("Thư mục gốc chưa được đặt, worker thoát.")
-                ui_builder.enqueue(self.app, self._update_listbox_ui, [], [], "Chưa chọn thư mục.")
-                return
-
             base_folder = Path(base_folder_str)
             all_files = []
 

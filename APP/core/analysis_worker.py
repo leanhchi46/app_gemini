@@ -330,7 +330,7 @@ class AnalysisWorker:
             def submit_upload(idx: int, path_str: str, name: str) -> None:
                 record = manager.submit(
                     func=self._process_and_upload_single_image,
-                    args=(path_str, name, idx, cache, self.cancel_token),
+                    args=(path_str, name, idx, cache),
                     group="analysis.upload",
                     name=f"analysis.upload.{self.session_id}.{idx}",
                     cancel_token=self.cancel_token,

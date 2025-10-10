@@ -167,6 +167,31 @@ class NewsService:
 
         return sorted(upcoming_events, key=lambda x: x["when_utc"])
 
+    def get_all_upcoming_events(self, now: Optional[datetime] = None, limit: Optional[int] = None) -> list[dict[str, Any]]:
+        """Lấy toàn bộ sự kiện sắp tới từ cache (không lọc theo symbol)."""
+        now_utc = (now or datetime.now(pytz.utc)).astimezone(pytz.utc)
+
+        with self._lock:
+            cached_events = list(self._cache)
+            local_timezone_str = self.timezone_str
+
+        ho_chi_minh_tz = pytz.timezone(local_timezone_str)
+        upcoming_events: list[dict[str, Any]] = []
+        for event in cached_events:
+            event_time_utc = event.get("when_utc")
+            if not event_time_utc or event_time_utc < now_utc:
+                continue
+
+            processed_event = event.copy()
+            processed_event["when_local"] = event_time_utc.astimezone(ho_chi_minh_tz)
+            processed_event["time_remaining"] = self._format_timedelta(event_time_utc - now_utc)
+            upcoming_events.append(processed_event)
+
+        upcoming_events.sort(key=lambda x: x["when_utc"])
+        if limit is not None:
+            return upcoming_events[:limit]
+        return upcoming_events
+
     def get_news_analysis(self, symbol: str) -> dict[str, Any]:
         """
         Lấy phân tích tin tức tức thì từ cache.

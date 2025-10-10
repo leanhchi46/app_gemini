@@ -5,6 +5,7 @@ Module để xử lý ghi log, bao gồm log debug của ứng dụng và log qu
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ import threading
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, TextIO
 
 # Thêm import từ cấu trúc mới
 from APP.configs import workspace_config
@@ -26,6 +27,33 @@ logger = logging.getLogger(__name__)
 
 # Khóa riêng để ghi log giao dịch an toàn trong môi trường đa luồng
 _trade_log_lock = threading.Lock()
+
+
+def _configure_stdio_encoding(encoding: str = "utf-8") -> None:
+    """Ensure stdout/stderr use UTF-8 to avoid UnicodeEncodeError."""
+    for stream_name in ("stdout", "stderr"):
+        stream: Optional[TextIO] = getattr(sys, stream_name, None)
+        if stream is None:
+            continue
+
+        current_encoding = getattr(stream, "encoding", None)
+        if current_encoding and current_encoding.lower() == encoding.lower():
+            continue
+
+        try:
+            stream.reconfigure(encoding=encoding, errors="backslashreplace")
+        except AttributeError:
+            buffer = getattr(stream, "buffer", None)
+            if buffer is None:
+                continue
+            wrapped_stream = io.TextIOWrapper(
+                buffer,
+                encoding=encoding,
+                errors="backslashreplace",
+                line_buffering=True,
+            )
+            setattr(sys, stream_name, wrapped_stream)
+
 
 
 def setup_logging(config: Optional[LoggingConfig] = None) -> None:
@@ -43,6 +71,7 @@ def setup_logging(config: Optional[LoggingConfig] = None) -> None:
     logger.debug("Bắt đầu thiết lập logging cho ứng dụng.")
     try:
         log_dir = Path(cfg.log_dir)
+        _configure_stdio_encoding()
         log_dir.mkdir(exist_ok=True)
         log_file = log_dir / cfg.log_file_name
 
@@ -64,10 +93,13 @@ def setup_logging(config: Optional[LoggingConfig] = None) -> None:
             for handler in root_logger.handlers[:]:
                 root_logger.removeHandler(handler)
 
+        console_handler = logging.StreamHandler(sys.stdout)
+
+
         logging.basicConfig(
             level=logging.DEBUG,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            handlers=[rotating_handler, logging.StreamHandler(sys.stdout)],
+            handlers=[rotating_handler, console_handler],
         )
 
         # Ẩn các log không cần thiết từ các thư viện bên thứ ba

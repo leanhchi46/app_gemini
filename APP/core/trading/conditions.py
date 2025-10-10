@@ -5,7 +5,10 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
-import holidays
+try:
+    import holidays  # type: ignore[import]
+except ModuleNotFoundError:
+    holidays = None  # type: ignore[assignment]
 
 from APP.services import mt5_service, telegram_service
 from APP.services.news_service import NewsService
@@ -46,12 +49,15 @@ def check_no_run_conditions(
 
     # 2. Kiểm tra ngày lễ
     if cfg.no_run.holiday_check_enabled:
-        country_holidays = holidays.country_holidays(cfg.no_run.holiday_check_country)
-        if now in country_holidays:
-            reasons.append(
-                f"Không chạy vào ngày lễ của {cfg.no_run.holiday_check_country}: "
-                f"{country_holidays.get(now)}"
-            )
+        if holidays is None:
+            logger.warning("Không thể kiểm tra ngày lễ vì thiếu thư viện 'holidays'.")
+        else:
+            country_holidays = holidays.country_holidays(cfg.no_run.holiday_check_country)
+            if now in country_holidays:
+                reasons.append(
+                    f"Không chạy vào ngày lễ của {cfg.no_run.holiday_check_country}: "
+                    f"{country_holidays.get(now)}"
+                )
 
     # 3. Kiểm tra Kill Zone
     active_kill_zone = ""

@@ -117,3 +117,9 @@ Warnings   : none
 * Test report tổng hợp (PDF hoặc wiki) chứa kết quả đo và log minh chứng.
 * Gói tài liệu cập nhật (README, runbook, QA guide).
 * Báo cáo lesson learned sau rollout.
+## 8. Ghi chú kiểm tra ngày 2025-10-09
+
+- Đã chạy `python APP/main.py` bằng `.venv\Scripts\python` (tự đóng sau 15s) và ghi nhận `ThreadingManager` xử lý `chart.refresh`/`news.polling` ổn định trong `Log/app_debug.log` (mốc 12:36).
+- Rà soát `APP/services/te_service.py` và `APP/services/fmp_service.py` để chắc chắn fallback SSL trả về danh sách rỗng thay vì ném lỗi, giúp UI không hiển thị alert khi môi trường thiếu chứng chỉ.
+- Kiểm tra `Log/app_debug.log` đảm bảo không xuất hiện dòng `ERROR` mới sau lần chạy trên; các task `chart.draw` hoàn tất trong ~0.00s, phù hợp mục tiêu latency.
+- Đối chiếu checklist NewsService (mục 3) với cập nhật mã để đảm bảo scenario offline đã được bao phủ trong regression.

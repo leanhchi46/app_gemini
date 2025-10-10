@@ -1,76 +1,139 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime, timedelta
+import ssl
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
-import pytz
+import certifi
 import tradingeconomics as te
 
 from APP.configs.app_config import TEConfig
 
 logger = logging.getLogger(__name__)
 
+_TE_BASE_URL = "https://api.tradingeconomics.com/calendar"
+_TE_USER_AGENT = "GeminiApp/1.0 (+https://tradingeconomics.com)"
+
 
 class TEService:
-    """
-    Dịch vụ để tương tác với API của Trading Economics (TE).
-    Lớp này chỉ chịu trách nhiệm gọi API và trả về dữ liệu thô.
-    Việc cache được quản lý bởi lớp NewsService cấp cao hơn.
-    """
+    """Wrapper đơn giản cho Trading Economics API."""
 
     def __init__(self, config: TEConfig):
-        """
-        Khởi tạo TEService.
-
-        Args:
-            config: Đối tượng cấu hình TEConfig chứa API key.
-        """
         self.config = config
         try:
             te.login(self.config.api_key)
             logger.info("Đăng nhập thành công vào Trading Economics API.")
-        except Exception as e:
-            logger.error("Lỗi khi đăng nhập vào Trading Economics API: %s", e)
-            # Ném lại ngoại lệ để ngăn việc khởi tạo nếu không có key
+        except Exception as exc:  # pragma: no cover - logging path
+            logger.error("Lỗi khi đăng nhập vào Trading Economics API: %s", exc)
             raise
 
     def get_calendar_events(self) -> list[dict]:
-        """
-        Lấy dữ liệu lịch kinh tế từ Trading Economics.
-
-        Returns:
-            Danh sách các sự kiện kinh tế.
-            
-        Raises:
-            Exception: Nếu có lỗi xảy ra trong quá trình gọi API.
-        """
-        import ssl
-        
+        """Lấy lịch kinh tế với SDK, fallback sang REST nếu cần."""
         logger.debug("Đang thực hiện cuộc gọi API đến Trading Economics...")
 
-        # Lưu trữ hàm gốc, không phải kết quả của nó
         original_create_context = ssl._create_default_https_context
-
         try:
             if self.config.skip_ssl_verify:
                 logger.warning("Bỏ qua xác minh SSL cho Trading Economics API.")
-                # Thay thế bằng hàm tạo context không xác minh
                 ssl._create_default_https_context = ssl._create_unverified_context
 
-            # API của TE không hỗ trợ lọc theo ngày, nó trả về một khoảng thời gian mặc định
             calendar_data = te.getCalendarData()
+            if isinstance(calendar_data, list) and calendar_data:
+                logger.info(
+                    "Lấy thành công %d sự kiện từ Trading Economics (SDK).",
+                    len(calendar_data),
+                )
+                return calendar_data
 
-            if not isinstance(calendar_data, list):
-                logger.warning("TE API không trả về danh sách: %s", calendar_data)
-                return []
-
-            logger.info("Lấy thành công %d sự kiện từ Trading Economics.", len(calendar_data))
-            return calendar_data
-        except Exception as e:
-            logger.error("Lỗi khi gọi TE API: %s", e)
-            # Ném lại ngoại lệ để lớp gọi (NewsService) có thể xử lý
-            raise
+            logger.warning(
+                "Trading Economics SDK trả về dữ liệu không hợp lệ hoặc rỗng. Thử REST fallback."
+            )
+            return self._fetch_via_rest()
+        except Exception as exc:  # pragma: no cover - logging path
+            logger.warning(
+                "Trading Economics SDK gặp lỗi (%s). Thử REST fallback.",
+                exc,
+            )
+            return self._fetch_via_rest()
         finally:
-            # Luôn khôi phục lại hàm gốc
             ssl._create_default_https_context = original_create_context
             logger.debug("Đã khôi phục context SSL mặc định.")
+
+    def _fetch_via_rest(self) -> list[dict]:
+        """Gọi REST API của TE. Thử khóa chính, fallback sang guest."""
+        context = ssl.create_default_context(cafile=certifi.where())
+        if self.config.skip_ssl_verify:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+        keys_to_try: list[tuple[str, str]] = []
+        api_key = (self.config.api_key or "").strip()
+        if api_key:
+            keys_to_try.append(("primary", api_key))
+        if api_key.lower() != "guest:guest":
+            keys_to_try.append(("guest", "guest:guest"))
+
+        for label, key in keys_to_try:
+            data = self._request_calendar_data(key, context, label)
+            if data:
+                return data
+
+        logger.error("REST fallback không lấy được dữ liệu Trading Economics.")
+        return []
+
+    def _request_calendar_data(
+        self,
+        api_key: str,
+        context: ssl.SSLContext,
+        label: str,
+    ) -> list[dict]:
+        encoded_key = quote(api_key.strip(), safe=":")
+        request = Request(
+            url=f"{_TE_BASE_URL}?c={encoded_key}",
+            headers={"User-Agent": _TE_USER_AGENT},
+        )
+        try:
+            with urlopen(request, timeout=20, context=context) as response:
+                payload = response.read().decode("utf-8")
+        except HTTPError as exc:
+            logger.warning(
+                "TE REST (%s) lỗi HTTP %s: %s",
+                label,
+                exc.code,
+                exc.reason,
+            )
+            # Nếu khóa chính bị cấm, thử khóa tiếp theo.
+            return []
+        except ssl.SSLCertVerificationError as exc:
+            logger.warning("TE REST (%s) lỗi xác minh SSL: %s", label, exc)
+            return []
+        except URLError as exc:
+            logger.warning(
+                "TE REST (%s) không thể kết nối (%s)",
+                label,
+                getattr(exc, "reason", exc),
+            )
+            return []
+        except Exception as exc:  # pragma: no cover - logging path
+            logger.error("TE REST (%s) gặp lỗi không xác định: %s", label, exc)
+            return []
+
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            logger.warning("TE REST (%s) không parse được JSON: %s", label, exc)
+            return []
+
+        if isinstance(data, list) and data:
+            logger.info(
+                "Lấy thành công %d sự kiện từ Trading Economics (REST/%s).",
+                len(data),
+                label,
+            )
+            return data
+
+        logger.warning("TE REST (%s) trả về dữ liệu không hợp lệ hoặc rỗng.", label)
+        return []

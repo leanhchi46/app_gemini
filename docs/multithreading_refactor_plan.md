@@ -232,6 +232,7 @@
 3. [ ] `refresh_now` ưu tiên user được kiểm chứng bằng test.
 4. [ ] Retry/backoff log đầy đủ metadata.
 5. [ ] Shutdown đảm bảo gọi `await_idle("news.polling")` trước khi thoát.
+6. [ ] Provider trả về danh sách rỗng khi gặp lỗi SSL/network và chỉ log cảnh báo.
 
 **Template PR**
 

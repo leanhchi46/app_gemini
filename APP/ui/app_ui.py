@@ -1613,14 +1613,28 @@ class AppUI:
         logger.debug(f"Callback nhận được {len(events)} sự kiện tin tức mới.")
         
         def update_ui():
-            # Lọc lại danh sách tin tức dựa trên symbol hiện tại của UI
-            symbol = self.mt5_symbol_var.get()
-            if self.news_service and self.news_tab and symbol:
-                filtered_events = self.news_service.get_upcoming_events(symbol)
-                self.news_tab.update_news_list(filtered_events)
-                self.ui_status(f"Tin tức được tự động cập nhật ({len(filtered_events)} sự kiện).")
+            symbol = (self.mt5_symbol_var.get() or "").strip()
+            events_to_display: List[Dict[str, Any]] = []
+            fallback_used = False
+
+            if self.news_service and self.news_tab:
+                if symbol:
+                    events_to_display = self.news_service.get_upcoming_events(symbol)
+                if not events_to_display:
+                    events_to_display = self.news_service.get_all_upcoming_events(limit=150)
+                    fallback_used = bool(events_to_display)
+
+                self.news_tab.update_news_list(events_to_display)
+                if events_to_display:
+                    if fallback_used and symbol:
+                        self.ui_status(
+                            f"Tin tức được tự động cập nhật ({len(events_to_display)} sự kiện, hiển thị toàn bộ do không tìm thấy tin cho {symbol})."
+                        )
+                    else:
+                        self.ui_status(f"Tin tức được tự động cập nhật ({len(events_to_display)} sự kiện).")
+                else:
+                    self.ui_status("Không tìm thấy sự kiện tin tức phù hợp.")
             elif self.news_tab:
-                # Xử lý trường hợp không có symbol
                 self.news_tab.update_news_list([])
 
         self.ui_queue.put(update_ui)

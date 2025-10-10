@@ -28,6 +28,7 @@ Tài liệu này đối chiếu tiến độ thực tế với Work Breakdown St
 - `NewsController` quản lý `news.polling`, cung cấp API `start_polling`, `refresh_now`, `stop_polling` với ưu tiên người dùng khi refresh khẩn.【F:APP/ui/controllers/news_controller.py†L16-L127】
 - `NewsService.refresh` sử dụng TaskGroup thông qua ThreadingManager, timeout provider cấu hình, retry/cancel token, đồng bộ cache và logging latency.【F:APP/services/news_service.py†L193-L325】
 - Bộ test controller/service bao phủ cancel token, TTL và ưu tiên thao tác tay.【F:tests/controllers/test_news_controller.py†L1-L168】【F:tests/services/test_news_service.py†L1-L200】
+- Provider TE/FMP fallback SSL/network trả về danh sách rỗng thay vì raise, chỉ log cảnh báo để UI không lỗi khi offline.【F:APP/services/te_service.py†L60-L82】【F:APP/services/fmp_service.py†L72-L111】
 
 ### 8.4 Module AnalysisWorker
 - `AnalysisController` điều phối session `analysis.session`, gắn metadata và dọn dẹp khi future hoàn tất.【F:APP/core/analysis_controller.py†L16-L84】
