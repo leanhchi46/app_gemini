@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 import re
 import threading
-import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Final, List, Optional
+from typing import Any, Callable, Final, Iterable, List, Optional
 
 import pytz
 
@@ -14,6 +14,20 @@ from APP.services.fmp_service import FMPService
 from APP.services.te_service import TEService
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class NewsCacheSnapshot:
+    """Ảnh chụp bất biến của cache tin tức tại một thời điểm."""
+
+    events: tuple[dict[str, Any], ...]
+    last_updated: Optional[datetime]
+    timezone: str
+
+    def as_list(self) -> List[dict[str, Any]]:
+        """Trả về bản sao danh sách sự kiện để phục vụ cho UI."""
+        return [dict(event) for event in self.events]
+
 
 # Ánh xạ tiền tệ và quốc gia/khu vực
 CURRENCY_COUNTRY_MAP: Final[dict[str, set[str]]] = {
@@ -30,10 +44,25 @@ CURRENCY_COUNTRY_MAP: Final[dict[str, set[str]]] = {
 
 # Các sự kiện kinh tế quan trọng (từ khóa tìm kiếm trong tiêu đề)
 HIGH_IMPACT_KEYWORDS: Final[set[str]] = {
-    "interest rate", "cpi", "consumer price index", "nfp", "non-farm payroll",
-    "pmi", "purchasing managers", "retail sales", "gdp", "gross domestic product",
-    "unemployment rate", "inflation rate", "trade balance", "industrial production",
-    "business confidence", "consumer confidence", "ism", "ifo", "zew"
+    "interest rate",
+    "cpi",
+    "consumer price index",
+    "nfp",
+    "non-farm payroll",
+    "pmi",
+    "purchasing managers",
+    "retail sales",
+    "gdp",
+    "gross domestic product",
+    "unemployment rate",
+    "inflation rate",
+    "trade balance",
+    "industrial production",
+    "business confidence",
+    "consumer confidence",
+    "ism",
+    "ifo",
+    "zew",
 }
 
 
@@ -55,12 +84,13 @@ class NewsService:
         self._cache: list[dict[str, Any]] = []
         self._cache_time: Optional[datetime] = None
         self._dedup_ids: set[str] = set()
-        
+
         # Threading attributes
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
-        self._update_callback: Optional[Callable[[List[dict[str, Any]]], None]] = None
+        self._listeners: list[Callable[[NewsCacheSnapshot], None]] = []
+        self._legacy_wrappers: dict[Callable[..., Any], Callable[[NewsCacheSnapshot], None]] = {}
 
     def update_config(self, config: RunConfig):
         """Cập nhật cấu hình cho dịch vụ một cách an toàn."""
@@ -76,15 +106,49 @@ class NewsService:
             logger.debug("Cấu hình NewsService đã được cập nhật.")
 
     def set_update_callback(self, callback: Callable[[List[dict[str, Any]]], None]):
-        """Đăng ký một hàm callback để được gọi sau mỗi lần cache được cập nhật."""
-        self._update_callback = callback
+        """Đăng ký callback theo giao diện cũ (giữ tương thích ngược)."""
+
+        if callback in self._legacy_wrappers:
+            return
+
+        def wrapper(snapshot: NewsCacheSnapshot):
+            try:
+                callback(snapshot.as_list())
+            except Exception:  # pragma: no cover - tránh gián đoạn vòng đời
+                logger.exception("Lỗi khi thực thi callback tin tức (legacy API).")
+
+        self._legacy_wrappers[callback] = wrapper
+        self.add_listener(wrapper)
+
+    def add_listener(self, callback: Callable[[NewsCacheSnapshot], None]):
+        """Đăng ký một listener nhận ảnh chụp cache mới mỗi khi cập nhật."""
+
+        with self._lock:
+            self._listeners.append(callback)
+            snapshot = self._build_snapshot_locked()
+
+        # Cập nhật UI ngay với trạng thái hiện tại
+        try:
+            callback(snapshot)
+        except Exception:
+            logger.exception("Listener tin tức gặp lỗi khi xử lý ảnh chụp ban đầu.")
+
+    def remove_listener(self, callback: Callable[[NewsCacheSnapshot], None]):
+        """Hủy đăng ký listener đã đăng ký."""
+
+        with self._lock:
+            try:
+                self._listeners.remove(callback)
+            except ValueError:
+                # Cho phép gọi nhiều lần mà không lỗi
+                return
 
     def start(self):
         """Khởi động luồng nền để làm mới tin tức tự động."""
         if self._worker_thread and self._worker_thread.is_alive():
             logger.warning("Luồng nền của NewsService đã chạy rồi.")
             return
-        
+
         self._stop_event.clear()
         self._worker_thread = threading.Thread(target=self._background_worker, daemon=True)
         self._worker_thread.start()
@@ -102,6 +166,11 @@ class NewsService:
                 logger.info("Dịch vụ nền NewsService đã dừng thành công.")
         self._worker_thread = None
 
+    def is_running(self) -> bool:
+        """Kiểm tra luồng nền có đang hoạt động hay không."""
+
+        return self._worker_thread is not None and self._worker_thread.is_alive()
+
     def _background_worker(self):
         """Vòng lặp chính của luồng nền, chịu trách nhiệm làm mới cache định kỳ."""
         logger.debug("Luồng nền NewsService bắt đầu, chờ 2 giây để config được tải.")
@@ -113,7 +182,7 @@ class NewsService:
             try:
                 with self._lock:
                     is_enabled = self.fmp_service is not None or self.te_service is not None
-                
+
                 if is_enabled:
                     logger.info("Luồng nền: Bắt đầu làm mới cache tin tức...")
                     self._fetch_and_process_events()
@@ -125,14 +194,17 @@ class NewsService:
             
             with self._lock:
                 refresh_interval = self.news_config.cache_ttl_sec if self.news_config else 300
-            
+
             # Đợi cho đến lần làm mới tiếp theo hoặc cho đến khi có tín hiệu dừng
             if self._stop_event.wait(timeout=refresh_interval):
-                break # Thoát vòng lặp nếu có tín hiệu dừng
+                break  # Thoát vòng lặp nếu có tín hiệu dừng
         logger.debug("Luồng nền NewsService đã thoát khỏi vòng lặp.")
 
     def is_in_news_blackout(
-        self, symbol: str, now: Optional[datetime] = None
+        self,
+        symbol: str,
+        now: Optional[datetime] = None,
+        snapshot: Optional[NewsCacheSnapshot] = None,
     ) -> tuple[bool, str | None]:
         """
         Kiểm tra xem có đang trong thời gian "cấm giao dịch" vì tin tức hay không.
@@ -144,7 +216,7 @@ class NewsService:
 
         now_utc = (now or datetime.now(pytz.utc)).astimezone(pytz.utc)
         # Lấy danh sách sự kiện đã được lọc và sắp xếp sẵn từ cache
-        upcoming_events = self.get_upcoming_events(symbol, now_utc)
+        upcoming_events = self.get_upcoming_events(symbol, now_utc, snapshot=snapshot)
 
         for event in upcoming_events:
             event_time_utc = event["when_utc"]
@@ -161,17 +233,19 @@ class NewsService:
         return False, None
 
     def get_upcoming_events(
-        self, symbol: str, now: Optional[datetime] = None
+        self,
+        symbol: str,
+        now: Optional[datetime] = None,
+        snapshot: Optional[NewsCacheSnapshot] = None,
     ) -> list[dict[str, Any]]:
         """
         Lấy danh sách các sự kiện kinh tế quan trọng sắp tới cho một symbol từ cache.
         """
         now_utc = (now or datetime.now(pytz.utc)).astimezone(pytz.utc)
-        
-        with self._lock:
-            # Sao chép cache để tránh thay đổi dữ liệu gốc khi thêm 'when_local'
-            cached_events = list(self._cache)
-            local_timezone_str = self.timezone_str
+
+        snapshot = snapshot or self.get_cache_snapshot()
+        cached_events = [dict(event) for event in snapshot.events]
+        local_timezone_str = snapshot.timezone or self.timezone_str
 
         allowed_countries = self._get_countries_for_symbol(symbol)
         ho_chi_minh_tz = pytz.timezone(local_timezone_str)
@@ -201,8 +275,17 @@ class NewsService:
         """
         try:
             now_utc = datetime.now(pytz.utc)
-            is_in_blackout, reason = self.is_in_news_blackout(symbol=symbol, now=now_utc)
-            upcoming_events = self.get_upcoming_events(symbol=symbol, now=now_utc)
+            snapshot = self.get_cache_snapshot()
+            is_in_blackout, reason = self.is_in_news_blackout(
+                symbol=symbol,
+                now=now_utc,
+                snapshot=snapshot,
+            )
+            upcoming_events = self.get_upcoming_events(
+                symbol=symbol,
+                now=now_utc,
+                snapshot=snapshot,
+            )
 
             return {
                 "is_in_news_window": is_in_blackout,
@@ -259,24 +342,44 @@ class NewsService:
             all_processed_events.extend(self._transform_te_data(raw_te_data))
 
         new_cache = self._filter_high_impact(all_processed_events)
-        
+
         with self._lock:
             self._cache = new_cache
             self._cache_time = datetime.now(pytz.utc)
+            snapshot = self._build_snapshot_locked()
+            listeners = list(self._listeners)
             logger.info(f"Cache được cập nhật với {len(self._cache)} sự kiện quan trọng.")
-            
-            # Lấy callback ra để gọi bên ngoài lock
-            callback = self._update_callback
-            # Tạo bản sao của cache để gửi đi, đảm bảo an toàn
-            cache_copy = list(self._cache)
 
-        # Gọi callback sau khi đã giải phóng lock
-        if callback:
+        self._notify_listeners(listeners, snapshot)
+
+    def _notify_listeners(
+        self,
+        listeners: Iterable[Callable[[NewsCacheSnapshot], None]],
+        snapshot: NewsCacheSnapshot,
+    ) -> None:
+        """Gọi các listener đã đăng ký với cùng một ảnh chụp cache."""
+
+        for listener in listeners:
             try:
-                callback(cache_copy)
-                logger.debug("Callback cập nhật tin tức đã được gọi.")
+                listener(snapshot)
             except Exception:
-                logger.exception("Lỗi khi thực thi callback cập nhật tin tức.")
+                logger.exception("Listener tin tức phát sinh lỗi khi xử lý cập nhật cache.")
+
+    def get_cache_snapshot(self) -> NewsCacheSnapshot:
+        """Trả về ảnh chụp bất biến của cache hiện tại."""
+
+        with self._lock:
+            return self._build_snapshot_locked()
+
+    def _build_snapshot_locked(self) -> NewsCacheSnapshot:
+        """Tạo ảnh chụp cache. YÊU CẦU đang giữ lock."""
+
+        events_copy = tuple(event.copy() for event in self._cache)
+        return NewsCacheSnapshot(
+            events=events_copy,
+            last_updated=self._cache_time,
+            timezone=self.timezone_str,
+        )
 
     def _transform_fmp_data(self, events: list[dict]) -> list[dict]:
         """Chuyển đổi dữ liệu từ FMP API (thực chất là investpy)."""
@@ -287,24 +390,38 @@ class NewsService:
                 time_str = event.get("time")
                 event_title = event.get("event")
 
-                if not all([date_str, time_str, event_title]): continue
+                if not all([date_str, time_str, event_title]):
+                    continue
+
                 event_id = f"investpy_{date_str}_{time_str}_{event_title}"
-                if event_id in self._dedup_ids: continue
-                if time_str.lower() == "all day": continue
-                
+                if event_id in self._dedup_ids:
+                    continue
+
+                if time_str.lower() == "all day":
+                    continue
+
                 time_str_cleaned = time_str.strip()
                 datetime_str = f"{date_str} {time_str_cleaned}"
                 dt_naive = datetime.strptime(datetime_str, "%d/%m/%Y %H:%M")
                 dt_utc = pytz.utc.localize(dt_naive)
 
-                transformed.append({
-                    "id": event_id, "when_utc": dt_utc, "title": event_title,
-                    "country": event.get("zone"), "impact": event.get("importance"),
-                    "source": "investpy"
-                })
+                transformed.append(
+                    {
+                        "id": event_id,
+                        "when_utc": dt_utc,
+                        "title": event_title,
+                        "country": event.get("zone"),
+                        "impact": event.get("importance"),
+                        "source": "investpy",
+                    }
+                )
                 self._dedup_ids.add(event_id)
             except (ValueError, KeyError, TypeError) as e:
-                logger.warning(f"Bỏ qua sự kiện investpy không hợp lệ: {event}. Lỗi: {e}")
+                logger.warning(
+                    "Bỏ qua sự kiện investpy không hợp lệ: %s. Lỗi: %s",
+                    event,
+                    e,
+                )
         return transformed
 
     def _transform_te_data(self, events: list[dict]) -> list[dict]:
@@ -312,17 +429,32 @@ class NewsService:
         transformed = []
         for event in events:
             try:
-                event_id = f"te_{event.get('CalendarId', '')}"
-                if not event.get('CalendarId') or event_id in self._dedup_ids: continue
+                calendar_id = event.get("CalendarId")
+                event_id = f"te_{calendar_id}"
+                if not calendar_id or event_id in self._dedup_ids:
+                    continue
 
-                dt_utc = datetime.strptime(str(event["Date"]), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=pytz.utc)
-                transformed.append({
-                    "id": event_id, "when_utc": dt_utc, "title": event.get("Event"),
-                    "country": event.get("Country"), "impact": event.get("Importance"), "source": "TE"
-                })
+                dt_utc = datetime.strptime(
+                    str(event["Date"]),
+                    "%Y-%m-%dT%H:%M:%S",
+                ).replace(tzinfo=pytz.utc)
+                transformed.append(
+                    {
+                        "id": event_id,
+                        "when_utc": dt_utc,
+                        "title": event.get("Event"),
+                        "country": event.get("Country"),
+                        "impact": event.get("Importance"),
+                        "source": "TE",
+                    }
+                )
                 self._dedup_ids.add(event_id)
             except (ValueError, KeyError, TypeError) as e:
-                logger.warning(f"Bỏ qua sự kiện TE không hợp lệ: {event}. Lỗi: {e}")
+                logger.warning(
+                    "Bỏ qua sự kiện TE không hợp lệ: %s. Lỗi: %s",
+                    event,
+                    e,
+                )
         return transformed
 
     def _filter_high_impact(self, events: list[dict]) -> list[dict]:
@@ -341,8 +473,10 @@ class NewsService:
         """Phân tích symbol để tìm các tiền tệ liên quan."""
         s = (sym or "").upper()
         tokens = set(re.findall(r"[A-Z]{3}", s))
-        if "XAU" in s or "GOLD" in s: tokens.add("USD")
-        if any(k in s for k in ("US30", "SPX", "NDX")): tokens.add("USD")
+        if "XAU" in s or "GOLD" in s:
+            tokens.add("USD")
+        if any(k in s for k in ("US30", "SPX", "NDX")):
+            tokens.add("USD")
         return tokens
 
     def _get_countries_for_symbol(self, symbol: str) -> set[str]:
