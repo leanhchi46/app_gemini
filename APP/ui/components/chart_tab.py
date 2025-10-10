@@ -9,11 +9,12 @@ Tương tác với các service để lấy dữ liệu và hiển thị một c
 from __future__ import annotations
 
 import logging
-import threading
 import tkinter as tk
 from datetime import datetime
 from tkinter import ttk
 from typing import TYPE_CHECKING, Any, Dict, Optional
+
+from concurrent.futures import CancelledError, Future
 
 # Các import của bên thứ ba
 try:
@@ -34,7 +35,9 @@ except ImportError:
 # Các import cục bộ
 from APP.core.trading import conditions
 from APP.services import mt5_service
+from APP.ui.controllers.chart_controller import ChartController, ChartStreamConfig
 from APP.utils import threading_utils
+from APP.utils.threading_utils import CancelToken
 
 if TYPE_CHECKING:
     from APP.ui.app_ui import AppUI
@@ -70,8 +73,14 @@ class ChartTab:
         self._build_right_panel()
         self._build_bottom_grids()
 
+        self._controller = ChartController(
+            threading_manager=self.app.threading_manager,
+            ui_queue=self.app.ui_queue,
+            backlog_limit=self._backlog_limit,
+        )
+
         self.root.after(200, self.start)
-        self._redraw_chart_safe()
+        self.root.after(400, self._redraw_chart_safe)
         logger.debug("Kết thúc hàm __init__ của ChartTab.")
 
     def _init_vars(self):
@@ -79,13 +88,14 @@ class ChartTab:
         logger.debug("Bắt đầu hàm _init_vars.")
         self.tf_var = tk.StringVar(value="M15")
         self.n_candles_var = tk.IntVar(value=150)
-        self.refresh_secs_var = tk.IntVar(value=5) # Tăng thời gian mặc định để giảm tải
+        self.refresh_secs_var = tk.IntVar(value=1)  # Giới hạn 1s để đáp ứng realtime tick
         self.chart_type_var = tk.StringVar(value="Nến")
         self._after_job: Optional[str] = None
         self._running = False
         self._last_bar_time: Optional[datetime] = None
-        self._info_worker_thread: Optional[threading.Thread] = None
-        self._chart_worker_thread: Optional[threading.Thread] = None
+        self._stream_active = False
+        self._controller: Optional[ChartController] = None
+        self._backlog_limit = 50
 
         # Biến cho biểu đồ
         self.fig: Optional[Figure] = None
@@ -249,8 +259,17 @@ class ChartTab:
         """Bắt đầu quá trình làm mới biểu đồ và thông tin định kỳ."""
         if self._running:
             return
+        controller = self._ensure_controller()
+        controller.start_stream(
+            config=self._build_stream_config(),
+            info_worker=self._update_info_worker,
+            chart_worker=self._chart_drawing_worker,
+            on_info_done=self._apply_data_updates,
+            on_chart_done=self._apply_chart_updates,
+        )
+        self._stream_active = True
         self._running = True
-        self._tick()
+        self._schedule_next_tick(immediate=True)
         logger.info("ChartTab đã bắt đầu làm mới dữ liệu.")
 
     def stop(self) -> None:
@@ -259,87 +278,129 @@ class ChartTab:
         if self._after_job:
             self.root.after_cancel(self._after_job)
             self._after_job = None
+        if self._controller:
+            self._controller.stop_stream()
+        self._stream_active = False
         logger.info("ChartTab đã dừng làm mới dữ liệu.")
 
+    def _ensure_controller(self) -> ChartController:
+        """Đảm bảo luôn có controller hợp lệ."""
+
+        if not self._controller:
+            self._controller = ChartController(
+                threading_manager=self.app.threading_manager,
+                ui_queue=self.app.ui_queue,
+                backlog_limit=self._backlog_limit,
+            )
+        return self._controller
+
+    def _schedule_next_tick(self, *, immediate: bool = False) -> None:
+        """Lên lịch tick tiếp theo với chu kỳ realtime."""
+
+        delay_ms = 1 if immediate else self._compute_tick_interval_ms()
+        self._after_job = self.root.after(delay_ms, self._tick)
+
+    def _compute_tick_interval_ms(self) -> int:
+        """Tính toán khoảng thời gian tick dựa trên cấu hình người dùng."""
+
+        raw = self.refresh_secs_var.get() or 1
+        secs = max(0.2, min(float(raw), 1.0))  # ép realtime ≤1s theo yêu cầu Product
+        return int(secs * 1000)
+
+    def _build_stream_config(self) -> ChartStreamConfig:
+        """Tạo cấu hình stream dựa trên trạng thái UI hiện tại."""
+
+        symbol = self.app.mt5_symbol_var.get().strip() or "XAUUSD"
+        if not self.app.mt5_symbol_var.get().strip():
+            self.app.mt5_symbol_var.set(symbol)
+        timeframe = self.tf_var.get()
+        candles = max(50, self.n_candles_var.get() or 150)
+        return ChartStreamConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            candles=candles,
+            chart_type=self.chart_type_var.get(),
+        )
+
     def _populate_symbol_list(self) -> None:
-        """Điền danh sách các ký hiệu giao dịch vào combobox."""
-        def worker():
+        """Điền danh sách các ký hiệu giao dịch vào combobox bằng facade mới."""
+
+        def worker(cancel_token: CancelToken) -> list[str]:
+            cancel_token.raise_if_cancelled()
             names = mt5_service.get_all_symbols()
-            def update_ui():
-                if names and self.cbo_symbol:
-                    self.cbo_symbol["values"] = names
-                    current_symbol = self.app.mt5_symbol_var.get()
-                    if not current_symbol or current_symbol not in names:
-                        if "XAUUSD" in names:
-                            self.app.mt5_symbol_var.set("XAUUSD")
-                        elif names:
-                            self.app.mt5_symbol_var.set(names[0])
-                logger.debug(f"Đã populate {len(names)} symbols.")
-            self.app.ui_queue.put(update_ui)
-        threading.Thread(target=worker, daemon=True).start()
+            cancel_token.raise_if_cancelled()
+            return names
+
+        record = self.app.threading_manager.submit(
+            func=worker,
+            group="chart.init",
+            name="chart.symbols",
+            metadata={"component": "chart"},
+        )
+
+        def on_done(future: Future) -> None:  # type: ignore[name-defined]
+            try:
+                names = future.result()
+            except Exception as exc:  # pragma: no cover - logging path
+                logger.error("Không thể lấy danh sách symbol: %s", exc)
+                names = []
+            self.app.ui_queue.put(lambda lst=names: self._apply_symbol_list(lst))
+
+        record.future.add_done_callback(on_done)
+
+    def _apply_symbol_list(self, names: list[str]) -> None:
+        """Cập nhật combobox symbol trên luồng UI."""
+
+        if not self.cbo_symbol:
+            return
+        self.cbo_symbol["values"] = names
+        current_symbol = self.app.mt5_symbol_var.get()
+        if current_symbol and current_symbol in names:
+            return
+        if "XAUUSD" in names:
+            self.app.mt5_symbol_var.set("XAUUSD")
+        elif names:
+            self.app.mt5_symbol_var.set(names[0])
+        logger.debug("Đã cập nhật danh sách symbol (%d mục).", len(names))
 
     def _tick(self) -> None:
         """Hàm tick được gọi định kỳ để làm mới dữ liệu."""
+
         if not self._running:
             return
+        if self._controller and self._stream_active:
+            self._controller.trigger_refresh()
+        self._schedule_next_tick()
 
-        # Chạy worker lấy thông tin (tài khoản, lệnh, v.v.)
-        if not (self._info_worker_thread and self._info_worker_thread.is_alive()):
-            logger.debug("Bắt đầu worker lấy thông tin.")
-            self._info_worker_thread = threading.Thread(target=self._update_info_worker, daemon=True)
-            self._info_worker_thread.start()
-        else:
-            logger.debug("Worker thông tin vẫn đang chạy, bỏ qua.")
+    def _update_info_worker(self, stream_config: ChartStreamConfig, cancel_token: CancelToken) -> Dict[str, Any]:
+        """Worker lấy dữ liệu tài khoản/lệnh/No-Trade với cancel token."""
 
-        # Chạy worker vẽ biểu đồ
-        if not (self._chart_worker_thread and self._chart_worker_thread.is_alive()):
-            logger.debug("Bắt đầu worker vẽ biểu đồ.")
-            # Sử dụng _redraw_chart_safe để khởi chạy worker vẽ
-            self._redraw_chart_safe()
-        else:
-            logger.debug("Worker vẽ biểu đồ vẫn đang chạy, bỏ qua.")
-
-        secs = max(1, self.refresh_secs_var.get() or 5)
-        self._after_job = self.root.after(secs * 1000, self._tick)
-
-    def _update_info_worker(self):
-        """
-        Worker chạy trong luồng nền để lấy dữ liệu (tài khoản, lệnh, lịch sử, no-trade).
-        Hàm này KHÔNG lấy dữ liệu nến hoặc vẽ biểu đồ.
-        """
         if not mt5_service.is_connected():
-            self.app.ui_queue.put(lambda: self.acc_status.set("MT5 chưa kết nối."))
-            return
+            return {"mt5_data": None, "status_message": "MT5 chưa kết nối."}
 
         current_config = self.app._snapshot_config()
-        if not current_config.mt5.symbol:
-            return
+        current_config.mt5.symbol = stream_config.symbol
 
-        # 1. Lấy dữ liệu thị trường tổng hợp từ mt5_service
-        # Lưu ý: get_market_data cũng lấy dữ liệu nến, nhưng chúng ta sẽ bỏ qua nó
-        # trong _apply_data_updates và để chart_worker xử lý.
-        # Điều này vẫn hiệu quả vì dữ liệu nến được cache trong mt5_service.
+        cancel_token.raise_if_cancelled()
         safe_mt5_data = mt5_service.get_market_data(current_config.mt5)
         if not safe_mt5_data.is_valid():
-            logger.warning("Không thể lấy dữ liệu MT5 hợp lệ từ service.")
-            return
+            return {"mt5_data": None, "status_message": "Không lấy được dữ liệu MT5."}
 
-        # 2. Chạy song song các tác vụ lấy dữ liệu còn lại (No-Trade, News, History)
         tasks = [
             (conditions.check_no_trade_conditions, (safe_mt5_data, current_config, self.app.news_service), {}),
             (self.app.news_service.get_upcoming_events, (current_config.mt5.symbol,), {}),
             (mt5_service.get_history_deals, (current_config.mt5.symbol,), {"days": 7}),
         ]
         results = threading_utils.run_in_parallel(tasks)
+        cancel_token.raise_if_cancelled()
 
-        # 4. Gói tất cả dữ liệu và gửi về luồng UI để cập nhật
-        update_payload = {
+        return {
             "mt5_data": safe_mt5_data,
             "no_trade_reasons": results.get("check_no_trade_conditions", []),
             "upcoming_events": results.get("get_upcoming_events", []),
             "history_deals": results.get("get_history_deals", []),
+            "status_message": "Kết nối MT5 OK",
         }
-        self.app.ui_queue.put(lambda p=update_payload: self._apply_data_updates(p))
 
     def _apply_data_updates(self, payload: Dict[str, Any]):
         """
@@ -350,9 +411,13 @@ class ChartTab:
         no_trade_reasons: list[str] = payload.get("no_trade_reasons", [])
         upcoming_events: list[dict] = payload.get("upcoming_events", [])
         history_deals: list[dict] = payload.get("history_deals", [])
+        status_message: Optional[str] = payload.get("status_message")
+
+        if status_message:
+            self.acc_status.set(status_message)
 
         if not safe_mt5_data or not safe_mt5_data.is_valid():
-            logger.warning("Payload cập nhật không hợp lệ, bỏ qua.")
+            logger.debug("Bỏ qua cập nhật chi tiết do không có dữ liệu MT5 hợp lệ.")
             return
 
         # Cập nhật thông tin tài khoản
@@ -362,7 +427,8 @@ class ChartTab:
         self.acc_margin.set(f"{acc_info.get('free_margin', 0.0):.2f}")
         self.acc_leverage.set(str(acc_info.get('leverage', '-')))
         self.acc_currency.set(acc_info.get('currency', '-'))
-        self.acc_status.set("Kết nối MT5 OK")
+        if not status_message:
+            self.acc_status.set("Kết nối MT5 OK")
 
         # Cập nhật bảng lệnh đang mở
         positions = safe_mt5_data.get("positions", [])
@@ -403,33 +469,35 @@ class ChartTab:
         else:
             self.nt_events.set("Không có sự kiện quan trọng sắp tới.")
 
-    def _chart_drawing_worker(self) -> Dict[str, Any]:
-        """
-        Worker chạy nền để lấy dữ liệu và chuẩn bị payload cho việc vẽ biểu đồ.
-        Hàm này thực hiện các tác vụ blocking.
-        """
-        payload = {"success": False, "message": "Worker chưa chạy"}
-        try:
-            sym = self.app.mt5_symbol_var.get().strip()
-            if not sym:
-                return {"success": False, "message": "Chưa chọn Symbol"}
+    def _chart_drawing_worker(self, stream_config: ChartStreamConfig, cancel_token: CancelToken) -> Dict[str, Any]:
+        """Worker chuẩn bị payload biểu đồ có hỗ trợ cancel."""
 
+        try:
             if not mt5_service.is_connected():
                 return {"success": False, "message": "MT5 chưa sẵn sàng"}
 
+            sym = stream_config.symbol
+            if not sym:
+                return {"success": False, "message": "Chưa chọn Symbol"}
+
             tf_map = {
-                "M1": mt5_service.mt5.TIMEFRAME_M1, "M5": mt5_service.mt5.TIMEFRAME_M5,
-                "M15": mt5_service.mt5.TIMEFRAME_M15, "H1": mt5_service.mt5.TIMEFRAME_H1,
-                "H4": mt5_service.mt5.TIMEFRAME_H4, "D1": mt5_service.mt5.TIMEFRAME_D1,
+                "M1": mt5_service.mt5.TIMEFRAME_M1,
+                "M5": mt5_service.mt5.TIMEFRAME_M5,
+                "M15": mt5_service.mt5.TIMEFRAME_M15,
+                "H1": mt5_service.mt5.TIMEFRAME_H1,
+                "H4": mt5_service.mt5.TIMEFRAME_H4,
+                "D1": mt5_service.mt5.TIMEFRAME_D1,
             }
-            tf_code = tf_map.get(self.tf_var.get(), mt5_service.mt5.TIMEFRAME_M15)
-            cnt = self.n_candles_var.get() or 150
+            tf_code = tf_map.get(stream_config.timeframe, mt5_service.mt5.TIMEFRAME_M15)
+            cnt = stream_config.candles
+
+            cancel_token.raise_if_cancelled()
             rates = mt5_service._series_from_mt5(sym, tf_code, cnt)
 
             if not rates:
                 return {"success": False, "message": "Không có dữ liệu"}
 
-            # Lấy thêm dữ liệu cần thiết cho việc vẽ
+            cancel_token.raise_if_cancelled()
             info = mt5_service.mt5.symbol_info(sym)
             tick = mt5_service.mt5.symbol_info_tick(sym)
             positions = mt5_service.mt5.positions_get(symbol=sym) or []
@@ -441,9 +509,12 @@ class ChartTab:
                 "tick": tick,
                 "positions": positions,
                 "symbol": sym,
-                "timeframe": self.tf_var.get(),
+                "timeframe": stream_config.timeframe,
+                "chart_type": stream_config.chart_type,
             }
-        except Exception as e:
+        except CancelledError:
+            raise
+        except Exception as e:  # pragma: no cover - logging path
             logger.error(f"Lỗi trong worker vẽ biểu đồ: {e}", exc_info=True)
             return {"success": False, "message": f"Lỗi worker: {e}"}
 
@@ -523,29 +594,16 @@ class ChartTab:
         """Đặt lại trạng thái và buộc vẽ lại biểu đồ."""
         logger.debug("Đặt lại trạng thái và vẽ lại biểu đồ do hành động của người dùng.")
         self._last_bar_time = None
-        self._redraw_chart_safe()
+        controller = self._ensure_controller()
+        controller.update_config(self._build_stream_config())
+        if self._stream_active:
+            controller.request_snapshot()
 
     def _redraw_chart_safe(self) -> None:
         """
-        Khởi chạy worker vẽ biểu đồ trong một luồng nền một cách an toàn.
+        Yêu cầu controller cập nhật biểu đồ theo cấu hình hiện tại.
         """
-        try:
-            # Gửi tác vụ worker vào pool luồng
-            future = self.app._run_in_background(self._chart_drawing_worker)
-            
-            # Thêm callback để xử lý kết quả khi worker hoàn thành
-            def on_done(f):
-                try:
-                    result_payload = f.result()
-                    # Gửi payload kết quả về luồng UI để cập nhật
-                    self.app.ui_queue.put(lambda p=result_payload: self._apply_chart_updates(p))
-                except Exception as e:
-                    logger.error(f"Lỗi khi lấy kết quả từ future của chart worker: {e}")
-                    error_payload = {"success": False, "message": f"Lỗi future: {e}"}
-                    self.app.ui_queue.put(lambda p=error_payload: self._apply_chart_updates(p))
-
-            future.add_done_callback(on_done)
-        except Exception as e:
-            logger.error(f"Lỗi khi khởi chạy worker vẽ biểu đồ: {e}")
-            error_payload = {"success": False, "message": f"Lỗi khởi chạy: {e}"}
-            self.app.ui_queue.put(lambda p=error_payload: self._apply_chart_updates(p))
+        controller = self._ensure_controller()
+        controller.update_config(self._build_stream_config())
+        if self._stream_active:
+            controller.request_snapshot()

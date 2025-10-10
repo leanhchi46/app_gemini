@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
@@ -19,6 +18,7 @@ from APP.services import gemini_service, mt5_service
 # Cập nhật import để nhận diện lớp lỗi mới
 from APP.services.gemini_service import StreamError
 from APP.utils import threading_utils
+from APP.utils.threading_utils import CancelToken
 from APP.utils.safe_data import SafeData
 
 if TYPE_CHECKING:
@@ -39,7 +39,15 @@ class AnalysisWorker:
     Lớp điều phối toàn bộ quy trình phân tích, chạy trong một luồng riêng biệt.
     """
 
-    def __init__(self, app: "AppUI", cfg: "RunConfig", stop_event: threading.Event):
+    def __init__(
+        self,
+        app: "AppUI",
+        cfg: "RunConfig",
+        cancel_token: CancelToken | None = None,
+        *,
+        session_id: str | None = None,
+        stop_event: Any | None = None,
+    ):
         """
         Khởi tạo worker với các đối tượng cần thiết.
 
@@ -50,7 +58,9 @@ class AnalysisWorker:
         """
         self.app = app
         self.cfg = cfg
-        self.stop_event = stop_event
+        self.cancel_token = cancel_token or CancelToken()
+        self._legacy_stop_event = stop_event
+        self.session_id = session_id or f"session-{int(time.time())}"
         self.news_service: "NewsService" = app.news_service
         self.model_name: str = self.app.model_var.get()
         self.model: Optional[Any] = None
@@ -69,19 +79,28 @@ class AnalysisWorker:
         self.file_slots: List[Optional[Any]] = []
         self.steps_upload: int = 0
 
+    def _is_cancelled(self) -> bool:
+        if self.cancel_token and self.cancel_token.is_cancelled():
+            return True
+        if self._legacy_stop_event and getattr(self._legacy_stop_event, "is_set", lambda: False)():
+            self.cancel_token.cancel()
+            return True
+        return False
+
     def _process_and_upload_single_image(
         self,
         path_str: str,
         name: str,
         index: int,
         cache: Dict[str, Any],
+        cancel_token: CancelToken,
     ) -> Tuple[int, Optional[Any], Optional[str], Optional[str]]:
         """
         Xử lý và tải lên một ảnh duy nhất. Được thiết kế để chạy trong một luồng riêng.
         Trả về: (index, file_obj, new_status, error_message)
         """
         try:
-            if self.stop_event.is_set():
+            if cancel_token.is_cancelled() or self._is_cancelled():
                 return index, None, "Bị hủy", None
 
             self.app.ui_queue.put(lambda: self.app._update_tree_row(index, "Đang xử lý..."))
@@ -99,12 +118,14 @@ class AnalysisWorker:
                     file_obj = None
 
             if not file_obj:
+                cancel_token.raise_if_cancelled()
                 self.app.ui_queue.put(lambda: self.app._update_tree_row(index, "Đang upload..."))
                 prepared_path = image_processor.prepare_image(
                     path,
                     optimize=self.cfg.upload.optimize_lossless,
                     image_config=self.cfg.image_processing,
                 )
+                cancel_token.raise_if_cancelled()
                 file_obj = image_processor.upload_image_to_gemini(prepared_path, display_name=name)
 
                 if file_obj:
@@ -117,19 +138,21 @@ class AnalysisWorker:
             logger.error(f"Lỗi khi xử lý ảnh {name}: {e}", exc_info=True)
             return index, None, "Lỗi Xử Lý", f"Lỗi khi xử lý ảnh {name}: {e}"
 
-    def run(self) -> None:
+    def run(self, cancel_token: CancelToken | None = None) -> dict[str, Any]:
         """
         Phương thức chính để chạy worker.
         Tối ưu hóa bằng cách chạy song song Giai đoạn 2 (Context) và Giai đoạn 3 (Upload).
         """
         logger.debug(f"Bắt đầu AnalysisWorker.run với model: {self.model_name}")
         try:
-            if self.stop_event.is_set():
-                return
+            if cancel_token:
+                self.cancel_token = cancel_token
+            if self._is_cancelled():
+                return {"status": "cancelled"}
 
             self._stage_1_initialize_and_validate()
-            if self.stop_event.is_set():
-                return
+            if self._is_cancelled():
+                return {"status": "cancelled"}
 
             # Chạy song song Giai đoạn 2 và 3
             parallel_stages = [
@@ -141,17 +164,17 @@ class AnalysisWorker:
             stage2_success = stage_results.get("_execute_stage_2_logic", False)
             stage3_success = stage_results.get("_execute_stage_3_logic", False)
 
-            if self.stop_event.is_set():
-                return
+            if self._is_cancelled():
+                return {"status": "cancelled"}
 
             if not stage2_success or not stage3_success:
                 logger.warning("Một trong các giai đoạn song song đã thất bại. Dừng worker.")
                 raise SystemExit("Thoát sớm do lỗi ở Giai đoạn 2 hoặc 3.")
 
             if not self._stage_4_call_ai_model():
-                return
-            if self.stop_event.is_set():
-                return
+                return {"status": "failed"}
+            if self._is_cancelled():
+                return {"status": "cancelled"}
             self._stage_5_execute_or_manage_trades()
 
         except SystemExit as e:
@@ -164,6 +187,7 @@ class AnalysisWorker:
             self.app.ui_queue.put(lambda: self.app.ui_detail_replace(self.combined_text))
         finally:
             self._stage_6_finalize_and_cleanup()
+        return {"status": "completed", "early_exit": self.early_exit}
 
     def _stage_1_initialize_and_validate(self) -> None:
         """Giai đoạn 1: Khởi tạo và kiểm tra đầu vào."""
@@ -286,11 +310,10 @@ class AnalysisWorker:
             return False
 
     def _execute_stage_3_logic(self) -> bool:
-        """
-        Thực thi logic của Giai đoạn 3. Trả về True nếu thành công, False nếu thất bại.
-        """
+        """Thực thi logic upload ảnh với TaskGroup `analysis.upload`."""
+
         try:
-            logger.debug("BẮT ĐẦU GIAI ĐOẠN 3: Chuẩn bị và upload ảnh (song song).")
+            logger.debug("BẮT ĐẦU GIAI ĐOẠN 3: Chuẩn bị và upload ảnh (TaskGroup analysis.upload).")
             t_up0 = _tnow()
             cache = image_processor.UploadCache.load() if self.cfg.upload.cache_enabled else {}
             self.file_slots = [None] * len(self.paths)
@@ -299,35 +322,41 @@ class AnalysisWorker:
             self.steps_upload = total_files
             files_processed = 0
 
-            with ThreadPoolExecutor(max_workers=self.cfg.upload.upload_workers, thread_name_prefix="ImageUploader") as executor:
-                futures = {
-                    executor.submit(
-                        self._process_and_upload_single_image,
-                        path_str, name, i, cache
-                    ): i for i, (path_str, name) in enumerate(zip(self.paths, self.names))
-                }
+            max_files = min(total_files, 10)
+            max_workers = max(1, min(self.cfg.upload.upload_workers, 10))
+            manager = self.app.threading_manager
+            in_flight: list = []
 
-                for future in as_completed(futures):
-                    if self.stop_event.is_set():
-                        for f in futures: f.cancel()
-                        raise SystemExit("Dừng bởi người dùng trong quá trình upload.")
+            def submit_upload(idx: int, path_str: str, name: str) -> None:
+                record = manager.submit(
+                    func=self._process_and_upload_single_image,
+                    args=(path_str, name, idx, cache, self.cancel_token),
+                    group="analysis.upload",
+                    name=f"analysis.upload.{self.session_id}.{idx}",
+                    cancel_token=self.cancel_token,
+                    metadata={
+                        "component": "analysis",
+                        "session_id": self.session_id,
+                        "index": idx,
+                    },
+                )
+                in_flight.append(record)
 
-                    index, file_obj, status, error_msg = future.result()
-                    files_processed += 1
-                    self.app.ui_queue.put(lambda p=files_processed: self.app._update_progress(p, total_files + 2))
+            iterator = list(zip(self.paths[:max_files], self.names[:max_files]))
+            for idx, (path_str, name) in enumerate(iterator):
+                if self._is_cancelled():
+                    manager.cancel_group("analysis.upload")
+                    raise SystemExit("Dừng bởi người dùng trong quá trình upload.")
+                submit_upload(idx, path_str, name)
+                if len(in_flight) >= max_workers:
+                    files_processed, images_changed = self._drain_upload_record(
+                        in_flight.pop(0), files_processed, total_files, cache, images_changed
+                    )
 
-                    if status:
-                        self.app.results[index]["status"] = status
-                        self.app.ui_queue.put(lambda i=index, s=status: self.app._update_tree_row(i, s))
-
-                    if file_obj:
-                        self.file_slots[index] = file_obj
-                        if status == "Đã upload":
-                            images_changed = True
-                            self.uploaded_files.append((file_obj, self.paths[index]))
-                    elif error_msg:
-                        for f in futures: f.cancel()
-                        raise RuntimeError(error_msg)
+            while in_flight:
+                files_processed, images_changed = self._drain_upload_record(
+                    in_flight.pop(0), files_processed, total_files, cache, images_changed
+                )
 
             if self.cfg.folder.only_generate_if_changed and not images_changed:
                 trade_conditions.handle_early_exit(
@@ -349,6 +378,35 @@ class AnalysisWorker:
             logger.error(error_msg, exc_info=True)
             self.app.ui_queue.put(lambda: self.app.show_error_message("Lỗi Upload", error_msg))
             return False
+
+    def _drain_upload_record(
+        self,
+        record,
+        files_processed: int,
+        total_files: int,
+        cache: Dict[str, Any],
+        images_changed: bool,
+    ) -> tuple[int, bool]:
+        if self._is_cancelled():
+            raise SystemExit("Dừng bởi người dùng trong quá trình upload.")
+
+        index, file_obj, status, error_msg = record.future.result()
+        files_processed += 1
+        self.app.ui_queue.put(lambda p=files_processed: self.app._update_progress(p, total_files + 2))
+
+        if status:
+            self.app.results[index]["status"] = status
+            self.app.ui_queue.put(lambda i=index, s=status: self.app._update_tree_row(i, s))
+
+        if file_obj:
+            self.file_slots[index] = file_obj
+            if status == "Đã upload":
+                images_changed = True
+                self.uploaded_files.append((file_obj, self.paths[index]))
+        elif error_msg:
+            raise RuntimeError(error_msg)
+
+        return files_processed, images_changed
 
     def _stage_4_call_ai_model(self) -> bool:
         """
@@ -389,7 +447,7 @@ class AnalysisWorker:
         self.app.ui_queue.put(lambda: self.app.ui_detail_replace("Đang nhận dữ liệu từ AI..."))
 
         for chunk in stream_generator:
-            if self.stop_event.is_set():
+            if self._is_cancelled():
                 if hasattr(stream_generator, "close"): stream_generator.close()
                 raise SystemExit("Dừng bởi người dùng trong khi streaming.")
 
