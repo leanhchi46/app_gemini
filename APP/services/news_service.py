@@ -73,8 +73,20 @@ class NewsService:
             self.timezone_str = config.no_run.timezone
             
             # Khởi tạo lại các service con nếu cần
-            self.fmp_service = FMPService(config.fmp) if config.fmp and config.fmp.enabled else None
-            self.te_service = TEService(config.te) if config.te and config.te.enabled else None
+            self.fmp_service = None
+            if config.fmp and config.fmp.enabled:
+                try:
+                    self.fmp_service = FMPService(config.fmp)
+                except Exception as exc:
+                    logger.error("Không thể khởi tạo FMPService: %s", exc, exc_info=True)
+
+            self.te_service = None
+            if config.te and config.te.enabled:
+                try:
+                    self.te_service = TEService(config.te)
+                except Exception as exc:
+                    logger.error("Không thể khởi tạo TEService: %s", exc, exc_info=True)
+
             logger.debug("Cấu hình NewsService đã được cập nhật.")
 
     def set_update_callback(self, callback: Callable[[List[dict[str, Any]]], None]):

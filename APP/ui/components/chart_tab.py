@@ -9,6 +9,7 @@ Tương tác với các service để lấy dữ liệu và hiển thị một c
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 import tkinter as tk
 from datetime import datetime
 from tkinter import ttk
@@ -379,7 +380,19 @@ class ChartTab:
             return {"mt5_data": None, "status_message": "MT5 chưa kết nối."}
 
         current_config = self.app._snapshot_config()
-        current_config.mt5.symbol = stream_config.symbol
+        if current_config.mt5.symbol != stream_config.symbol:
+            updated_mt5 = replace(current_config.mt5, symbol=stream_config.symbol)
+        else:
+            updated_mt5 = current_config.mt5
+
+        updated_chart = replace(
+            current_config.chart,
+            timeframe=stream_config.timeframe,
+            num_candles=stream_config.candles,
+            chart_type=stream_config.chart_type,
+        )
+
+        current_config = replace(current_config, mt5=updated_mt5, chart=updated_chart)
 
         cancel_token.raise_if_cancelled()
         safe_mt5_data = mt5_service.get_market_data(current_config.mt5)

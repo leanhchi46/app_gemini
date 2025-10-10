@@ -370,12 +370,39 @@ class AppUI:
         self.threading_manager.shutdown(wait=True, timeout=5.0)
 
         if shutdown_dialog:
-            shutdown_dialog.update_progress("Hoàn tất. Đang đóng cửa sổ...", 95)
+            try:
+                shutdown_dialog.update_progress("Hoàn tất. Đang đóng cửa sổ...", 95)
+            except tk.TclError:
+                logger.debug("Không thể cập nhật tiến trình shutdown do cửa sổ đã bị hủy.")
 
-        # 7. Phá hủy cửa sổ UI
-        self.root.destroy()
+        # 7. Đóng hộp thoại shutdown (nếu có) trước khi phá hủy root để tránh lỗi grab.
         if shutdown_dialog:
-            shutdown_dialog.close()
+            try:
+                shutdown_dialog.close()
+            except tk.TclError:
+                logger.debug("Hộp thoại shutdown đã bị hủy trước khi đóng.")
+
+        # 8. Phá hủy cửa sổ UI chính
+        root_destroy = getattr(self.root, "destroy", None)
+        if callable(root_destroy):
+            should_destroy = True
+            winfo_exists = getattr(self.root, "winfo_exists", None)
+            if callable(winfo_exists):
+                try:
+                    should_destroy = bool(winfo_exists())
+                except tk.TclError:
+                    logger.debug("Không thể kiểm tra trạng thái tồn tại của root, vẫn tiến hành destroy().")
+                    should_destroy = True
+
+            if should_destroy:
+                try:
+                    root_destroy()
+                except tk.TclError:
+                    logger.debug("Destroy root thất bại do cửa sổ đã đóng.")
+            else:
+                logger.debug("Cửa sổ root đã bị hủy trước khi gọi destroy().")
+        else:
+            logger.debug("Root không hỗ trợ destroy(), bỏ qua bước phá hủy.")
         logger.info("Ứng dụng đã đóng thành công.")
 
     def _init_tk_variables(self):

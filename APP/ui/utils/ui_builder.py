@@ -759,9 +759,13 @@ class ShutdownDialog(tk.Toplevel):
 
     def close(self) -> None:
         """Đóng hộp thoại."""
+        try:
+            self.grab_release()
+        except tk.TclError:
+            logger.debug("grab đã được giải phóng hoặc cửa sổ đã bị hủy trước đó.")
 
-        self.grab_release()
-        self.destroy()
+        if self.winfo_exists():
+            self.destroy()
 
 
 def create_shutdown_dialog(parent: tk.Tk | tk.Widget | None) -> ShutdownDialog:
