@@ -33,7 +33,7 @@ from APP.configs.app_config import (ApiConfig, AutoTradeConfig, ChartConfig,
 from APP.configs.constants import FILES, MODELS, PATHS
 from APP.core.analysis_worker import AnalysisWorker
 from APP.services import gemini_service, mt5_service
-from APP.services.news_service import NewsService
+from APP.services.news_service import NewsCacheSnapshot, NewsService
 from APP.ui.components.chart_tab import ChartTab
 from APP.ui.components.history_manager import HistoryManager
 from APP.ui.components.news_tab import NewsTab
@@ -79,6 +79,7 @@ class AppUI:
         self.news_events: Optional[List[Dict[str, Any]]] = None
         self.news_fetch_time: Optional[float] = None
         self.news_service: Optional[NewsService] = None
+        self._news_listener_registered: bool = False
 
         # Threading Manager
         self.threading_manager = ThreadingManager()
@@ -221,8 +222,6 @@ class AppUI:
 
         # Khởi tạo các service chạy nền
         self.news_service = NewsService()
-        self.news_service.set_update_callback(self._on_news_updated)
-        self.news_service.start()
 
         # Initialize component managers BEFORE building the UI
         # This is crucial because the UI builder needs access to these managers.
@@ -235,6 +234,9 @@ class AppUI:
 
         # Sửa lỗi: Liên kết các widget UI với HistoryManager SAU KHI chúng đã được tạo.
         self.history_manager.link_ui_widgets()
+
+        # Đăng ký nhận cập nhật tin tức sau khi UI đã sẵn sàng
+        self._register_news_listener()
 
         # Post-UI setup
         self._configure_gemini_api_and_update_ui()
@@ -291,6 +293,13 @@ class AppUI:
                 ),
             )
 
+    def _register_news_listener(self) -> None:
+        """Đảm bảo đăng ký callback nhận cập nhật tin tức chỉ một lần."""
+
+        if self.news_service and not self._news_listener_registered:
+            self.news_service.add_listener(self._on_news_updated)
+            self._news_listener_registered = True
+
     def shutdown(self):
         """
         Xử lý sự kiện đóng cửa sổ ứng dụng một cách an toàn (graceful shutdown).
@@ -321,6 +330,9 @@ class AppUI:
         if self.chart_tab:
             self.chart_tab.stop()
         if self.news_service:
+            if self._news_listener_registered:
+                self.news_service.remove_listener(self._on_news_updated)
+                self._news_listener_registered = False
             self.news_service.stop()
 
         # 5. Lưu cấu hình
@@ -1424,25 +1436,65 @@ class AppUI:
         Lấy cấu hình hiện tại và cập nhật cho các service chạy nền.
         """
         current_config = self._snapshot_config()
+        self.run_config = current_config
+
         if self.news_service:
             self.news_service.update_config(current_config)
+            if not self.news_service.is_running():
+                self.news_service.start()
 
-    def _on_news_updated(self, events: List[Dict[str, Any]]):
+        self._refresh_news_tab_from_cache()
+
+    def _refresh_news_tab_from_cache(self) -> None:
+        """Cập nhật tab tin tức dựa trên cache hiện tại của dịch vụ nền."""
+
+        if not self.news_service or not self.news_tab:
+            return
+
+        snapshot = self.news_service.get_cache_snapshot()
+        symbol = self.mt5_symbol_var.get()
+        events: list[dict[str, Any]] = []
+        if symbol:
+            events = self.news_service.get_upcoming_events(symbol, snapshot=snapshot)
+
+        self.news_tab.update_news_list(
+            events,
+            last_updated=snapshot.last_updated,
+            timezone=snapshot.timezone,
+        )
+
+    def _on_news_updated(self, snapshot: NewsCacheSnapshot):
         """
         Callback được gọi từ NewsService khi cache tin tức được làm mới.
         """
-        logger.debug(f"Callback nhận được {len(events)} sự kiện tin tức mới.")
-        
+        logger.debug(
+            "Callback nhận được cập nhật tin tức: %s sự kiện.",
+            len(snapshot.events),
+        )
+
         def update_ui():
             # Lọc lại danh sách tin tức dựa trên symbol hiện tại của UI
             symbol = self.mt5_symbol_var.get()
             if self.news_service and self.news_tab and symbol:
-                filtered_events = self.news_service.get_upcoming_events(symbol)
-                self.news_tab.update_news_list(filtered_events)
-                self.ui_status(f"Tin tức được tự động cập nhật ({len(filtered_events)} sự kiện).")
+                filtered_events = self.news_service.get_upcoming_events(
+                    symbol,
+                    snapshot=snapshot,
+                )
+                self.news_tab.update_news_list(
+                    filtered_events,
+                    last_updated=snapshot.last_updated,
+                    timezone=snapshot.timezone,
+                )
+                self.ui_status(
+                    f"Tin tức được tự động cập nhật ({len(filtered_events)} sự kiện)."
+                )
             elif self.news_tab:
                 # Xử lý trường hợp không có symbol
-                self.news_tab.update_news_list([])
+                self.news_tab.update_news_list(
+                    [],
+                    last_updated=snapshot.last_updated,
+                    timezone=snapshot.timezone,
+                )
 
         self.ui_queue.put(update_ui)
 

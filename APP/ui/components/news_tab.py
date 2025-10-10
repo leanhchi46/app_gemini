@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
+from datetime import datetime
 from tkinter import ttk
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+import pytz
 
 if TYPE_CHECKING:
     from APP.ui.app_ui import AppUI
@@ -37,7 +40,15 @@ class NewsTab:
     def _build_widgets(self):
         """Xây dựng các thành phần con của tab."""
         self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(0, weight=1) # Cập nhật row để treeview chiếm toàn bộ không gian
+        self.frame.rowconfigure(1, weight=1)  # Cập nhật row để treeview chiếm toàn bộ không gian
+
+        header_frame = ttk.Frame(self.frame)
+        header_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        header_frame.columnconfigure(0, weight=1)
+
+        self.last_updated_var = tk.StringVar(value="Chưa có dữ liệu tin tức từ dịch vụ nền.")
+        self.last_updated_label = ttk.Label(header_frame, textvariable=self.last_updated_var, anchor="w")
+        self.last_updated_label.grid(row=0, column=0, sticky="w")
 
         # Treeview để hiển thị danh sách tin tức
         cols = ("time", "country", "event", "impact")
@@ -56,25 +67,36 @@ class NewsTab:
         self.tree.heading("impact", text="Tầm ảnh hưởng")
         self.tree.column("impact", width=100, anchor="center")
 
-        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.tree.grid(row=1, column=0, sticky="nsew")
 
         # Scrollbar
         scrollbar = ttk.Scrollbar(self.frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        scrollbar.grid(row=1, column=1, sticky="ns")
 
         # Định nghĩa các tag màu sắc cho mức độ ảnh hưởng
         self.tree.tag_configure("high", background="#FADBD8")
         self.tree.tag_configure("medium", background="#FEF9E7")
         self.tree.tag_configure("low", background="#E8F8F5")
 
-    def update_news_list(self, events: List[Dict[str, Any]]):
+    def update_news_list(
+        self,
+        events: List[Dict[str, Any]],
+        *,
+        last_updated: Optional[datetime] = None,
+        timezone: Optional[str] = None,
+    ):
         """
         Xóa danh sách cũ và cập nhật Treeview với dữ liệu tin tức mới.
 
         Args:
             events (List[Dict[str, Any]]): Danh sách các sự kiện tin tức.
+            last_updated (datetime | None): Thời điểm cache được cập nhật lần cuối.
+            timezone (str | None): Múi giờ địa phương để hiển thị thời gian.
         """
+        tz_label = self._format_last_updated(last_updated, timezone, len(events))
+        self.last_updated_var.set(tz_label)
+
         # Xóa tất cả các mục hiện có
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -111,3 +133,28 @@ class NewsTab:
                 ),
                 tags=(tag,),
             )
+
+    def _format_last_updated(
+        self,
+        last_updated: Optional[datetime],
+        timezone: Optional[str],
+        event_count: int,
+    ) -> str:
+        """Định dạng thông báo thời gian cập nhật cuối cho label giao diện."""
+
+        if not last_updated:
+            return "Chưa có dữ liệu tin tức từ dịch vụ nền."
+
+        tz_name = timezone or "UTC"
+        try:
+            tz = pytz.timezone(tz_name)
+            localized = last_updated.astimezone(tz)
+        except Exception:
+            logger.debug("Không thể chuyển đổi múi giờ '%s', sử dụng UTC.", tz_name)
+            tz_name = "UTC"
+            localized = last_updated.astimezone(pytz.utc)
+
+        return (
+            f"Cập nhật lần cuối: {localized.strftime('%Y-%m-%d %H:%M')} ({tz_name})"
+            f" | {event_count} sự kiện quan trọng"
+        )
