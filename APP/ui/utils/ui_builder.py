@@ -469,6 +469,55 @@ def _build_opts_conditions(app: "AppUI", parent: ttk.Notebook) -> None:
     ttk.Label(tz_frame, text="Múi giờ (Timezone):").pack(side="left")
     ttk.Entry(tz_frame, textvariable=app.no_run_timezone_var, width=25).pack(side="left", padx=6)
 
+    killzone_frame = ttk.LabelFrame(
+        card1,
+        text="Điều chỉnh Killzone theo mùa (giờ Việt Nam)",
+        padding=6,
+    )
+    killzone_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+    killzone_frame.columnconfigure(0, weight=1)
+    session_labels = [
+        ("Phiên Á (Asia)", "asia"),
+        ("Phiên Âu (London)", "london"),
+        ("Phiên Mỹ sáng (New York AM)", "newyork_am"),
+        ("Phiên Mỹ chiều (New York PM)", "newyork_pm"),
+    ]
+    seasons = [
+        ("Mùa hè (US DST)", app.killzone_summer_vars),
+        ("Mùa đông (US Standard)", app.killzone_winter_vars),
+    ]
+    for season_idx, (season_title, var_map) in enumerate(seasons):
+        season_frame = ttk.LabelFrame(killzone_frame, text=season_title, padding=6)
+        season_frame.grid(
+            row=season_idx, column=0, sticky="ew", pady=(0, 6) if season_idx == 0 else (0, 0)
+        )
+        season_frame.columnconfigure(1, weight=1)
+        for row_idx, (label_text, key) in enumerate(session_labels):
+            ttk.Label(season_frame, text=label_text).grid(
+                row=row_idx, column=0, sticky="w", padx=(0, 8), pady=2
+            )
+            entry_frame = ttk.Frame(season_frame)
+            entry_frame.grid(row=row_idx, column=1, sticky="w", pady=2)
+            ttk.Entry(
+                entry_frame,
+                width=6,
+                textvariable=var_map[key]["start"],
+                justify="center",
+            ).grid(row=0, column=0)
+            ttk.Label(entry_frame, text="→").grid(row=0, column=1, padx=4)
+            ttk.Entry(
+                entry_frame,
+                width=6,
+                textvariable=var_map[key]["end"],
+                justify="center",
+            ).grid(row=0, column=2)
+
+    ttk.Label(
+        killzone_frame,
+        text="Định dạng HH:MM - để trống sẽ dùng lịch mặc định.",
+        foreground="#555",
+    ).grid(row=len(seasons), column=0, sticky="w", pady=(0, 2))
+
     # --- NEWS ---
     card3 = ttk.LabelFrame(left_col, text="Chặn giao dịch theo tin tức (News)", padding=8)
     card3.pack(fill="x")

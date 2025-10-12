@@ -158,6 +158,8 @@ class AppUI:
         self.trade_move_to_be_after_tp1_var: tk.BooleanVar
         self.trade_trailing_atr_mult_var: tk.DoubleVar
         self.trade_filling_type_var: tk.StringVar
+        self.killzone_summer_vars: dict[str, dict[str, tk.StringVar]]
+        self.killzone_winter_vars: dict[str, dict[str, tk.StringVar]]
         self.trade_allow_session_asia_var: tk.BooleanVar
         self.trade_allow_session_london_var: tk.BooleanVar
         self.trade_allow_session_ny_var: tk.BooleanVar
@@ -491,6 +493,22 @@ class AppUI:
         self.no_run_holiday_check_var = tk.BooleanVar(value=True)
         self.no_run_holiday_country_var = tk.StringVar(value="US")
         self.no_run_timezone_var = tk.StringVar(value="Asia/Ho_Chi_Minh")
+
+        sessions = ["asia", "london", "newyork_am", "newyork_pm"]
+        self.killzone_summer_vars = {}
+        self.killzone_winter_vars = {}
+        for session in sessions:
+            summer_defaults = mt5_service.DEFAULT_KILLZONE_SUMMER.get(session, {})
+            winter_defaults = mt5_service.DEFAULT_KILLZONE_WINTER.get(session, {})
+            self.killzone_summer_vars[session] = {
+                "start": tk.StringVar(value=summer_defaults.get("start", "")),
+                "end": tk.StringVar(value=summer_defaults.get("end", "")),
+            }
+            self.killzone_winter_vars[session] = {
+                "start": tk.StringVar(value=winter_defaults.get("start", "")),
+                "end": tk.StringVar(value=winter_defaults.get("end", "")),
+            }
+
         self.no_trade_enabled_var = tk.BooleanVar(value=True)
         self.nt_spread_max_pips_var = tk.DoubleVar(value=2.5)
         self.nt_min_atr_m5_pips_var = tk.DoubleVar(value=3.0)
@@ -544,11 +562,50 @@ class AppUI:
         self.auto_load_prompt_txt_var = tk.BooleanVar(value=True)
         logger.debug("Các biến Tkinter đã được khởi tạo.")
 
+    def _gather_killzone_schedule(
+        self, var_map: dict[str, dict[str, tk.StringVar]]
+    ) -> dict[str, dict[str, str]] | None:
+        schedule: dict[str, dict[str, str]] = {}
+        for session, pair in var_map.items():
+            start_val = pair["start"].get().strip()
+            end_val = pair["end"].get().strip()
+            if start_val and end_val:
+                schedule[session] = {"start": start_val, "end": end_val}
+        return schedule or None
+
+    def _apply_killzone_schedule(
+        self,
+        var_map: dict[str, dict[str, tk.StringVar]],
+        data: dict[str, dict[str, str]] | None,
+        defaults: dict[str, dict[str, str]],
+    ) -> None:
+        for session, pair in var_map.items():
+            default_window = defaults.get(session, {})
+            target_window = (data or {}).get(session, {})
+            start_val = target_window.get("start", default_window.get("start", ""))
+            end_val = target_window.get("end", default_window.get("end", ""))
+            pair["start"].set(start_val)
+            pair["end"].set(end_val)
+
     def _collect_config_data(self) -> dict:
         """
         Thu thập tất cả các giá trị cấu hình từ các biến Tkinter và trả về một dictionary.
         """
         logger.debug("Bắt đầu thu thập dữ liệu cấu hình từ UI.")
+        summer_schedule = self._gather_killzone_schedule(self.killzone_summer_vars)
+        winter_schedule = self._gather_killzone_schedule(self.killzone_winter_vars)
+        no_run_config: dict[str, Any] = {
+            "weekend_enabled": self.no_run_weekend_enabled_var.get(),
+            "killzone_enabled": self.norun_killzone_var.get(),
+            "holiday_check_enabled": self.no_run_holiday_check_var.get(),
+            "holiday_check_country": self.no_run_holiday_country_var.get(),
+            "timezone": self.no_run_timezone_var.get(),
+        }
+        if summer_schedule:
+            no_run_config["killzone_summer"] = summer_schedule
+        if winter_schedule:
+            no_run_config["killzone_winter"] = winter_schedule
+
         return {
             "folder": {
                 "folder_path": self.folder_path.get().strip(),
@@ -603,13 +660,7 @@ class AppUI:
                 "n_M15": self.mt5_n_M15.get(),
                 "n_H1": self.mt5_n_H1.get(),
             },
-            "no_run": {
-                "weekend_enabled": self.no_run_weekend_enabled_var.get(),
-                "killzone_enabled": self.norun_killzone_var.get(),
-                "holiday_check_enabled": self.no_run_holiday_check_var.get(),
-                "holiday_check_country": self.no_run_holiday_country_var.get(),
-                "timezone": self.no_run_timezone_var.get(),
-            },
+            "no_run": no_run_config,
             "no_trade": {
                 "enabled": self.no_trade_enabled_var.get(),
                 "spread_max_pips": self.nt_spread_max_pips_var.get(),
@@ -733,6 +784,16 @@ class AppUI:
         self.no_run_holiday_check_var.set(get_nested(no_run_cfg, ["holiday_check_enabled"], True))
         self.no_run_holiday_country_var.set(get_nested(no_run_cfg, ["holiday_check_country"], "US"))
         self.no_run_timezone_var.set(get_nested(no_run_cfg, ["timezone"], "Asia/Ho_Chi_Minh"))
+        self._apply_killzone_schedule(
+            self.killzone_summer_vars,
+            no_run_cfg.get("killzone_summer"),
+            mt5_service.DEFAULT_KILLZONE_SUMMER,
+        )
+        self._apply_killzone_schedule(
+            self.killzone_winter_vars,
+            no_run_cfg.get("killzone_winter"),
+            mt5_service.DEFAULT_KILLZONE_WINTER,
+        )
 
         no_trade_cfg = config_data.get("no_trade", {})
         self.no_trade_enabled_var.set(get_nested(no_trade_cfg, ["enabled"], True))
@@ -822,6 +883,8 @@ class AppUI:
         và trả về một đối tượng RunConfig đã được nhóm lại.
         """
         logger.debug("Bắt đầu chụp ảnh nhanh cấu hình từ UI.")
+        summer_schedule = self._gather_killzone_schedule(self.killzone_summer_vars)
+        winter_schedule = self._gather_killzone_schedule(self.killzone_winter_vars)
         return RunConfig(
             folder=FolderConfig(
                 folder=self.folder_path.get(),
@@ -881,6 +944,8 @@ class AppUI:
                 holiday_check_enabled=self.no_run_holiday_check_var.get(),
                 holiday_check_country=self.no_run_holiday_country_var.get(),
                 timezone=self.no_run_timezone_var.get(),
+                killzone_summer=summer_schedule,
+                killzone_winter=winter_schedule,
             ),
             no_trade=NoTradeConfig(
                 enabled=self.no_trade_enabled_var.get(),

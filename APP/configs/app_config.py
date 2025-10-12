@@ -71,6 +71,8 @@ class NoRunConfig:
     holiday_check_enabled: bool
     holiday_check_country: str = "US"
     timezone: str = "Asia/Ho_Chi_Minh"
+    killzone_summer: dict[str, dict[str, str]] | None = None
+    killzone_winter: dict[str, dict[str, str]] | None = None
 
 
 @dataclass(frozen=True)

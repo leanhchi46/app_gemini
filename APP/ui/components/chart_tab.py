@@ -395,9 +395,7 @@ class ChartTab:
         current_config = replace(current_config, mt5=updated_mt5, chart=updated_chart)
 
         cancel_token.raise_if_cancelled()
-        safe_mt5_data = mt5_service.get_market_data(
-            current_config.mt5, timezone_name=current_config.no_run.timezone
-        )
+        safe_mt5_data = mt5_service.get_market_data(current_config.mt5)
         if not safe_mt5_data.is_valid():
             return {"mt5_data": None, "status_message": "Không lấy được dữ liệu MT5."}
 
