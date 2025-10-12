@@ -4,6 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import holidays
 
@@ -37,7 +38,19 @@ def check_no_run_conditions(
         Tuple (bool, str): (True, "Lý do chạy") hoặc (False, "Lý do dừng").
     """
     logger.debug("Bắt đầu kiểm tra các điều kiện NO-RUN.")
-    now = datetime.now()
+    tz_name = cfg.no_run.timezone or mt5_service.DEFAULT_TIMEZONE
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "Không thể tải timezone '%s'. Sử dụng múi giờ mặc định %s.",
+            tz_name,
+            mt5_service.DEFAULT_TIMEZONE,
+        )
+        tz = ZoneInfo(mt5_service.DEFAULT_TIMEZONE)
+        tz_name = mt5_service.DEFAULT_TIMEZONE
+
+    now = datetime.now(tz)
     reasons: list[str] = []
 
     # 1. Kiểm tra cuối tuần
@@ -57,7 +70,7 @@ def check_no_run_conditions(
     active_kill_zone = ""
     if cfg.no_run.killzone_enabled:
         is_in_kill_zone, zone_name = mt5_service.get_active_killzone(
-            d=now, target_tz=cfg.no_run.timezone
+            d=now, target_tz=tz_name
         )
         if not is_in_kill_zone:
             reasons.append("Không chạy ngoài các Kill Zone đã định nghĩa.")

@@ -1660,7 +1660,11 @@ class AppUI:
         error_msg = None
         with ThreadPoolExecutor(max_workers=1) as executor:
             try:
-                future = executor.submit(mt5_service.get_market_data, cfg.mt5)
+                future = executor.submit(
+                    mt5_service.get_market_data,
+                    cfg.mt5,
+                    timezone_name=cfg.no_run.timezone,
+                )
                 mt5_data_untyped = future.result(timeout=20)
                 if isinstance(mt5_data_untyped, SafeData):
                     mt5_data = mt5_data_untyped

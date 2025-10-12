@@ -240,7 +240,11 @@ class AnalysisWorker:
                 (
                     mt5_service.get_market_data_async,
                     (),
-                    {"cfg": self.cfg.mt5, "plan": None},
+                    {
+                        "cfg": self.cfg.mt5,
+                        "plan": None,
+                        "timezone_name": self.cfg.no_run.timezone,
+                    },
                 ),
                 (
                     context_builder.build_historical_context_async,

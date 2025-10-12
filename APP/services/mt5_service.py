@@ -6,10 +6,10 @@ import math
 import threading
 import time
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from statistics import median
 from typing import TYPE_CHECKING, Any, Iterable, Optional, Sequence
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import MetaTrader5 as mt5_lib
 
@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 # Khóa toàn cục để đảm bảo chỉ một luồng truy cập thư viện MT5 tại một thời điểm
 _mt5_lock = threading.Lock()
+
+DEFAULT_TIMEZONE = "Asia/Ho_Chi_Minh"
 
 
 # ------------------------------
@@ -418,7 +420,7 @@ def _killzone_ranges_vn(
     """
     logger.debug(f"Bắt đầu _killzone_ranges_vn. Date: {d}, Target TZ: {target_tz}")
     if d is None:
-        tz_vn = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
+        tz_vn = ZoneInfo(target_tz or DEFAULT_TIMEZONE)
         d = datetime.now(tz=tz_vn)
         logger.debug(f"Sử dụng thời gian hiện tại ở TZ: {tz_vn}, Date: {d}")
 
@@ -448,16 +450,26 @@ def _killzone_ranges_vn(
         return result
 
 
-def session_ranges_today(m1_rates: Sequence[dict] | None) -> dict[str, dict]:
+def session_ranges_today(
+    m1_rates: Sequence[dict] | None,
+    *,
+    reference_time: datetime | None = None,
+    target_tz: str | None = None,
+) -> dict[str, dict]:
     """
-    Compute session ranges for Asia/London/NY (split NY into AM/PM) in local VN time.
+    Compute session ranges for Asia/London/NY (split NY into AM/PM) in the configured VN time.
     Input: M1 rates with keys {time:"YYYY-MM-DD HH:MM:SS", high, low, close, vol}.
+    reference_time allows callers to anchor the calculation to a specific datetime.
     """
-    logger.debug(f"Bắt đầu session_ranges_today. M1 rates count: {len(m1_rates) if m1_rates else 0}")
-    # The m1_rates are not strictly needed anymore since we use system time,
+    logger.debug(
+        "Bắt đầu session_ranges_today. M1 rates count: %s, reference_time: %s, target_tz: %s",
+        len(m1_rates) if m1_rates else 0,
+        reference_time,
+        target_tz,
+    )
+    # The m1_rates are not strictly needed anymore since we use the provided reference time,
     # but we keep the signature for compatibility. It can be used to check historical sessions.
-    # For now, we pass `None` to `_killzone_ranges_vn` to use the current system time.
-    result = _killzone_ranges_vn(d=None)
+    result = _killzone_ranges_vn(d=reference_time, target_tz=target_tz)
     logger.debug("Kết thúc session_ranges_today.")
     return result
 
@@ -469,7 +481,7 @@ def get_active_killzone(d: datetime, target_tz: str | None) -> tuple[bool, str |
     """
     logger.debug(f"Bắt đầu get_active_killzone cho {d} với timezone {target_tz}")
     try:
-        tz = ZoneInfo(target_tz or "Asia/Ho_Chi_Minh")
+        tz = ZoneInfo(target_tz or DEFAULT_TIMEZONE)
         # Nếu d không có timezone, gán timezone cho nó
         if d.tzinfo is None:
             d = d.replace(tzinfo=tz)
@@ -604,6 +616,7 @@ def _nearby_key_levels(
 def get_market_data_async(
     cfg: "MT5Config",
     plan: dict | None = None,
+    timezone_name: str | None = None,
 ) -> SafeData:
     """
     Hàm worker công khai để lấy dữ liệu thị trường, được thiết kế để chạy song song
@@ -612,7 +625,9 @@ def get_market_data_async(
     """
     try:
         # Gọi hàm gốc và đảm bảo luôn trả về SafeData
-        result = get_market_data(cfg=cfg, return_json=False, plan=plan)
+        result = get_market_data(
+            cfg=cfg, return_json=False, plan=plan, timezone_name=timezone_name
+        )
         if isinstance(result, SafeData):
             return result
         # Trường hợp hiếm gặp khi get_market_data trả về chuỗi lỗi
@@ -628,6 +643,7 @@ def get_market_data(
     *,
     return_json: bool = False,
     plan: dict | None = None,
+    timezone_name: str | None = None,
 ) -> SafeData | str:
     symbol = cfg.symbol
     """
@@ -635,6 +651,17 @@ def get_market_data(
     Returns a JSON string (default) containing a single object with key MT5_DATA.
     """
     logger.debug(f"Bắt đầu build_context cho symbol: {symbol}")
+    tz_name = timezone_name or DEFAULT_TIMEZONE
+    try:
+        target_tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "Không thể tải timezone '%s'. Sử dụng múi giờ mặc định %s.",
+            tz_name,
+            DEFAULT_TIMEZONE,
+        )
+        tz_name = DEFAULT_TIMEZONE
+        target_tz = ZoneInfo(DEFAULT_TIMEZONE)
     if mt5 is None:
         logger.warning("MetaTrader5 module not installed, cannot build MT5 context.")
         return SafeData(None)
@@ -663,23 +690,37 @@ def get_market_data(
         logger.debug("Đã lấy symbol info, account info, tick info.")
 
     # --- Broker Time ---
-    broker_time = datetime.now(timezone.utc)  # Fallback
+    broker_time = datetime.now(target_tz)  # Fallback
     try:
         if tick and getattr(tick, "time", 0) > 0:
             broker_timestamp = int(getattr(tick, "time"))
             terminal_info = mt5.terminal_info()
-            # Cải tiến: Kiểm tra sự tồn tại của thuộc tính 'timezone' một cách an toàn
-            if terminal_info and hasattr(terminal_info, "timezone") and terminal_info.timezone:
-                broker_timezone = ZoneInfo(terminal_info.timezone)
-                broker_time = datetime.fromtimestamp(
-                    broker_timestamp, tz=broker_timezone
-                )
+            tz_source = getattr(terminal_info, "timezone", None) if terminal_info else None
+            if tz_source:
+                try:
+                    broker_timezone = ZoneInfo(tz_source)
+                    broker_time = datetime.fromtimestamp(
+                        broker_timestamp, tz=broker_timezone
+                    ).astimezone(target_tz)
+                except ZoneInfoNotFoundError:
+                    logger.warning(
+                        "Không thể xác định múi giờ từ TerminalInfo ('%s'), sử dụng %s.",
+                        tz_source,
+                        tz_name,
+                    )
+                    broker_time = datetime.fromtimestamp(
+                        broker_timestamp, tz=target_tz
+                    )
             else:
                 logger.warning(
-                    "Không thể xác định múi giờ từ TerminalInfo (thiếu thuộc tính hoặc rỗng), sử dụng UTC."
+                    "Không thể xác định múi giờ từ TerminalInfo (thiếu thuộc tính hoặc rỗng), sử dụng %s.",
+                    tz_name,
                 )
+                broker_time = datetime.fromtimestamp(broker_timestamp, tz=target_tz)
     except Exception as e:
-        logger.warning(f"Lỗi khi xử lý thời gian broker, sử dụng UTC. Lỗi: {e}")
+        logger.warning(
+            f"Lỗi khi xử lý thời gian broker, sử dụng {tz_name}. Lỗi: {e}"
+        )
 
 
     # --- Fetch Open Positions ---
@@ -887,7 +928,13 @@ def get_market_data(
         logger.debug(f"Đã enrich daily data: {daily}")
 
     # Sessions and VWAPs
-    sessions_today = session_ranges_today(series["M1"]) if series["M1"] else {}
+    sessions_today = (
+        session_ranges_today(
+            series["M1"], reference_time=broker_time, target_tz=tz_name
+        )
+        if series["M1"]
+        else {}
+    )
     session_liquidity = ict_analyzer.get_session_liquidity(
         series.get("M15", []), sessions_today, broker_time
     )
@@ -895,7 +942,7 @@ def get_market_data(
         [
             r
             for r in series["M1"]
-            if str(r["time"])[:10] == datetime.now().strftime("%Y-%m-%d")
+            if str(r["time"])[:10] == broker_time.strftime("%Y-%m-%d")
         ]
     )
     vwaps: dict[str, float | None] = {"day": vwap_day}
@@ -906,7 +953,7 @@ def get_market_data(
             for r in series["M1"]:
                 hh = str(r["time"])[11:16]
                 if (
-                    str(r["time"])[:10] == datetime.now().strftime("%Y-%m-%d")
+                    str(r["time"])[:10] == broker_time.strftime("%Y-%m-%d")
                     and rng["start"] <= hh < rng["end"]
                 ):
                     sub.append(r)
@@ -985,7 +1032,7 @@ def get_market_data(
         pass
 
     # Killzone detection using DST-aware VN schedule
-    kills = _killzone_ranges_vn()
+    kills = _killzone_ranges_vn(d=broker_time, target_tz=tz_name)
     is_silver_bullet = ict_analyzer.is_silver_bullet_window(broker_time, kills)
     now_hhmm = broker_time.strftime("%H:%M")
     kill_active = None
@@ -1134,8 +1181,9 @@ def get_market_data(
     payload = {
         "MT5_DATA": {
             "symbol": symbol,
-            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "generated_at": datetime.now(target_tz).strftime("%Y-%m-%d %H:%M:%S"),
             "broker_time": broker_time.isoformat(timespec="seconds"),
+            "timezone": tz_name,
             "account": account_obj or {},
             "positions": positions_list,
             "info": info_obj or {},
