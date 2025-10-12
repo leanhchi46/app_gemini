@@ -83,7 +83,10 @@ class FileListView:
             base_folder_str = self.app.folder_path.get()
             if not base_folder_str:
                 self.logger.warning("Thư mục gốc chưa được đặt, worker thoát.")
-                ui_builder.enqueue(self.app, self._update_listbox_ui, [], [], "Chưa chọn thư mục.")
+                ui_builder.enqueue(
+                    self.app,
+                    lambda: self._update_listbox_ui([], [], "Chưa chọn thư mục."),
+                )
                 return
 
             base_folder = Path(base_folder_str)
@@ -178,11 +181,17 @@ class FileListView:
         try:
             content = file_path.read_text(encoding="utf-8", errors="ignore")
             status_msg = f"Đang xem {self.file_type_name}: {file_path.name}"
-            ui_builder.enqueue(self.app, self._update_detail_text_ui, content, status_msg)
+            ui_builder.enqueue(
+                self.app,
+                lambda: self._update_detail_text_ui(content, status_msg),
+            )
         except Exception as e:
             error_msg = f"Lỗi khi đọc tệp '{file_path.name}'"
             self.logger.error(f"{error_msg}: {e}", exc_info=True)
-            ui_builder.enqueue(self.app, self._update_detail_text_ui, f"{error_msg}:\n{e}", error_msg)
+            ui_builder.enqueue(
+                self.app,
+                lambda: self._update_detail_text_ui(f"{error_msg}:\n{e}", error_msg),
+            )
 
     def _update_detail_text_ui(self, content: str, status_message: str) -> None:
         """Cập nhật ô chi tiết trên luồng UI chính."""
