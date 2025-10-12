@@ -237,11 +237,19 @@ class AnalysisWorker:
 
             reports_dir = Path(self.app.folder_path.get()) / "Reports"
             context_tasks = [
-                (
-                    mt5_service.get_market_data_async,
-                    (),
-                    {"cfg": self.cfg.mt5, "plan": None},
-                ),
+                    (
+                        mt5_service.get_market_data_async,
+                        (),
+                        {
+                            "cfg": self.cfg.mt5,
+                            "plan": None,
+                            "timezone_name": self.cfg.no_run.timezone,
+                            "killzone_overrides": {
+                                "summer": self.cfg.no_run.killzone_summer,
+                                "winter": self.cfg.no_run.killzone_winter,
+                            },
+                        },
+                    ),
                 (
                     context_builder.build_historical_context_async,
                     (

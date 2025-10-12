@@ -472,80 +472,139 @@ def _build_opts_conditions(app: "AppUI", parent: ttk.Notebook) -> None:
     killzone_frame = ttk.LabelFrame(
         card1,
         text="Điều chỉnh Killzone theo mùa (giờ Việt Nam)",
-        padding=6,
+        padding=10,
     )
     killzone_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
     killzone_frame.columnconfigure(0, weight=1)
+
     session_labels = [
         ("Phiên Á (Asia)", "asia"),
         ("Phiên Âu (London)", "london"),
         ("Phiên Mỹ sáng (New York AM)", "newyork_am"),
         ("Phiên Mỹ chiều (New York PM)", "newyork_pm"),
     ]
-    seasons = [
-        ("Mùa hè (US DST)", app.killzone_summer_vars),
-        ("Mùa đông (US Standard)", app.killzone_winter_vars),
-    ]
-    for season_idx, (season_title, var_map) in enumerate(seasons):
-        season_frame = ttk.LabelFrame(killzone_frame, text=season_title, padding=6)
-        season_frame.grid(
-            row=season_idx, column=0, sticky="ew", pady=(0, 6) if season_idx == 0 else (0, 0)
+
+    table = ttk.Frame(killzone_frame)
+    table.grid(row=0, column=0, sticky="ew")
+    for col in range(5):
+        weight = 1 if col else 0
+        table.columnconfigure(col, weight=weight)
+
+    ttk.Label(table, text="Phiên", font=("", 9, "bold")).grid(
+        row=0, column=0, sticky="w", padx=(0, 8)
+    )
+    ttk.Label(table, text="Mùa hè (US DST)", anchor="center", font=("", 9, "bold")).grid(
+        row=0, column=1, columnspan=2, sticky="ew"
+    )
+    ttk.Label(table, text="Mùa đông (US Standard)", anchor="center", font=("", 9, "bold")).grid(
+        row=0, column=3, columnspan=2, sticky="ew"
+    )
+
+    ttk.Label(table, text="Bắt đầu", foreground="#555").grid(row=1, column=1, sticky="ew")
+    ttk.Label(table, text="Kết thúc", foreground="#555").grid(row=1, column=2, sticky="ew")
+    ttk.Label(table, text="Bắt đầu", foreground="#555").grid(row=1, column=3, sticky="ew")
+    ttk.Label(table, text="Kết thúc", foreground="#555").grid(row=1, column=4, sticky="ew")
+
+    for row_idx, (label_text, key) in enumerate(session_labels, start=2):
+        ttk.Label(table, text=label_text).grid(
+            row=row_idx,
+            column=0,
+            sticky="w",
+            padx=(0, 8),
+            pady=2,
         )
-        season_frame.columnconfigure(1, weight=1)
-        for row_idx, (label_text, key) in enumerate(session_labels):
-            ttk.Label(season_frame, text=label_text).grid(
-                row=row_idx, column=0, sticky="w", padx=(0, 8), pady=2
-            )
-            entry_frame = ttk.Frame(season_frame)
-            entry_frame.grid(row=row_idx, column=1, sticky="w", pady=2)
-            ttk.Entry(
-                entry_frame,
-                width=6,
-                textvariable=var_map[key]["start"],
-                justify="center",
-            ).grid(row=0, column=0)
-            ttk.Label(entry_frame, text="→").grid(row=0, column=1, padx=4)
-            ttk.Entry(
-                entry_frame,
-                width=6,
-                textvariable=var_map[key]["end"],
-                justify="center",
-            ).grid(row=0, column=2)
+
+        ttk.Entry(
+            table,
+            width=8,
+            textvariable=app.killzone_summer_vars[key]["start"],
+            justify="center",
+        ).grid(row=row_idx, column=1, padx=2, pady=2)
+        ttk.Entry(
+            table,
+            width=8,
+            textvariable=app.killzone_summer_vars[key]["end"],
+            justify="center",
+        ).grid(row=row_idx, column=2, padx=2, pady=2)
+        ttk.Entry(
+            table,
+            width=8,
+            textvariable=app.killzone_winter_vars[key]["start"],
+            justify="center",
+        ).grid(row=row_idx, column=3, padx=2, pady=2)
+        ttk.Entry(
+            table,
+            width=8,
+            textvariable=app.killzone_winter_vars[key]["end"],
+            justify="center",
+        ).grid(row=row_idx, column=4, padx=2, pady=2)
 
     ttk.Label(
         killzone_frame,
         text="Định dạng HH:MM - để trống sẽ dùng lịch mặc định.",
         foreground="#555",
-    ).grid(row=len(seasons), column=0, sticky="w", pady=(0, 2))
+    ).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
     # --- NEWS ---
-    card3 = ttk.LabelFrame(left_col, text="Chặn giao dịch theo tin tức (News)", padding=8)
+    card3 = ttk.LabelFrame(left_col, text="Giám sát tin tức & kill zone", padding=10)
     card3.pack(fill="x")
+    card3.columnconfigure(1, weight=1)
     app.news_card = card3  # Gán widget vào thuộc tính của app
 
-    app.news_block_check = ttk.Checkbutton(card3, text="Bật chặn giao dịch khi có tin tức quan trọng", variable=app.news_block_enabled_var)
-    app.news_block_check.pack(anchor="w")
-    
-    separator_news = ttk.Separator(card3, orient="horizontal")
-    separator_news.pack(fill="x", pady=8, padx=2)
+    app.news_block_check = ttk.Checkbutton(
+        card3,
+        text="Bật chế độ giám sát tin tức quan trọng",
+        variable=app.news_block_enabled_var,
+    )
+    app.news_block_check.grid(row=0, column=0, columnspan=2, sticky="w")
 
-    provider_frame = ttk.Frame(card3)
-    provider_frame.pack(anchor="w", pady=4)
-    ttk.Label(provider_frame, text="Nhà cung cấp tin tức:").pack(side="left")
-    app.news_provider_combo = ttk.Combobox(provider_frame, textvariable=app.news_provider_var, values=["FMP", "TE"], state="readonly", width=10)
-    app.news_provider_combo.pack(side="left", padx=6)
+    ttk.Separator(card3, orient="horizontal").grid(
+        row=1, column=0, columnspan=2, sticky="ew", pady=8
+    )
 
-    before_spin_frame = _create_labeled_spinbox(card3, "Chặn trước khi tin ra (phút):", app.trade_news_block_before_min_var, 0, 120, width=8)
-    before_spin_frame.pack(anchor="w", pady=4)
-    app.news_before_spin = before_spin_frame.winfo_children()[1] # Lấy widget Spinbox
+    ttk.Label(card3, text="Nhà cung cấp tin tức:").grid(row=2, column=0, sticky="w")
+    app.news_provider_combo = ttk.Combobox(
+        card3,
+        textvariable=app.news_provider_var,
+        values=["FMP", "TE"],
+        state="readonly",
+        width=12,
+    )
+    app.news_provider_combo.grid(row=2, column=1, sticky="w", padx=(6, 0), pady=2)
 
-    after_spin_frame = _create_labeled_spinbox(card3, "Chặn sau khi tin ra (phút):", app.trade_news_block_after_min_var, 0, 120, width=8)
-    after_spin_frame.pack(anchor="w", pady=4)
-    app.news_after_spin = after_spin_frame.winfo_children()[1] # Lấy widget Spinbox
+    ttk.Label(card3, text="Chặn trước khi tin ra (phút):").grid(row=3, column=0, sticky="w", pady=2)
+    before_spin = ttk.Spinbox(
+        card3,
+        from_=0,
+        to=120,
+        textvariable=app.trade_news_block_before_min_var,
+        width=8,
+    )
+    before_spin.grid(row=3, column=1, sticky="w", padx=(6, 0), pady=2)
+    app.news_before_spin = before_spin
 
-    cache_spin_frame = _create_labeled_spinbox(card3, "Thời gian cache tin tức (giây):", app.news_cache_ttl_var, 60, 3600, width=8)
-    cache_spin_frame.pack(anchor="w", pady=4)
-    app.news_cache_spin = cache_spin_frame.winfo_children()[1] # Lấy widget Spinbox
+    ttk.Label(card3, text="Chặn sau khi tin ra (phút):").grid(row=4, column=0, sticky="w", pady=2)
+    after_spin = ttk.Spinbox(
+        card3,
+        from_=0,
+        to=120,
+        textvariable=app.trade_news_block_after_min_var,
+        width=8,
+    )
+    after_spin.grid(row=4, column=1, sticky="w", padx=(6, 0), pady=2)
+    app.news_after_spin = after_spin
+
+    ttk.Label(card3, text="Thời gian cache tin tức (giây):").grid(row=5, column=0, sticky="w", pady=2)
+    cache_spin = ttk.Spinbox(
+        card3,
+        from_=60,
+        to=3600,
+        increment=60,
+        textvariable=app.news_cache_ttl_var,
+        width=8,
+    )
+    cache_spin.grid(row=5, column=1, sticky="w", padx=(6, 0), pady=2)
+    app.news_cache_spin = cache_spin
 
     # --- CỘT PHẢI ---
     # --- NO TRADE ---

@@ -32,8 +32,6 @@ _mt5_lock = threading.Lock()
 
 DEFAULT_TIMEZONE = "Asia/Ho_Chi_Minh"
 
-DEFAULT_TIMEZONE = "Asia/Ho_Chi_Minh"
-
 # Các khung giờ killzone mặc định (giờ Việt Nam)
 DEFAULT_KILLZONE_SUMMER: dict[str, dict[str, str]] = {
     "asia": {"start": "06:00", "end": "09:00"},
@@ -524,7 +522,13 @@ def _killzone_ranges_vn(
         return result
 
 
-def session_ranges_today(m1_rates: Sequence[dict] | None) -> dict[str, dict]:
+def session_ranges_today(
+    m1_rates: Sequence[dict] | None,
+    *,
+    reference_time: datetime | None = None,
+    target_tz: str | None = None,
+    overrides: dict[str, dict[str, dict[str, str]]] | None = None,
+) -> dict[str, dict]:
     """
     Compute session ranges for Asia/London/NY (split NY into AM/PM) in the configured VN time.
     Input: M1 rates with keys {time:"YYYY-MM-DD HH:MM:SS", high, low, close, vol}.
@@ -538,8 +542,13 @@ def session_ranges_today(m1_rates: Sequence[dict] | None) -> dict[str, dict]:
     )
     # The m1_rates are not strictly needed anymore since we use the provided reference time,
     # but we keep the signature for compatibility. It can be used to check historical sessions.
-    # For now, we pass `None` to `_killzone_ranges_vn` to use the current system time.
-    result = _killzone_ranges_vn(d=None)
+    normalized = _normalize_killzone_overrides(overrides)
+    result = _killzone_ranges_vn(
+        d=reference_time,
+        target_tz=target_tz,
+        summer_override=normalized.get("summer"),
+        winter_override=normalized.get("winter"),
+    )
     logger.debug("Kết thúc session_ranges_today.")
     return result
 
@@ -695,6 +704,8 @@ def _nearby_key_levels(
 def get_market_data_async(
     cfg: "MT5Config",
     plan: dict | None = None,
+    timezone_name: str | None = None,
+    killzone_overrides: dict[str, dict[str, dict[str, str]]] | None = None,
 ) -> SafeData:
     """
     Hàm worker công khai để lấy dữ liệu thị trường, được thiết kế để chạy song song
@@ -703,7 +714,13 @@ def get_market_data_async(
     """
     try:
         # Gọi hàm gốc và đảm bảo luôn trả về SafeData
-        result = get_market_data(cfg=cfg, return_json=False, plan=plan)
+        result = get_market_data(
+            cfg=cfg,
+            return_json=False,
+            plan=plan,
+            timezone_name=timezone_name,
+            killzone_overrides=killzone_overrides,
+        )
         if isinstance(result, SafeData):
             return result
         # Trường hợp hiếm gặp khi get_market_data trả về chuỗi lỗi
@@ -719,6 +736,8 @@ def get_market_data(
     *,
     return_json: bool = False,
     plan: dict | None = None,
+    timezone_name: str | None = None,
+    killzone_overrides: dict[str, dict[str, dict[str, str]]] | None = None,
 ) -> SafeData | str:
     symbol = cfg.symbol
     """
@@ -1005,7 +1024,16 @@ def get_market_data(
         logger.debug(f"Đã enrich daily data: {daily}")
 
     # Sessions and VWAPs
-    sessions_today = session_ranges_today(series["M1"]) if series["M1"] else {}
+    sessions_today = (
+        session_ranges_today(
+            series["M1"],
+            reference_time=broker_time,
+            target_tz=tz_name,
+            overrides=normalized_overrides,
+        )
+        if series["M1"]
+        else {}
+    )
     session_liquidity = ict_analyzer.get_session_liquidity(
         series.get("M15", []), sessions_today, broker_time
     )
@@ -1103,7 +1131,12 @@ def get_market_data(
         pass
 
     # Killzone detection using DST-aware VN schedule
-    kills = _killzone_ranges_vn()
+    kills = _killzone_ranges_vn(
+        d=broker_time,
+        target_tz=tz_name,
+        summer_override=normalized_overrides.get("summer"),
+        winter_override=normalized_overrides.get("winter"),
+    )
     is_silver_bullet = ict_analyzer.is_silver_bullet_window(broker_time, kills)
     now_hhmm = broker_time.strftime("%H:%M")
     kill_active = None

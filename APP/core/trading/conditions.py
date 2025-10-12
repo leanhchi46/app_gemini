@@ -74,7 +74,7 @@ def check_no_run_conditions(
     }
     if cfg.no_run.killzone_enabled:
         is_in_kill_zone, zone_name = mt5_service.get_active_killzone(
-            d=now, target_tz=cfg.no_run.timezone
+            d=now, target_tz=tz_name, killzone_overrides=killzone_overrides
         )
         if not is_in_kill_zone:
             reasons.append("Không chạy ngoài các Kill Zone đã định nghĩa.")
