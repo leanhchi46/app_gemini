@@ -1377,6 +1377,7 @@ class AppUI:
             # Logic cuối cùng: Sau khi quét file, luôn làm mới danh sách
             # báo cáo và context dựa trên symbol hiện tại trong UI.
             ui_builder.enqueue(self, self.history_manager.refresh_all_lists)
+            ui_builder.enqueue(self, lambda: self._guess_symbol_from_results(auto=True))
 
         except Exception:
             logger.exception(f"Lỗi trong luồng quét thư mục {folder}.")
@@ -1740,18 +1741,66 @@ class AppUI:
             self.mt5_term_path_var.set(filepath)
             logger.info(f"Đã chọn đường dẫn MT5: {filepath}")
 
-    def _mt5_guess_symbol(self):
-        """Đoán symbol từ tên file ảnh."""
+    def _guess_symbol_from_results(self, auto: bool = False) -> bool:
+        """Thử đoán symbol dựa trên danh sách ảnh đã nạp."""
+
         if not self.results:
-            self.show_error_message("Đoán Symbol", "Vui lòng nạp ảnh trước.")
-            return
-        first_name = self.results[0].get("name", "")
-        symbol = general_utils.extract_symbol_from_filename(first_name)
-        if symbol:
-            self.mt5_symbol_var.set(symbol)
-            logger.info(f"Đã đoán được symbol: {symbol}")
+            if not auto:
+                self.show_error_message("Đoán Symbol", "Vui lòng nạp ảnh trước.")
+            return False
+
+        filenames = [item.get("name", "") for item in self.results if item.get("name")]
+        guessed_symbol, stats = general_utils.guess_symbol_from_filenames(filenames)
+
+        if not guessed_symbol:
+            if not auto:
+                self.show_error_message("Đoán Symbol", "Không thể đoán symbol từ tên file.")
+            logger.info("Không thể đoán symbol từ danh sách ảnh. auto=%s", auto)
+            return False
+
+        current_symbol = (self.mt5_symbol_var.get() or "").strip().upper()
+        occurrences = stats.get(guessed_symbol, 0)
+        message = (
+            f"Đã đoán symbol {guessed_symbol} từ {occurrences} ảnh."
+            if occurrences
+            else f"Đã đoán symbol {guessed_symbol}."
+        )
+
+        if auto and current_symbol:
+            if current_symbol == guessed_symbol:
+                self.ui_status(f"Symbol hiện tại đã khớp với ảnh ({guessed_symbol}).")
+            else:
+                self.ui_status(
+                    f"Phát hiện symbol {guessed_symbol} từ {occurrences} ảnh (giữ {current_symbol})."
+                )
+            logger.info(
+                "Phát hiện symbol %s từ ảnh (auto=%s, giữ symbol hiện tại %s).",
+                guessed_symbol,
+                auto,
+                current_symbol,
+            )
+            return False
+
+        self.mt5_symbol_var.set(guessed_symbol)
+
+        if auto:
+            self.ui_status(message)
         else:
-            self.show_error_message("Đoán Symbol", "Không thể đoán symbol từ tên file.")
+            self.show_error_message("Đoán Symbol", message)
+
+        logger.info(
+            "Đã đặt symbol về %s dựa trên tên ảnh (auto=%s, xuất hiện %s lần).",
+            guessed_symbol,
+            auto,
+            occurrences,
+        )
+        return True
+
+    def _mt5_guess_symbol(self):
+        """Đoán symbol từ tên file ảnh theo yêu cầu của người dùng."""
+
+        if not self._guess_symbol_from_results(auto=False):
+            logger.info("Người dùng yêu cầu đoán symbol nhưng không tìm được kết quả phù hợp.")
 
     def _mt5_connect(self):
         """Thực hiện kết nối đến MetaTrader 5 trong một luồng riêng."""
