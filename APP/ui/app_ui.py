@@ -252,6 +252,11 @@ class AppUI:
         self._autorun_job: Optional[str] = None
         self._mt5_reconnect_job: Optional[str] = None
         self._mt5_check_connection_job: Optional[str] = None
+        self._folder_watch_job: Optional[str] = None
+        self._folder_watch_interval_ms: int = 5000
+        self._folder_watch_enabled: bool = False
+        self._folder_snapshot: dict[str, int] = {}
+        self._watched_folder: Optional[Path] = None
 
         # Initialize Tkinter variables
         self._init_tk_variables()
@@ -342,6 +347,7 @@ class AppUI:
             self.root.after_cancel(self._autorun_job)
         if self._mt5_check_connection_job:
             self.root.after_cancel(self._mt5_check_connection_job)
+        self._disable_folder_watch()
 
         # 2. Gửi tín hiệu dừng cho các controller nền
         if self._current_session_id:
@@ -1326,6 +1332,8 @@ class AppUI:
         (Cải tiến: Chạy quét file trong luồng riêng để tránh treo UI)
         """
         logger.debug(f"Bắt đầu quá trình tải file từ thư mục: {folder}.")
+        self._watched_folder = Path(folder)
+        self._disable_folder_watch()
         self.results.clear()
         self.combined_report_text = ""
         if self.tree:
@@ -1352,6 +1360,7 @@ class AppUI:
         """
         logger.debug(f"Luồng quét thư mục bắt đầu cho: {folder}.")
         count = 0
+        snapshot: dict[str, int] = {}
         try:
             image_paths = [
                 p for p in sorted(Path(folder).rglob("*"))
@@ -1362,6 +1371,10 @@ class AppUI:
                 result_item = {"path": p, "name": p.name, "status": "Chưa xử lý", "text": ""}
                 self.results.append(result_item)
                 idx = len(self.results)
+                try:
+                    snapshot[str(p.resolve())] = p.stat().st_mtime_ns
+                except OSError:
+                    logger.debug("Bỏ qua khi tạo snapshot cho file không đọc được: %s", p)
 
                 def update_tree(item_idx=idx, item_name=p.name):
                     if self.tree:
@@ -1378,10 +1391,157 @@ class AppUI:
             # báo cáo và context dựa trên symbol hiện tại trong UI.
             ui_builder.enqueue(self, self.history_manager.refresh_all_lists)
             ui_builder.enqueue(self, lambda: self._guess_symbol_from_results(auto=True))
+            ui_builder.enqueue(
+                self,
+                lambda snap=snapshot.copy(): self._on_folder_scan_completed(folder, snap),
+            )
 
         except Exception:
             logger.exception(f"Lỗi trong luồng quét thư mục {folder}.")
             ui_builder.enqueue(self, lambda: self.ui_status("Lỗi khi đọc thư mục."))
+            ui_builder.enqueue(self, lambda: self._on_folder_scan_failed(folder))
+
+    def _on_folder_scan_completed(self, folder: str, snapshot: dict[str, int]) -> None:
+        """Hoàn tất quét thư mục: lưu snapshot và bật theo dõi tự động."""
+
+        self._folder_snapshot = snapshot
+        try:
+            self._watched_folder = Path(folder)
+        except Exception:
+            logger.debug("Không thể thiết lập Path cho thư mục đã quét: %s", folder)
+            self._watched_folder = None
+        self._enable_folder_watch()
+
+    def _on_folder_scan_failed(self, folder: str) -> None:
+        """Khôi phục theo dõi thư mục sau khi quét thất bại."""
+
+        logger.debug("Khôi phục theo dõi thư mục sau lỗi quét: %s", folder)
+        self._enable_folder_watch()
+
+    def _enable_folder_watch(self) -> None:
+        """Bật cơ chế theo dõi thư mục và lên lịch tick đầu tiên."""
+
+        if self.is_shutting_down:
+            return
+        self._folder_watch_enabled = True
+        self._schedule_folder_watch_tick()
+
+    def _disable_folder_watch(self) -> None:
+        """Tắt cơ chế theo dõi thư mục và huỷ lịch hiện tại (nếu có)."""
+
+        setattr(self, "_folder_watch_enabled", False)
+        job = getattr(self, "_folder_watch_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                logger.debug("Không thể huỷ lịch theo dõi thư mục (cửa sổ đã đóng?).")
+        self._folder_watch_job = None
+
+    def _schedule_folder_watch_tick(self) -> None:
+        """Lên lịch tick theo dõi tiếp theo nếu điều kiện phù hợp."""
+
+        if not self._folder_watch_enabled or self.is_shutting_down:
+            return
+        if self._folder_watch_job is not None:
+            try:
+                self.root.after_cancel(self._folder_watch_job)
+            except tk.TclError:
+                logger.debug("Không thể huỷ lịch theo dõi thư mục trước đó.")
+        self._folder_watch_job = self.root.after(self._folder_watch_interval_ms, self._folder_watch_tick)
+
+    def _folder_watch_tick(self) -> None:
+        """Tick theo dõi: quét nhẹ thư mục để phát hiện thay đổi."""
+
+        self._folder_watch_job = None
+        if not self._folder_watch_enabled or self.is_shutting_down:
+            return
+        if not (self._watched_folder and self._watched_folder.exists()):
+            logger.debug("Thư mục đang theo dõi không tồn tại, sẽ thử lại sau: %s", self._watched_folder)
+            self._schedule_folder_watch_tick()
+            return
+
+        last_snapshot = dict(self._folder_snapshot)
+
+        self.io_controller.run(
+            worker=self._folder_watch_worker,
+            args=(str(self._watched_folder), last_snapshot),
+            group="ui.io.folder_watch",
+            name="ui.io.folder_watch.scan",
+            metadata={"component": "ui", "operation": "folder_watch"},
+            cancel_previous=True,
+        )
+
+    def _folder_watch_worker(self, folder: str, last_snapshot: dict[str, int]):
+        """Worker nền xây dựng snapshot hiện tại của thư mục ảnh."""
+
+        folder_path = Path(folder)
+        try:
+            current_snapshot = self._build_folder_snapshot(folder_path)
+        except Exception:
+            logger.exception("Lỗi khi xây dựng snapshot thư mục: %s", folder)
+            current_snapshot = None
+
+        ui_builder.enqueue(
+            self,
+            lambda snap=current_snapshot, prev=last_snapshot, fld=folder_path: self._handle_folder_watch_result(
+                fld, prev, snap
+            ),
+        )
+
+    def _handle_folder_watch_result(
+        self,
+        folder: Path,
+        last_snapshot: dict[str, int],
+        new_snapshot: dict[str, int] | None,
+    ) -> None:
+        """Xử lý kết quả quét thư mục và quyết định hành động tiếp theo."""
+
+        if not self._folder_watch_enabled or self.is_shutting_down:
+            return
+
+        if new_snapshot is None:
+            self._schedule_folder_watch_tick()
+            return
+
+        if last_snapshot != self._folder_snapshot:
+            logger.debug("Bỏ qua kết quả watcher vì snapshot đã thay đổi trong lúc quét.")
+            self._schedule_folder_watch_tick()
+            return
+
+        if self._snapshot_has_changes(last_snapshot, new_snapshot):
+            logger.info("Phát hiện thư mục ảnh thay đổi, thực hiện quét lại và đoán symbol.")
+            self._folder_snapshot = new_snapshot
+            self._disable_folder_watch()
+            self._load_files(str(folder))
+            return
+
+        self._folder_snapshot = new_snapshot
+        self._schedule_folder_watch_tick()
+
+    def _build_folder_snapshot(self, folder: Path) -> dict[str, int]:
+        """Tạo snapshot đơn giản cho các file ảnh trong thư mục."""
+
+        snapshot: dict[str, int] = {}
+        for path in folder.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in FILES.SUPPORTED_EXTS:
+                continue
+            try:
+                snapshot[str(path.resolve())] = path.stat().st_mtime_ns
+            except OSError:
+                logger.debug("Không thể đọc metadata cho file: %s", path)
+        return snapshot
+
+    @staticmethod
+    def _snapshot_has_changes(old: dict[str, int], new: dict[str, int]) -> bool:
+        """So sánh hai snapshot và trả về True nếu có thay đổi đáng kể."""
+
+        if old.keys() != new.keys():
+            return True
+        for key, old_ts in old.items():
+            if new.get(key) != old_ts:
+                return True
+        return False
 
     def clear_results(self):
         """Xóa tất cả các kết quả phân tích hiện có."""
