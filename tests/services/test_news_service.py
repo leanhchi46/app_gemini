@@ -4,16 +4,19 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
+from datetime import datetime
 from pathlib import Path
 
 import sys
+from time import monotonic
+
+import pytest
+import pytz
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-import pytest
-
 from APP.configs.app_config import NewsConfig
-from APP.services.news_service import NewsService
+from APP.services.news_service import NewsService, ProviderHealthState
 from APP.utils.threading_utils import CancelToken, TaskRecord
 
 
@@ -62,7 +65,17 @@ def _make_service() -> NewsService:
     class _StubFMP:
         def get_economic_calendar(self, days: int = 7):  # noqa: D401
             return [
-                {"date": "01/01/2024", "time": "10:00", "event": "CPI", "zone": "US", "importance": "high"}
+                {
+                    "date": "01/01/2024",
+                    "time": "10:00",
+                    "event": "CPI",
+                    "zone": "US",
+                    "importance": "high",
+                    "actual": "3.1",
+                    "forecast": "2.9",
+                    "previous": "2.7",
+                    "unit": "%",
+                }
             ]
 
     service.fmp_service = _StubFMP()
@@ -109,3 +122,49 @@ def test_refresh_uses_cache_when_within_ttl(dummy_tm: DummyThreadingManager) -> 
 
     assert cached_payload["source"] == "cache"
     assert dummy_tm.submitted == []
+
+
+def test_transform_enriches_surprise_metrics() -> None:
+    service = NewsService()
+    events = service._transform_fmp_data(
+        [
+            {
+                "date": "01/01/2024",
+                "time": "10:00",
+                "event": "GDP",
+                "zone": "US",
+                "importance": "medium",
+                "actual": "5.0",
+                "forecast": "4.0",
+                "previous": "3.0",
+                "unit": "%",
+            }
+        ]
+    )
+    assert events[0]["actual"] == pytest.approx(5.0)
+    assert events[0]["forecast"] == pytest.approx(4.0)
+    assert events[0]["surprise_score"] == pytest.approx(0.25)
+
+
+def test_filter_keeps_high_surprise_event() -> None:
+    service = NewsService()
+    service._surprise_threshold = 0.4
+    event_time = datetime.now(pytz.utc)
+    events = [
+        {
+            "impact": "low",
+            "title": "Housing Data",
+            "surprise_score": 0.6,
+            "when_utc": event_time,
+        }
+    ]
+    filtered = service._filter_high_impact(events)
+    assert filtered and filtered[0]["surprise_score"] == 0.6
+
+
+def test_provider_backoff_skips_after_failures() -> None:
+    service = NewsService()
+    service._provider_error_threshold = 1
+    state = ProviderHealthState(failures=1, last_failure=monotonic())
+    service._provider_health["fmp"] = state
+    assert service._should_skip_provider("fmp", monotonic()) is True

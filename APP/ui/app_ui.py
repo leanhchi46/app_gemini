@@ -9,6 +9,7 @@ cho các thành phần khác như services, workers, và persistence handlers.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -18,6 +19,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
+from tkinter.scrolledtext import ScrolledText
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
@@ -34,7 +36,7 @@ from APP.configs.app_config import (ApiConfig, AutoTradeConfig, ChartConfig,
                                     TelegramConfig, UploadConfig)
 from APP.configs.constants import FILES, MODELS, PATHS
 from APP.services import gemini_service, mt5_service
-from APP.services.news_service import NewsService
+from APP.services.news_service import DEFAULT_HIGH_IMPACT_KEYWORDS, NewsService
 from APP.ui.components.chart_tab import ChartTab
 from APP.ui.components.history_manager import HistoryManager
 from APP.ui.components.news_tab import NewsTab
@@ -168,6 +170,12 @@ class AppUI:
         self.trade_news_block_after_min_var: tk.IntVar
         self.news_cache_ttl_var: tk.IntVar
         self.news_provider_var: tk.StringVar
+        self.news_priority_keywords_var: tk.StringVar
+        self.news_surprise_threshold_var: tk.DoubleVar
+        self.news_provider_error_threshold_var: tk.IntVar
+        self.news_provider_backoff_var: tk.IntVar
+        self.news_currency_aliases_var: tk.StringVar
+        self.news_symbol_overrides_var: tk.StringVar
         self.persistence_max_md_reports_var: tk.IntVar
         self.prompt_file_path_var: tk.StringVar
         self.auto_load_prompt_txt_var: tk.BooleanVar
@@ -228,6 +236,12 @@ class AppUI:
         self.news_after_spin: Optional[ttk.Spinbox] = None
         self.news_cache_spin: Optional[ttk.Spinbox] = None
         self.news_provider_combo: Optional[ttk.Combobox] = None
+        self.news_keywords_entry: Optional[ttk.Entry] = None
+        self.news_surprise_spin: Optional[ttk.Spinbox] = None
+        self.news_error_threshold_spin: Optional[ttk.Spinbox] = None
+        self.news_backoff_spin: Optional[ttk.Spinbox] = None
+        self.news_currency_aliases_text: Optional[ScrolledText] = None  # type: ignore[name-defined]
+        self.news_symbol_overrides_text: Optional[ScrolledText] = None  # type: ignore[name-defined]
 
 
         # State Variables
@@ -553,6 +567,14 @@ class AppUI:
         self.trade_news_block_after_min_var = tk.IntVar(value=15)
         self.news_cache_ttl_var = tk.IntVar(value=300)
         self.news_provider_var = tk.StringVar(value="FMP")
+        self.news_priority_keywords_var = tk.StringVar(
+            value=", ".join(sorted(DEFAULT_HIGH_IMPACT_KEYWORDS))
+        )
+        self.news_surprise_threshold_var = tk.DoubleVar(value=0.5)
+        self.news_provider_error_threshold_var = tk.IntVar(value=2)
+        self.news_provider_backoff_var = tk.IntVar(value=300)
+        self.news_currency_aliases_var = tk.StringVar(value="")
+        self.news_symbol_overrides_var = tk.StringVar(value="")
 
         # Persistence
         self.persistence_max_md_reports_var = tk.IntVar(value=10)
@@ -587,6 +609,61 @@ class AppUI:
             pair["start"].set(start_val)
             pair["end"].set(end_val)
 
+    def _get_text_widget_content(
+        self, widget: ScrolledText | None, fallback_var: tk.StringVar
+    ) -> str:
+        if widget is None:
+            return fallback_var.get().strip()
+        return widget.get("1.0", tk.END).strip()
+
+    def _set_text_widget_content(self, widget: ScrolledText | None, content: str) -> None:
+        if widget is None:
+            return
+        widget.config(state=tk.NORMAL)
+        widget.delete("1.0", tk.END)
+        if content:
+            widget.insert("1.0", content)
+        widget.config(state=tk.NORMAL)
+
+    def _parse_priority_keywords(self, raw: str) -> list[str]:
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                keywords = [str(item).strip() for item in parsed if str(item).strip()]
+                return keywords
+        except json.JSONDecodeError:
+            pass
+        return [kw.strip() for kw in text.split(",") if kw.strip()]
+
+    def _parse_mapping_string(
+        self, raw: str
+    ) -> dict[str, list[str]] | None:
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.warning("Không thể parse JSON mapping tin tức: %s", exc)
+            return None
+        if not isinstance(parsed, dict):
+            logger.warning("JSON mapping tin tức phải là đối tượng dict, nhận %s", type(parsed))
+            return None
+        normalized: dict[str, list[str]] = {}
+        for key, value in parsed.items():
+            if not key:
+                continue
+            if isinstance(value, (list, tuple, set)):
+                cleaned = [str(item).strip() for item in value if str(item).strip()]
+            else:
+                cleaned = [str(value).strip()] if str(value).strip() else []
+            if cleaned:
+                normalized[key.strip().upper()] = cleaned
+        return normalized or None
+
     def _collect_config_data(self) -> dict:
         """
         Thu thập tất cả các giá trị cấu hình từ các biến Tkinter và trả về một dictionary.
@@ -594,6 +671,17 @@ class AppUI:
         logger.debug("Bắt đầu thu thập dữ liệu cấu hình từ UI.")
         summer_schedule = self._gather_killzone_schedule(self.killzone_summer_vars)
         winter_schedule = self._gather_killzone_schedule(self.killzone_winter_vars)
+        currency_aliases_raw = self._get_text_widget_content(
+            self.news_currency_aliases_text, self.news_currency_aliases_var
+        )
+        symbol_overrides_raw = self._get_text_widget_content(
+            self.news_symbol_overrides_text, self.news_symbol_overrides_var
+        )
+        self.news_currency_aliases_var.set(currency_aliases_raw)
+        self.news_symbol_overrides_var.set(symbol_overrides_raw)
+        keywords_list = self._parse_priority_keywords(self.news_priority_keywords_var.get())
+        currency_aliases = self._parse_mapping_string(currency_aliases_raw)
+        symbol_overrides = self._parse_mapping_string(symbol_overrides_raw)
         no_run_config: dict[str, Any] = {
             "weekend_enabled": self.no_run_weekend_enabled_var.get(),
             "killzone_enabled": self.norun_killzone_var.get(),
@@ -694,6 +782,12 @@ class AppUI:
                 "block_before_min": self.trade_news_block_before_min_var.get(),
                 "block_after_min": self.trade_news_block_after_min_var.get(),
                 "cache_ttl_sec": self.news_cache_ttl_var.get(),
+                "priority_keywords": keywords_list,
+                "surprise_score_threshold": self.news_surprise_threshold_var.get(),
+                "provider_error_threshold": self.news_provider_error_threshold_var.get(),
+                "provider_error_backoff_sec": self.news_provider_backoff_var.get(),
+                "currency_country_overrides": currency_aliases,
+                "symbol_country_overrides": symbol_overrides,
             },
             "persistence": {
                 "max_md_reports": self.persistence_max_md_reports_var.get(),
@@ -836,6 +930,40 @@ class AppUI:
         self.trade_news_block_before_min_var.set(get_nested(news_cfg, ["block_before_min"], 15))
         self.trade_news_block_after_min_var.set(get_nested(news_cfg, ["block_after_min"], 15))
         self.news_cache_ttl_var.set(get_nested(news_cfg, ["cache_ttl_sec"], 300))
+        keywords_cfg = get_nested(news_cfg, ["priority_keywords"], None)
+        if isinstance(keywords_cfg, list):
+            keywords_text = ", ".join(str(item) for item in keywords_cfg if str(item).strip())
+        elif isinstance(keywords_cfg, str):
+            keywords_text = keywords_cfg
+        else:
+            keywords_text = ""
+        if not keywords_text.strip():
+            keywords_text = ", ".join(sorted(DEFAULT_HIGH_IMPACT_KEYWORDS))
+        self.news_priority_keywords_var.set(keywords_text)
+        self.news_surprise_threshold_var.set(
+            get_nested(news_cfg, ["surprise_score_threshold"], 0.5)
+        )
+        self.news_provider_error_threshold_var.set(
+            get_nested(news_cfg, ["provider_error_threshold"], 2)
+        )
+        self.news_provider_backoff_var.set(
+            get_nested(news_cfg, ["provider_error_backoff_sec"], 300)
+        )
+        currency_aliases_cfg = get_nested(news_cfg, ["currency_country_overrides"], None)
+        if isinstance(currency_aliases_cfg, dict) and currency_aliases_cfg:
+            currency_aliases_text = json.dumps(currency_aliases_cfg, ensure_ascii=False, indent=2)
+        else:
+            currency_aliases_text = ""
+        self.news_currency_aliases_var.set(currency_aliases_text)
+        self._set_text_widget_content(self.news_currency_aliases_text, currency_aliases_text)
+
+        symbol_overrides_cfg = get_nested(news_cfg, ["symbol_country_overrides"], None)
+        if isinstance(symbol_overrides_cfg, dict) and symbol_overrides_cfg:
+            symbol_overrides_text = json.dumps(symbol_overrides_cfg, ensure_ascii=False, indent=2)
+        else:
+            symbol_overrides_text = ""
+        self.news_symbol_overrides_var.set(symbol_overrides_text)
+        self._set_text_widget_content(self.news_symbol_overrides_text, symbol_overrides_text)
 
         persistence_cfg = config_data.get("persistence", {})
         self.persistence_max_md_reports_var.set(get_nested(persistence_cfg, ["max_md_reports"], 10))
@@ -885,6 +1013,15 @@ class AppUI:
         logger.debug("Bắt đầu chụp ảnh nhanh cấu hình từ UI.")
         summer_schedule = self._gather_killzone_schedule(self.killzone_summer_vars)
         winter_schedule = self._gather_killzone_schedule(self.killzone_winter_vars)
+        currency_aliases_raw = self._get_text_widget_content(
+            self.news_currency_aliases_text, self.news_currency_aliases_var
+        )
+        symbol_overrides_raw = self._get_text_widget_content(
+            self.news_symbol_overrides_text, self.news_symbol_overrides_var
+        )
+        keywords_list = self._parse_priority_keywords(self.news_priority_keywords_var.get())
+        currency_aliases = self._parse_mapping_string(currency_aliases_raw)
+        symbol_overrides = self._parse_mapping_string(symbol_overrides_raw)
         return RunConfig(
             folder=FolderConfig(
                 folder=self.folder_path.get(),
@@ -980,6 +1117,12 @@ class AppUI:
                 block_before_min=self.trade_news_block_before_min_var.get(),
                 block_after_min=self.trade_news_block_after_min_var.get(),
                 cache_ttl_sec=self.news_cache_ttl_var.get(),
+                priority_keywords=tuple(keywords_list) if keywords_list else None,
+                surprise_score_threshold=self.news_surprise_threshold_var.get(),
+                provider_error_threshold=self.news_provider_error_threshold_var.get(),
+                provider_error_backoff_sec=self.news_provider_backoff_var.get(),
+                currency_country_overrides=currency_aliases,
+                symbol_country_overrides=symbol_overrides,
             ),
             persistence=PersistenceConfig(
                 max_md_reports=self.persistence_max_md_reports_var.get()
@@ -1456,6 +1599,12 @@ class AppUI:
             self.news_after_spin,
             self.news_cache_spin,
             self.news_provider_combo,
+            self.news_keywords_entry,
+            self.news_surprise_spin,
+            self.news_error_threshold_spin,
+            self.news_backoff_spin,
+            self.news_currency_aliases_text,
+            self.news_symbol_overrides_text,
         ]
 
         for widget in widgets_to_toggle:

@@ -40,13 +40,13 @@ class NewsTab:
         self.frame.rowconfigure(0, weight=1) # Cập nhật row để treeview chiếm toàn bộ không gian
 
         # Treeview để hiển thị danh sách tin tức
-        cols = ("time", "country", "event", "impact")
+        cols = ("time", "country", "event", "impact", "actual", "forecast", "previous", "surprise")
         self.tree = ttk.Treeview(self.frame, columns=cols, show="headings")
-        
+
         # Định dạng các cột
         self.tree.heading("time", text="Thời gian (Local)")
         self.tree.column("time", width=150, anchor="w")
-        
+
         self.tree.heading("country", text="Quốc gia")
         self.tree.column("country", width=100, anchor="w")
 
@@ -55,6 +55,18 @@ class NewsTab:
 
         self.tree.heading("impact", text="Tầm ảnh hưởng")
         self.tree.column("impact", width=100, anchor="center")
+
+        self.tree.heading("actual", text="Actual")
+        self.tree.column("actual", width=100, anchor="e")
+
+        self.tree.heading("forecast", text="Forecast")
+        self.tree.column("forecast", width=100, anchor="e")
+
+        self.tree.heading("previous", text="Previous")
+        self.tree.column("previous", width=100, anchor="e")
+
+        self.tree.heading("surprise", text="Surprise")
+        self.tree.column("surprise", width=90, anchor="center")
 
         self.tree.grid(row=0, column=0, sticky="nsew")
 
@@ -87,7 +99,7 @@ class NewsTab:
                 "2. Đã bật FMP hoặc TE và nhập API key trong Options -> API Keys.\n"
                 "3. Có thể không có tin tức quan trọng nào trong 7 ngày tới."
             )
-            self.tree.insert("", "end", values=("", "", guidance_message, ""))
+            self.tree.insert("", "end", values=("", "", guidance_message, "", "", "", "", ""))
             return
 
         # Thêm các mục mới
@@ -100,6 +112,7 @@ class NewsTab:
             else:
                 tag = "low"
 
+            unit = event.get("unit")
             self.tree.insert(
                 "",
                 "end",
@@ -108,6 +121,42 @@ class NewsTab:
                     event.get("country", "N/A"),
                     event.get("title", "N/A"),
                     impact_str.capitalize(),
+                    self._format_numeric(event.get("actual"), unit),
+                    self._format_numeric(event.get("forecast"), unit),
+                    self._format_numeric(event.get("previous"), unit),
+                    self._format_surprise(event.get("surprise_score"), event.get("surprise_direction")),
                 ),
                 tags=(tag,),
             )
+
+    def _format_numeric(self, value: Any, unit: Any) -> str:
+        if value is None:
+            return "—"
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+
+        suffix = ""
+        unit_text = str(unit).strip() if unit else ""
+        if unit_text:
+            if unit_text == "%":
+                suffix = "%"
+            else:
+                suffix = f" {unit_text}"
+        return f"{numeric_value:.2f}{suffix}"
+
+    def _format_surprise(self, score: Any, direction: Any) -> str:
+        if score is None:
+            return "—"
+        try:
+            numeric_score = float(score)
+        except (TypeError, ValueError):
+            return str(score)
+        direction_text = str(direction or "").strip()
+        arrow = ""
+        if direction_text == "positive":
+            arrow = "↑"
+        elif direction_text == "negative":
+            arrow = "↓"
+        return f"{numeric_score:+.2f}{arrow}"

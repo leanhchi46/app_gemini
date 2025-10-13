@@ -3,10 +3,11 @@ from __future__ import annotations
 import logging
 import re
 from concurrent.futures import CancelledError, TimeoutError
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from threading import Lock
 from time import monotonic
-from typing import Any, Callable, Final, List, Optional
+from typing import Any, Callable, Final, Iterable, List, Optional
 
 import pytz
 
@@ -17,8 +18,8 @@ from APP.utils.threading_utils import CancelToken, ThreadingManager
 
 logger = logging.getLogger(__name__)
 
-# Ánh xạ tiền tệ và quốc gia/khu vực
-CURRENCY_COUNTRY_MAP: Final[dict[str, set[str]]] = {
+# Ánh xạ tiền tệ và quốc gia/khu vực mặc định
+DEFAULT_CURRENCY_COUNTRY_MAP: Final[dict[str, set[str]]] = {
     "USD": {"United States", "US", "U.S.", "united states"},
     "EUR": {"Euro Area", "Eurozone", "Germany", "France", "Italy", "Spain", "EU"},
     "GBP": {"United Kingdom", "UK", "U.K."},
@@ -31,12 +32,20 @@ CURRENCY_COUNTRY_MAP: Final[dict[str, set[str]]] = {
 }
 
 # Các sự kiện kinh tế quan trọng (từ khóa tìm kiếm trong tiêu đề)
-HIGH_IMPACT_KEYWORDS: Final[set[str]] = {
+DEFAULT_HIGH_IMPACT_KEYWORDS: Final[set[str]] = {
     "interest rate", "cpi", "consumer price index", "nfp", "non-farm payroll",
     "pmi", "purchasing managers", "retail sales", "gdp", "gross domestic product",
     "unemployment rate", "inflation rate", "trade balance", "industrial production",
     "business confidence", "consumer confidence", "ism", "ifo", "zew"
 }
+
+
+@dataclass
+class ProviderHealthState:
+    """Theo dõi số lần lỗi liên tiếp và thời điểm lỗi gần nhất của provider."""
+
+    failures: int = 0
+    last_failure: float = 0.0
 
 
 class NewsService:
@@ -57,6 +66,17 @@ class NewsService:
         self._cache: list[dict[str, Any]] = []
         self._cache_time: Optional[datetime] = None
         self._dedup_ids: set[str] = set()
+
+        self._priority_keywords: set[str] = {kw.lower() for kw in DEFAULT_HIGH_IMPACT_KEYWORDS}
+        self._surprise_threshold: float = 0.5
+        self._provider_health: dict[str, ProviderHealthState] = {}
+        self._provider_error_threshold: int = 2
+        self._provider_backoff_sec: int = 300
+        self._currency_country_map: dict[str, set[str]] = {
+            currency: {self._normalize_country_name(alias) for alias in aliases}
+            for currency, aliases in DEFAULT_CURRENCY_COUNTRY_MAP.items()
+        }
+        self._symbol_country_overrides: dict[str, set[str]] = {}
         
         # Threading attributes
         self._lock = Lock()
@@ -71,6 +91,25 @@ class NewsService:
             self.fmp_config = config.fmp
             self.te_config = config.te
             self.timezone_str = config.no_run.timezone
+
+            self._priority_keywords = self._build_priority_keywords(
+                config.news.priority_keywords if config.news else None
+            )
+            self._surprise_threshold = (
+                config.news.surprise_score_threshold if config.news else 0.5
+            )
+            self._provider_error_threshold = (
+                config.news.provider_error_threshold if config.news else 2
+            )
+            self._provider_backoff_sec = (
+                config.news.provider_error_backoff_sec if config.news else 300
+            )
+            self._currency_country_map = self._build_currency_country_map(
+                config.news.currency_country_overrides if config.news else None
+            )
+            self._symbol_country_overrides = self._build_symbol_overrides(
+                config.news.symbol_country_overrides if config.news else None
+            )
             
             # Khởi tạo lại các service con nếu cần
             self.fmp_service = None
@@ -167,9 +206,11 @@ class NewsService:
                 continue
 
             event_country = event.get("country")
-            if not event_country or event_country not in allowed_countries:
-                continue
-            
+            if allowed_countries:
+                normalized_country = self._normalize_country_name(event_country)
+                if not normalized_country or normalized_country not in allowed_countries:
+                    continue
+
             # Tạo một bản sao của event để thêm các trường tính toán
             processed_event = event.copy()
             processed_event["when_local"] = event_time_utc.astimezone(ho_chi_minh_tz)
@@ -304,7 +345,11 @@ class NewsService:
         provider_records: list[tuple[str, Callable[[list[dict]], list[dict]], Any]] = []
         self._dedup_ids.clear()
 
+        now_monotonic = monotonic()
         for provider_name, fetch_fn, transform_fn in tasks:
+            if self._should_skip_provider(provider_name, now_monotonic):
+                logger.info("Bỏ qua provider %s do đang trong thời gian backoff.", provider_name)
+                continue
 
             def provider_worker(cancel_token: CancelToken, fn=fetch_fn) -> list[dict]:
                 cancel_token.raise_if_cancelled()
@@ -325,14 +370,17 @@ class NewsService:
             try:
                 raw_data = record.future.result(timeout=timeout_sec)
                 cancel_token.raise_if_cancelled()
+                self._record_provider_success(provider_name)
                 if raw_data:
                     aggregated.extend(transform_fn(raw_data))
             except CancelledError:
                 logger.info("Provider %s bị hủy do cancel token.", provider_name)
             except TimeoutError:
                 logger.warning("Provider %s vượt quá timeout %ss.", provider_name, timeout_sec)
+                self._record_provider_failure(provider_name)
             except Exception as exc:
                 logger.warning("Provider %s gặp lỗi: %s", provider_name, exc)
+                self._record_provider_failure(provider_name)
 
         return aggregated
 
@@ -355,11 +403,22 @@ class NewsService:
                 dt_naive = datetime.strptime(datetime_str, "%d/%m/%Y %H:%M")
                 dt_utc = pytz.utc.localize(dt_naive)
 
-                transformed.append({
-                    "id": event_id, "when_utc": dt_utc, "title": event_title,
-                    "country": event.get("zone"), "impact": event.get("importance"),
-                    "source": "investpy"
-                })
+                transformed.append(
+                    self._enrich_event_metrics(
+                        {
+                            "id": event_id,
+                            "when_utc": dt_utc,
+                            "title": event_title,
+                            "country": event.get("zone"),
+                            "impact": event.get("importance"),
+                            "source": "investpy",
+                            "actual": event.get("actual"),
+                            "forecast": event.get("forecast"),
+                            "previous": event.get("previous"),
+                            "unit": event.get("unit") or event.get("unit_text"),
+                        }
+                    )
+                )
                 self._dedup_ids.add(event_id)
             except (ValueError, KeyError, TypeError) as e:
                 logger.warning(f"Bỏ qua sự kiện investpy không hợp lệ: {event}. Lỗi: {e}")
@@ -374,10 +433,22 @@ class NewsService:
                 if not event.get('CalendarId') or event_id in self._dedup_ids: continue
 
                 dt_utc = datetime.strptime(str(event["Date"]), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=pytz.utc)
-                transformed.append({
-                    "id": event_id, "when_utc": dt_utc, "title": event.get("Event"),
-                    "country": event.get("Country"), "impact": event.get("Importance"), "source": "TE"
-                })
+                transformed.append(
+                    self._enrich_event_metrics(
+                        {
+                            "id": event_id,
+                            "when_utc": dt_utc,
+                            "title": event.get("Event"),
+                            "country": event.get("Country"),
+                            "impact": event.get("Importance"),
+                            "source": "TE",
+                            "actual": event.get("Actual"),
+                            "forecast": event.get("Forecast"),
+                            "previous": event.get("Previous"),
+                            "unit": event.get("Unit"),
+                        }
+                    )
+                )
                 self._dedup_ids.add(event_id)
             except (ValueError, KeyError, TypeError) as e:
                 logger.warning(f"Bỏ qua sự kiện TE không hợp lệ: {event}. Lỗi: {e}")
@@ -390,9 +461,22 @@ class NewsService:
             impact = str(event.get("impact", "")).lower()
             title = str(event.get("title", "")).lower()
             is_high = impact in {"high", "3"}
-            is_priority = any(keyword in title for keyword in HIGH_IMPACT_KEYWORDS)
-            if is_high or is_priority:
+            is_priority = any(keyword in title for keyword in self._priority_keywords)
+            surprise = event.get("surprise_score")
+            surprise_triggered = (
+                self._surprise_threshold > 0
+                and surprise is not None
+                and abs(surprise) >= self._surprise_threshold
+            )
+            if is_high or is_priority or surprise_triggered:
                 high_impact_events.append(event)
+
+        high_impact_events.sort(
+            key=lambda e: (
+                e.get("when_utc") or datetime.max.replace(tzinfo=pytz.utc),
+                -(abs(e.get("surprise_score")) if e.get("surprise_score") is not None else 0.0),
+            )
+        )
         return high_impact_events
 
     def _symbol_to_currencies(self, sym: str) -> set[str]:
@@ -405,10 +489,14 @@ class NewsService:
 
     def _get_countries_for_symbol(self, symbol: str) -> set[str]:
         """Lấy danh sách các quốc gia/khu vực liên quan đến một symbol."""
+        symbol_key = (symbol or "").upper()
+        if symbol_key in self._symbol_country_overrides:
+            return set(self._symbol_country_overrides[symbol_key])
+
         currencies = self._symbol_to_currencies(symbol)
         countries = set()
         for curr in currencies:
-            countries.update(CURRENCY_COUNTRY_MAP.get(curr, set()))
+            countries.update(self._currency_country_map.get(curr, set()))
         return countries
 
     def _format_timedelta(self, td: timedelta) -> str:
@@ -419,3 +507,134 @@ class NewsService:
         if hours > 0:
             return f"{hours}h {minutes}m"
         return f"{minutes}m"
+
+    def _build_priority_keywords(self, keywords: Iterable[str] | None) -> set[str]:
+        raw_keywords = keywords or DEFAULT_HIGH_IMPACT_KEYWORDS
+        normalized = {
+            str(keyword).strip().lower()
+            for keyword in raw_keywords
+            if str(keyword).strip()
+        }
+        return normalized or {kw.lower() for kw in DEFAULT_HIGH_IMPACT_KEYWORDS}
+
+    def _build_currency_country_map(
+        self, overrides: dict[str, list[str]] | None
+    ) -> dict[str, set[str]]:
+        base_map = {
+            currency: {self._normalize_country_name(alias) for alias in aliases}
+            for currency, aliases in DEFAULT_CURRENCY_COUNTRY_MAP.items()
+        }
+        if not overrides:
+            return base_map
+
+        for currency, alias_list in overrides.items():
+            if not currency:
+                continue
+            currency_key = currency.strip().upper()
+            base_aliases = base_map.setdefault(currency_key, set())
+            for alias in alias_list or []:
+                normalized = self._normalize_country_name(alias)
+                if normalized:
+                    base_aliases.add(normalized)
+        return base_map
+
+    def _build_symbol_overrides(
+        self, overrides: dict[str, list[str]] | None
+    ) -> dict[str, set[str]]:
+        if not overrides:
+            return {}
+        mapped: dict[str, set[str]] = {}
+        for symbol, alias_list in overrides.items():
+            if not symbol or not alias_list:
+                continue
+            symbol_key = symbol.strip().upper()
+            normalized_aliases = {
+                self._normalize_country_name(alias)
+                for alias in alias_list
+                if self._normalize_country_name(alias)
+            }
+            if normalized_aliases:
+                mapped[symbol_key] = normalized_aliases
+        return mapped
+
+    def _normalize_country_name(self, name: Any) -> str:
+        if name is None:
+            return ""
+        text = str(name).strip()
+        return text.casefold() if text else ""
+
+    def _parse_numeric(self, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text or text.lower() in {"n/a", "na", "null", "--"}:
+            return None
+        sanitized = text.replace("%", "").replace(",", "")
+        try:
+            return float(sanitized)
+        except ValueError:
+            return None
+
+    def _enrich_event_metrics(self, event: dict[str, Any]) -> dict[str, Any]:
+        actual = self._parse_numeric(event.get("actual"))
+        forecast = self._parse_numeric(event.get("forecast"))
+        previous = self._parse_numeric(event.get("previous"))
+        event["actual"] = actual
+        event["forecast"] = forecast
+        event["previous"] = previous
+
+        surprise, direction = self._calculate_surprise(actual, forecast, previous)
+        event["surprise_score"] = surprise
+        if direction:
+            event["surprise_direction"] = direction
+        return event
+
+    def _calculate_surprise(
+        self,
+        actual: Optional[float],
+        forecast: Optional[float],
+        previous: Optional[float],
+    ) -> tuple[Optional[float], Optional[str]]:
+        if actual is None:
+            return None, None
+
+        baseline = forecast if forecast is not None else previous
+        if baseline is None:
+            return None, None
+
+        denominator = abs(baseline) if abs(baseline) > 1e-9 else 1.0
+        surprise = (actual - baseline) / denominator
+        direction = "positive" if surprise > 0 else "negative" if surprise < 0 else "neutral"
+        return surprise, direction
+
+    def _record_provider_failure(self, provider: str) -> None:
+        with self._lock:
+            state = self._provider_health.setdefault(provider, ProviderHealthState())
+            state.failures += 1
+            state.last_failure = monotonic()
+
+    def _record_provider_success(self, provider: str) -> None:
+        with self._lock:
+            if provider in self._provider_health:
+                self._provider_health[provider] = ProviderHealthState()
+
+    def _should_skip_provider(self, provider: str, now_monotonic: float) -> bool:
+        with self._lock:
+            state = self._provider_health.get(provider)
+            threshold = max(0, self._provider_error_threshold)
+            if not state or state.failures < threshold:
+                return False
+
+            failures_over_threshold = max(0, state.failures - threshold)
+            backoff = self._provider_backoff_sec * max(1, 2 ** failures_over_threshold)
+            if now_monotonic - state.last_failure < backoff:
+                logger.warning(
+                    "Bỏ qua provider %s do đang backoff (failures=%s, chờ %.0fs)",
+                    provider,
+                    state.failures,
+                    backoff - (now_monotonic - state.last_failure),
+                )
+                return True
+            return False

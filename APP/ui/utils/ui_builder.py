@@ -606,6 +606,71 @@ def _build_opts_conditions(app: "AppUI", parent: ttk.Notebook) -> None:
     cache_spin.grid(row=5, column=1, sticky="w", padx=(6, 0), pady=2)
     app.news_cache_spin = cache_spin
 
+    ttk.Label(
+        card3,
+        text="Từ khóa ưu tiên (cách nhau bởi dấu phẩy hoặc JSON list):",
+    ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 2))
+    keywords_entry = ttk.Entry(card3, textvariable=app.news_priority_keywords_var, width=60)
+    keywords_entry.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+    app.news_keywords_entry = keywords_entry
+
+    ttk.Label(card3, text="Ngưỡng surprise score:").grid(row=8, column=0, sticky="w", pady=2)
+    surprise_spin = ttk.Spinbox(
+        card3,
+        from_=0.0,
+        to=10.0,
+        increment=0.1,
+        textvariable=app.news_surprise_threshold_var,
+        width=8,
+    )
+    surprise_spin.grid(row=8, column=1, sticky="w", padx=(6, 0), pady=2)
+    app.news_surprise_spin = surprise_spin
+
+    ttk.Label(card3, text="Số lỗi liên tiếp trước khi backoff:").grid(row=9, column=0, sticky="w", pady=2)
+    error_spin = ttk.Spinbox(
+        card3,
+        from_=0,
+        to=10,
+        increment=1,
+        textvariable=app.news_provider_error_threshold_var,
+        width=8,
+    )
+    error_spin.grid(row=9, column=1, sticky="w", padx=(6, 0), pady=2)
+    app.news_error_threshold_spin = error_spin
+
+    ttk.Label(card3, text="Thời gian backoff cơ bản (giây):").grid(row=10, column=0, sticky="w", pady=2)
+    backoff_spin = ttk.Spinbox(
+        card3,
+        from_=30,
+        to=3600,
+        increment=30,
+        textvariable=app.news_provider_backoff_var,
+        width=8,
+    )
+    backoff_spin.grid(row=10, column=1, sticky="w", padx=(6, 0), pady=2)
+    app.news_backoff_spin = backoff_spin
+
+    ttk.Label(
+        card3,
+        text="Alias quốc gia theo currency (JSON, ví dụ: {\"JPY\": [\"Japan\", \"JP\"]}):",
+    ).grid(row=11, column=0, columnspan=2, sticky="w", pady=(6, 2))
+    currency_text = ScrolledText(card3, height=4)
+    currency_text.grid(row=12, column=0, columnspan=2, sticky="nsew")
+    currency_text.insert("1.0", app.news_currency_aliases_var.get())
+    app.news_currency_aliases_text = currency_text
+
+    ttk.Label(
+        card3,
+        text="Override symbol → quốc gia (JSON, ví dụ: {\"GBPJPY\": [\"United Kingdom\", \"Japan\"]}):",
+    ).grid(row=13, column=0, columnspan=2, sticky="w", pady=(6, 2))
+    symbol_text = ScrolledText(card3, height=4)
+    symbol_text.grid(row=14, column=0, columnspan=2, sticky="nsew")
+    symbol_text.insert("1.0", app.news_symbol_overrides_var.get())
+    app.news_symbol_overrides_text = symbol_text
+
+    for row_index in range(6, 15):
+        card3.rowconfigure(row_index, weight=1 if row_index in (12, 14) else 0)
+
     # --- CỘT PHẢI ---
     # --- NO TRADE ---
     card2 = ttk.LabelFrame(right_col, text="Điều kiện không vào lệnh (No-Trade)", padding=8)

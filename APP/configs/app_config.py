@@ -127,11 +127,18 @@ class TEConfig:
 @dataclass(frozen=True)
 class NewsConfig:
     """Cấu hình liên quan đến tin tức."""
+
     block_enabled: bool
     block_before_min: int
     block_after_min: int
     cache_ttl_sec: int
     provider_timeout_sec: int = 20
+    priority_keywords: tuple[str, ...] | None = None
+    provider_error_threshold: int = 2
+    provider_error_backoff_sec: int = 300
+    surprise_score_threshold: float = 0.5
+    currency_country_overrides: dict[str, list[str]] | None = None
+    symbol_country_overrides: dict[str, list[str]] | None = None
 
 
 @dataclass(frozen=True)
