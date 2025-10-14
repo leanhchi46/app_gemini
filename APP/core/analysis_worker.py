@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import time
 import traceback
-from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -79,7 +78,6 @@ class AnalysisWorker:
         self.mt5_json_full: str = ""
         self.file_slots: List[Optional[Any]] = []
         self.steps_upload: int = 0
-        self.no_trade_result: Optional[trade_conditions.NoTradeCheckResult] = None
 
     def _is_cancelled(self) -> bool:
         if self.cancel_token and self.cancel_token.is_cancelled():
@@ -290,45 +288,15 @@ class AnalysisWorker:
                 else ""
             )
 
-            self.app.ui_queue.put(
-                lambda: self.app.ui_status(
-                    f"GĐ 2/6: Lấy dữ liệu xong ({(_tnow() - t_ctx0):.2f}s)"
-                )
+            self.app.ui_queue.put(lambda: self.app.ui_status(f"GĐ 2/6: Lấy dữ liệu xong ({(_tnow() - t_ctx0):.2f}s)"))
+
+            no_trade_reasons = trade_conditions.check_no_trade_conditions(
+                self.safe_mt5_data, self.cfg, self.news_service
             )
-
-            no_trade_result = trade_conditions.check_no_trade_conditions(
-                self.safe_mt5_data,
-                self.cfg,
-                self.news_service,
-                now_utc=datetime.now(timezone.utc),
-            )
-            self.no_trade_result = no_trade_result
-
-            serialized_no_trade = no_trade_result.to_dict(include_messages=True)
-            serialized_no_trade["evaluated_at"] = datetime.now(timezone.utc).isoformat()
-
-            if isinstance(self.mt5_dict, dict):
-                evaluations = self.mt5_dict.setdefault("evaluations", {})
-                evaluations["no_trade"] = serialized_no_trade
-            if self.safe_mt5_data:
-                self.safe_mt5_data.raw.setdefault("evaluations", {})["no_trade"] = serialized_no_trade
-                self.mt5_json_full = self.safe_mt5_data.to_json(indent=2)
-
-            self.app.ui_queue.put(
-                lambda payload=serialized_no_trade: setattr(
-                    self.app, "last_no_trade_result", payload
-                )
-            )
-
-            if no_trade_result.has_blockers():
-                reason_str = "\n- ".join(
-                    violation.to_display() for violation in no_trade_result.blocking
-                )
+            if no_trade_reasons:
+                reason_str = "\n- ".join(no_trade_reasons)
                 trade_conditions.handle_early_exit(
-                    self,
-                    "no-trade",
-                    reason_str,
-                    notify=self.cfg.telegram.notify_on_early_exit,
+                    self, "no-trade", reason_str, notify=self.cfg.telegram.notify_on_early_exit
                 )
                 self.early_exit = True
                 raise SystemExit(f"Điều kiện No-Trade: {reason_str}")

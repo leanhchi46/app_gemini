@@ -84,7 +84,6 @@ class AppUI:
         self.news_events: Optional[List[Dict[str, Any]]] = None
         self.news_fetch_time: Optional[float] = None
         self.news_service: Optional[NewsService] = None
-        self.last_no_trade_result: Optional[Dict[str, Any]] = None
 
         # Threading Manager
         self.threading_manager = ThreadingManager()
