@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 import tkinter as tk
-from datetime import datetime
+from datetime import datetime, timezone
 from tkinter import ttk
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -28,13 +28,19 @@ try:
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     # Tạo các lớp giả để chương trình không bị crash nếu thiếu matplotlib
-    class Figure: pass
-    class FigureCanvasTkAgg: pass
-    class NavigationToolbar2Tk: pass
+    class Figure:
+        pass
+
+    class FigureCanvasTkAgg:
+        pass
+
+    class NavigationToolbar2Tk:
+        pass
     MATPLOTLIB_AVAILABLE = False
 
 # Các import cục bộ
 from APP.core.trading import conditions
+from APP.core.trading.no_trade_metrics import NoTradeMetrics, collect_no_trade_metrics
 from APP.services import mt5_service
 from APP.ui.controllers.chart_controller import ChartController, ChartStreamConfig
 from APP.utils import threading_utils
@@ -113,9 +119,11 @@ class ChartTab:
         self.acc_status = tk.StringVar(value="Chưa kết nối MT5")
 
         # Biến cho panel No-Trade
+        self.nt_status = tk.StringVar(value="Đang tải...")
         self.nt_session_gate = tk.StringVar(value="-")
         self.nt_reasons = tk.StringVar(value="")
         self.nt_events = tk.StringVar(value="")
+        self.nt_metrics = tk.StringVar(value="Đang thu thập...")
         logger.debug("Kết thúc hàm _init_vars.")
 
     def _build_controls(self):
@@ -207,12 +215,16 @@ class ChartTab:
         nt_box = ttk.LabelFrame(parent, text="Điều kiện giao dịch", padding=8)
         nt_box.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
         nt_box.columnconfigure(1, weight=1)
-        ttk.Label(nt_box, text="Phiên giao dịch:").grid(row=0, column=0, sticky="w")
-        ttk.Label(nt_box, textvariable=self.nt_session_gate).grid(row=0, column=1, sticky="e")
-        ttk.Label(nt_box, text="Lý do No-Trade:").grid(row=1, column=0, sticky="nw", pady=(4, 0))
-        ttk.Label(nt_box, textvariable=self.nt_reasons, wraplength=260, justify="left").grid(row=2, column=0, columnspan=2, sticky="w")
-        ttk.Label(nt_box, text="Sự kiện sắp tới:").grid(row=3, column=0, sticky="nw", pady=(6, 0))
-        ttk.Label(nt_box, textvariable=self.nt_events, wraplength=260, justify="left").grid(row=4, column=0, columnspan=2, sticky="w")
+        ttk.Label(nt_box, text="Trạng thái:").grid(row=0, column=0, sticky="w")
+        ttk.Label(nt_box, textvariable=self.nt_status, foreground="#0f172a").grid(row=0, column=1, sticky="e")
+        ttk.Label(nt_box, text="Phiên giao dịch:").grid(row=1, column=0, sticky="w")
+        ttk.Label(nt_box, textvariable=self.nt_session_gate).grid(row=1, column=1, sticky="e")
+        ttk.Label(nt_box, text="Lý do No-Trade:").grid(row=2, column=0, sticky="nw", pady=(4, 0))
+        ttk.Label(nt_box, textvariable=self.nt_reasons, wraplength=260, justify="left").grid(row=3, column=0, columnspan=2, sticky="w")
+        ttk.Label(nt_box, text="Chỉ số bảo vệ:").grid(row=4, column=0, sticky="nw", pady=(6, 0))
+        ttk.Label(nt_box, textvariable=self.nt_metrics, wraplength=260, justify="left").grid(row=5, column=0, columnspan=2, sticky="w")
+        ttk.Label(nt_box, text="Sự kiện sắp tới:").grid(row=6, column=0, sticky="nw", pady=(6, 0))
+        ttk.Label(nt_box, textvariable=self.nt_events, wraplength=260, justify="left").grid(row=7, column=0, columnspan=2, sticky="w")
 
     def _build_bottom_grids(self):
         """Xây dựng các bảng dữ liệu ở dưới cùng."""
@@ -407,19 +419,31 @@ class ChartTab:
             return {"mt5_data": None, "status_message": "Không lấy được dữ liệu MT5."}
 
         tasks = [
-            (conditions.check_no_trade_conditions, (safe_mt5_data, current_config, self.app.news_service), {}),
+            (
+                conditions.check_no_trade_conditions,
+                (safe_mt5_data, current_config, self.app.news_service),
+                {"now_utc": datetime.now(timezone.utc)},
+            ),
             (self.app.news_service.get_upcoming_events, (current_config.mt5.symbol,), {}),
             (mt5_service.get_history_deals, (current_config.mt5.symbol,), {"days": 7}),
         ]
         results = threading_utils.run_in_parallel(tasks)
         cancel_token.raise_if_cancelled()
 
+        no_trade_result = results.get("check_no_trade_conditions")
+        if isinstance(no_trade_result, conditions.NoTradeCheckResult):
+            no_trade_reasons = no_trade_result.to_messages(include_warnings=True)
+        else:
+            no_trade_reasons = list(no_trade_result or [])
+
         return {
             "mt5_data": safe_mt5_data,
-            "no_trade_reasons": results.get("check_no_trade_conditions", []),
+            "no_trade_reasons": no_trade_reasons,
+            "no_trade_result": no_trade_result,
             "upcoming_events": results.get("get_upcoming_events", []),
             "history_deals": results.get("get_history_deals", []),
             "status_message": "Kết nối MT5 OK",
+            "run_config": current_config,
         }
 
     def _apply_data_updates(self, payload: Dict[str, Any]):
@@ -429,15 +453,18 @@ class ChartTab:
         """
         safe_mt5_data: Optional[SafeData] = payload.get("mt5_data")
         no_trade_reasons: list[str] = payload.get("no_trade_reasons", [])
+        no_trade_result = payload.get("no_trade_result")
         upcoming_events: list[dict] = payload.get("upcoming_events", [])
         history_deals: list[dict] = payload.get("history_deals", [])
         status_message: Optional[str] = payload.get("status_message")
+        cfg_snapshot = payload.get("run_config")
 
         if status_message:
             self.acc_status.set(status_message)
 
         if not safe_mt5_data or not safe_mt5_data.is_valid():
             logger.debug("Bỏ qua cập nhật chi tiết do không có dữ liệu MT5 hợp lệ.")
+            self.nt_status.set("❓ Không có dữ liệu")
             return
 
         # Cập nhật thông tin tài khoản
@@ -475,10 +502,44 @@ class ChartTab:
 
         # Cập nhật panel No-Trade
         self.nt_session_gate.set(safe_mt5_data.get("killzone_active", "N/A"))
-        if no_trade_reasons:
-            self.nt_reasons.set("- " + "\n- ".join(no_trade_reasons))
+        status_text = "✅ An toàn"
+        if isinstance(no_trade_result, conditions.NoTradeCheckResult):
+            try:
+                self.app.last_no_trade_result = no_trade_result.to_dict(
+                    include_messages=True
+                )
+            except Exception:
+                logger.exception("Không thể serial hóa kết quả No-Trade cho AppUI.")
+            if no_trade_result.has_blockers():
+                status_text = "⛔ Bị chặn"
+                lines = no_trade_result.to_messages(include_warnings=True)
+            elif no_trade_result.warnings:
+                status_text = "⚠️ Có cảnh báo"
+                lines = no_trade_result.to_messages(include_warnings=True)
+            else:
+                lines = ["✅ Không có trở ngại."]
+            metrics_obj = no_trade_result.metrics
         else:
-            self.nt_reasons.set("Không có")
+            has_reasons = bool(no_trade_reasons)
+            status_text = "⛔ Bị chặn" if has_reasons else "✅ An toàn"
+            lines = no_trade_reasons or ["✅ Không có trở ngại."]
+            metrics_obj = None
+
+        self.nt_status.set(status_text)
+
+        if lines:
+            self.nt_reasons.set("\n".join(lines))
+        else:
+            self.nt_reasons.set("✅ Không có trở ngại.")
+
+        if metrics_obj is None and safe_mt5_data and cfg_snapshot:
+            try:
+                metrics_obj = collect_no_trade_metrics(safe_mt5_data, cfg_snapshot)
+            except Exception:
+                logger.exception("Không thể thu thập chỉ số No-Trade để hiển thị UI.")
+                metrics_obj = None
+
+        self.nt_metrics.set(self._format_no_trade_metrics(metrics_obj))
 
         if upcoming_events:
             events_str = "\n".join(
@@ -488,6 +549,58 @@ class ChartTab:
             self.nt_events.set(events_str)
         else:
             self.nt_events.set("Không có sự kiện quan trọng sắp tới.")
+
+    def _format_no_trade_metrics(self, metrics: Optional[NoTradeMetrics]) -> str:
+        """Tạo chuỗi mô tả các chỉ số bảo vệ No-Trade."""
+
+        if not metrics:
+            return "Không có dữ liệu chỉ số."
+
+        lines: list[str] = []
+
+        spread = metrics.spread
+        if spread.current_pips is not None:
+            spread_line = f"Spread: {spread.current_pips:.2f} pips"
+            if spread.threshold_pips:
+                spread_line += f" / {spread.threshold_pips:.2f} pips"
+            if spread.p90_5m_pips is not None:
+                spread_line += f" (P90 5m {spread.p90_5m_pips:.2f})"
+            elif spread.p90_30m_pips is not None:
+                spread_line += f" (P90 30m {spread.p90_30m_pips:.2f})"
+            if spread.atr_pct is not None:
+                spread_line += f" | {spread.atr_pct:.1f}% ATR"
+            lines.append(spread_line)
+        else:
+            lines.append("Spread: N/A")
+
+        atr = metrics.atr
+        if atr.atr_m5_pips is not None:
+            atr_line = f"ATR M5: {atr.atr_m5_pips:.2f} pips"
+            if atr.min_required_pips:
+                atr_line += f" (ngưỡng {atr.min_required_pips:.2f})"
+            if atr.atr_pct_of_adr20 is not None:
+                atr_line += f" | {atr.atr_pct_of_adr20:.1f}% ADR20"
+            lines.append(atr_line)
+        else:
+            lines.append("ATR M5: N/A")
+
+        key_metrics = metrics.key_levels
+        if key_metrics.nearest and key_metrics.nearest.distance_pips is not None:
+            key_line = (
+                f"Key level: {key_metrics.nearest.distance_pips:.2f} pips tới "
+                f"{key_metrics.nearest.name or '?'}"
+            )
+            if key_metrics.threshold_pips:
+                key_line += f" (ngưỡng ≥ {key_metrics.threshold_pips:.2f})"
+            lines.append(key_line)
+        elif key_metrics.threshold_pips:
+            lines.append(
+                f"Key level: thiếu dữ liệu (ngưỡng ≥ {key_metrics.threshold_pips:.2f})"
+            )
+        else:
+            lines.append("Key level: N/A")
+
+        return "\n".join(lines)
 
     def _chart_drawing_worker(self, stream_config: ChartStreamConfig, cancel_token: CancelToken) -> Dict[str, Any]:
         """Worker chuẩn bị payload biểu đồ có hỗ trợ cancel."""
@@ -569,7 +682,8 @@ class ChartTab:
 
     def _plot_price_data(self, rates: list[dict]):
         """Vẽ dữ liệu giá (nến hoặc đường) lên biểu đồ."""
-        if not self.ax_price: return
+        if not self.ax_price:
+            return
         try:
             df_index = [datetime.strptime(r['time'], "%Y-%m-%d %H:%M:%S") for r in rates]
             if self.chart_type_var.get() == "Nến":
@@ -587,7 +701,8 @@ class ChartTab:
 
     def _plot_trade_objects(self, sym: str, info: Any, tick: Any, positions: list):
         """Vẽ các đối tượng giao dịch (lệnh, giá) và đường giá real-time lên biểu đồ."""
-        if not self.ax_price: return
+        if not self.ax_price:
+            return
         try:
             digits = info.digits if info else 5
 
@@ -603,8 +718,10 @@ class ChartTab:
             for p in positions:
                 col = "#22c55e" if p.type == 0 else "#ef4444"
                 self.ax_price.axhline(p.price_open, color=col, ls="--", lw=1.0, alpha=0.95)
-                if p.sl > 0: self.ax_price.axhline(p.sl, color="#ef4444", ls=":", lw=1.0, alpha=0.85)
-                if p.tp > 0: self.ax_price.axhline(p.tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
+                if p.sl > 0:
+                    self.ax_price.axhline(p.sl, color="#ef4444", ls=":", lw=1.0, alpha=0.85)
+                if p.tp > 0:
+                    self.ax_price.axhline(p.tp, color="#22c55e", ls=":", lw=1.0, alpha=0.85)
                 label = f"{'BUY' if p.type==0 else 'SELL'} {p.volume:.2f} @{p.price_open:.{digits}f}"
                 self.ax_price.text(1.01, p.price_open, " " + label, va="center", color=col, fontsize=8, transform=self.ax_price.get_yaxis_transform())
         except Exception as e:
