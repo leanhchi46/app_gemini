@@ -18,7 +18,7 @@ from tkinter import ttk
 from tkinter import scrolledtext
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from concurrent.futures import CancelledError, Future
+from concurrent.futures import CancelledError, Future, current_config
 
 try:
     import MetaTrader5 as mt5
