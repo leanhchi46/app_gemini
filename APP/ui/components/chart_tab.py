@@ -97,15 +97,14 @@ class ChartTab:
         self.n_candles_var = tk.IntVar(value=150)
         self.chart_type_var = tk.StringVar(value="Nến")
         self.refresh_secs_var = tk.IntVar(value=5)
-
+        self.nt_status = tk.StringVar(value="Đang tải…")
+        self.nt_session_gate = tk.StringVar(value="-")
         self.acc_balance = tk.StringVar(value="-")
         self.acc_equity = tk.StringVar(value="-")
         self.acc_margin = tk.StringVar(value="-")
         self.acc_leverage = tk.StringVar(value="-")
         self.acc_currency = tk.StringVar(value="-")
         self.acc_status = tk.StringVar(value="Chưa kết nối MT5")
-        self.nt_status = tk.StringVar(value="❓ Không có dữ liệu")
-        self.nt_session_gate = tk.StringVar(value="-")
 
         # UI component handles initialised during build steps
         self.tab = ttk.Frame(self.notebook, padding=8)
@@ -189,9 +188,13 @@ class ChartTab:
         self.cbo_chart_type.bind("<<ComboboxSelected>>", self._reset_and_redraw)
 
         ttk.Label(ctrl, text="Làm mới (s):").pack(side="left", padx=(0, 2))
-        ttk.Spinbox(ctrl, from_=1, to=3600, textvariable=self.refresh_secs_var, width=6)\
-            .pack(side="left", padx=(0, 10))
-        logger.debug("Kết thúc hàm _build_controls.")
+        ttk.Spinbox(
+            ctrl,
+            from_=1,
+            to=3600,
+            textvariable=self.refresh_secs_var,
+            width=6,
+        ).pack(side="left", padx=(0, 10))
 
     def _build_chart_area(self) -> None:
         chart_wrap = ttk.Frame(self.tab)
@@ -392,13 +395,15 @@ class ChartTab:
 
     def _compute_tick_interval_ms(self) -> int:
         raw = self.refresh_secs_var.get() or 1
-        secs = max(0.2, min(float(raw), 1.0))  # ép realtime ≤1s theo yêu cầu Product
+        try:
+            secs = float(raw)
+        except (TypeError, ValueError):
+            secs = 1.0
+        secs = max(0.2, min(secs, 1.0))
         return int(secs * 1000)
 
     def _build_stream_config(self) -> ChartStreamConfig:
-        """Tạo cấu hình stream dựa trên trạng thái UI hiện tại."""
-
-        symbol = self.app.mt5_symbol_var.get().strip() or "XAUUSD"
+        symbol = self.app.mt5_symbol_var.get().strip() or DEFAULT_SYMBOL
         if not self.app.mt5_symbol_var.get().strip():
             self.app.mt5_symbol_var.set(symbol)
         timeframe = self.tf_var.get()
@@ -665,24 +670,23 @@ class ChartTab:
             )
             self.tree_his.insert("", "end", values=values)
 
-    def _reset_and_redraw(self, *_args: Any) -> None:
-        controller = self._ensure_controller()
-        controller.update_config(self._build_stream_config())
-        controller.request_snapshot()
+        # Cập nhật panel No-Trade
+        self.nt_session_gate.set(safe_mt5_data.get("killzone_active", "N/A"))
+        if no_trade_reasons:
+            self.nt_reasons.set("- " + "\n- ".join(no_trade_reasons))
+        else:
+            self.nt_reasons.set("Không có")
 
-    def _mt5_tf(self, tf_str: str) -> Optional[int]:
-        backend = mt5_backend
-        if backend is None:
-            return None
-        mapping = {
-            "M1": getattr(backend, "TIMEFRAME_M1", None),
-            "M5": getattr(backend, "TIMEFRAME_M5", None),
-            "M15": getattr(backend, "TIMEFRAME_M15", None),
-            "H1": getattr(backend, "TIMEFRAME_H1", None),
-            "H4": getattr(backend, "TIMEFRAME_H4", None),
-            "D1": getattr(backend, "TIMEFRAME_D1", None),
-        }
-        return mapping.get(tf_str.upper())
+        if upcoming_events:
+            events_str = "\n".join(
+                f"- {e['when_local'].strftime('%H:%M')} ({e.get('country', 'N/A')}): {e.get('title', 'N/A')}"
+                for e in upcoming_events[:3] # Hiển thị 3 sự kiện gần nhất
+            )
+            self.nt_events.set(events_str)
+        else:
+            lines.append("Key level: N/A")
+
+        return "\n".join(lines)
 
     def _populate_symbol_list(self) -> None:
         def worker(cancel_token: CancelToken) -> list[str]:
