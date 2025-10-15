@@ -30,6 +30,7 @@ from APP.configs.app_config import (
     UploadConfig,
 )
 from APP.ui.pyqt6.controller_bridge import ControllerSet
+from APP.ui.controllers.chart_controller import ChartStreamConfig
 from APP.ui.pyqt6.dialogs import JsonPreviewDialog, ShutdownDialog
 from APP.ui.pyqt6.event_bridge import UiQueueBridge
 from APP.ui.pyqt6.main_window import TradingMainWindow
