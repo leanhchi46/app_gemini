@@ -630,89 +630,44 @@ class ChartTab:
 
         # Cập nhật panel No-Trade
         self.nt_session_gate.set(safe_mt5_data.get("killzone_active", "N/A"))
-        status_text = "✅ An toàn"
-        if isinstance(no_trade_result, conditions.NoTradeCheckResult):
-            try:
-                self.app.last_no_trade_result = no_trade_result.to_dict(
-                    include_messages=True
-                )
-            except Exception:
-                logger.exception("Không thể serial hóa kết quả No-Trade cho AppUI.")
-            if no_trade_result.has_blockers():
-                status_text = "⛔ Bị chặn"
-                lines = no_trade_result.to_messages(include_warnings=True)
-            elif no_trade_result.warnings:
-                status_text = "⚠️ Có cảnh báo"
-                lines = no_trade_result.to_messages(include_warnings=True)
-            else:
-                lines = ["✅ Không có trở ngại."]
-            metrics_obj = no_trade_result.metrics
+        if no_trade_reasons:
+            self.nt_reasons.set("- " + "\n- ".join(no_trade_reasons))
         else:
-            has_reasons = bool(no_trade_reasons)
-            status_text = "⛔ Bị chặn" if has_reasons else "✅ An toàn"
-            lines = no_trade_reasons or ["✅ Không có trở ngại."]
-            metrics_obj = None
-
-        self.nt_status.set(status_text)
-
-        if lines:
-            reasons_text = "\n".join(lines)
-        else:
-            reasons_text = "✅ Không có trở ngại."
-        self._set_nt_text(self._nt_reasons_box, reasons_text)
-
-        if metrics_obj is None and safe_mt5_data and current_config:
-            try:
-                metrics_obj = collect_no_trade_metrics(safe_mt5_data, current_config)
-            except Exception:
-                logger.exception("Không thể thu thập chỉ số No-Trade để hiển thị UI.")
-                metrics_obj = None
-
-        metrics_text = self._format_no_trade_metrics(metrics_obj)
-        self._set_nt_text(self._nt_metrics_box, metrics_text)
+            self.nt_reasons.set("Không có")
 
         if upcoming_events:
             events_str = "\n".join(
                 f"- {e['when_local'].strftime('%H:%M')} ({e.get('country', 'N/A')}): {e.get('title', 'N/A')}"
                 for e in upcoming_events[:3] # Hiển thị 3 sự kiện gần nhất
             )
-            self._set_nt_text(self._nt_events_box, events_str)
+            self.nt_events.set(events_str)
         else:
-            self._set_nt_text(self._nt_events_box, "Không có sự kiện quan trọng sắp tới.")
+            lines.append("Key level: N/A")
 
-    def _format_no_trade_metrics(self, metrics: Optional[NoTradeMetrics]) -> str:
-        """Tạo chuỗi mô tả các chỉ số bảo vệ No-Trade."""
+        return "\n".join(lines)
 
-        if not metrics:
-            return "Không có dữ liệu chỉ số."
+    def _chart_drawing_worker(self, stream_config: ChartStreamConfig, cancel_token: CancelToken) -> Dict[str, Any]:
+        """Worker chuẩn bị payload biểu đồ có hỗ trợ cancel."""
 
-        lines: list[str] = []
+        try:
+            if not mt5_service.is_connected():
+                return {"success": False, "message": "MT5 chưa sẵn sàng"}
 
-        spread = metrics.spread
-        if spread.current_pips is not None:
-            spread_line = f"Spread: {spread.current_pips:.2f} pips"
-            if spread.threshold_pips:
-                spread_line += f" / {spread.threshold_pips:.2f} pips"
-            if spread.p90_5m_pips is not None:
-                spread_line += f" (P90 5m {spread.p90_5m_pips:.2f})"
-            elif spread.p90_30m_pips is not None:
-                spread_line += f" (P90 30m {spread.p90_30m_pips:.2f})"
-            if spread.atr_pct is not None:
-                spread_line += f" | {spread.atr_pct:.1f}% ATR"
-            lines.append(spread_line)
-        else:
-            lines.append("Spread: N/A")
+            sym = stream_config.symbol
+            if not sym:
+                return {"success": False, "message": "Chưa chọn Symbol"}
 
-        atr = metrics.atr
-        if atr.atr_m5_pips is not None:
-            atr_line = f"ATR M5: {atr.atr_m5_pips:.2f} pips"
-            if atr.min_required_pips:
-                atr_line += f" (ngưỡng {atr.min_required_pips:.2f})"
-            if atr.atr_pct_of_adr20 is not None:
-                atr_line += f" | {atr.atr_pct_of_adr20:.1f}% ADR20"
-            lines.append(atr_line)
-        else:
-            lines.append("ATR M5: N/A")
+            tf_map = {
+                "M1": mt5_service.mt5.TIMEFRAME_M1,
+                "M5": mt5_service.mt5.TIMEFRAME_M5,
+                "M15": mt5_service.mt5.TIMEFRAME_M15,
+                "H1": mt5_service.mt5.TIMEFRAME_H1,
+                "H4": mt5_service.mt5.TIMEFRAME_H4,
+                "D1": mt5_service.mt5.TIMEFRAME_D1,
+            }
+            tf_code = tf_map.get(stream_config.timeframe, mt5_service.mt5.TIMEFRAME_M15)
+            cnt = stream_config.candles
+>>>>>>> theirs
 
         key_metrics = metrics.key_levels
         if key_metrics.nearest and key_metrics.nearest.distance_pips is not None:
