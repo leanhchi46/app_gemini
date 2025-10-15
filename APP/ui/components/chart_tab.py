@@ -68,6 +68,17 @@ MAX_EVENTS_DISPLAYED = 5
 
 mt5_backend = getattr(mt5_service, "mt5", None)
 
+MT5_TIMEFRAME_CODES: dict[str, Optional[int]] = {
+    "M1": getattr(mt5_backend, "TIMEFRAME_M1", None),
+    "M5": getattr(mt5_backend, "TIMEFRAME_M5", None),
+    "M15": getattr(mt5_backend, "TIMEFRAME_M15", None),
+    "M30": getattr(mt5_backend, "TIMEFRAME_M30", None),
+    "H1": getattr(mt5_backend, "TIMEFRAME_H1", None),
+    "H4": getattr(mt5_backend, "TIMEFRAME_H4", None),
+    "D1": getattr(mt5_backend, "TIMEFRAME_D1", None),
+    "W1": getattr(mt5_backend, "TIMEFRAME_W1", None),
+}
+
 
 class ChartTab:
     """Tkinter widgets and background coordination for the Chart tab."""
@@ -394,13 +405,22 @@ class ChartTab:
         self._after_job = self.root.after(delay_ms, self._tick)
 
     def _compute_tick_interval_ms(self) -> int:
-        raw = self.refresh_secs_var.get() or 1
+        raw = self.refresh_secs_var.get()
         try:
             secs = float(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, tk.TclError):
             secs = 1.0
-        secs = max(0.2, min(secs, 1.0))
+        secs = max(1.0, min(secs, 3600.0))
         return int(secs * 1000)
+
+    def _reset_and_redraw(self, _event: Optional[tk.Event] = None) -> None:
+        logger.debug(
+            "Resetting chart stream due to config change (event=%s)",
+            getattr(_event, "type", None),
+        )
+        self.stop()
+        self.start()
+
 
     def _build_stream_config(self) -> ChartStreamConfig:
         symbol = self.app.mt5_symbol_var.get().strip() or DEFAULT_SYMBOL
@@ -429,6 +449,15 @@ class ChartTab:
     # ------------------------------------------------------------------
     # Workers
     # ------------------------------------------------------------------
+    def _mt5_tf(self, timeframe: str) -> Optional[int]:
+        if not mt5_backend:
+            return None
+        tf_key = timeframe.upper()
+        code = MT5_TIMEFRAME_CODES.get(tf_key)
+        if code is None:
+            logger.warning("Khung thời gian không hỗ trợ: %s", timeframe)
+        return code
+
     def _chart_drawing_worker(
         self, stream_config: ChartStreamConfig, cancel_token: CancelToken
     ) -> Dict[str, Any]:
@@ -670,23 +699,7 @@ class ChartTab:
             )
             self.tree_his.insert("", "end", values=values)
 
-        # Cập nhật panel No-Trade
-        self.nt_session_gate.set(safe_mt5_data.get("killzone_active", "N/A"))
-        if no_trade_reasons:
-            self.nt_reasons.set("- " + "\n- ".join(no_trade_reasons))
-        else:
-            self.nt_reasons.set("Không có")
 
-        if upcoming_events:
-            events_str = "\n".join(
-                f"- {e['when_local'].strftime('%H:%M')} ({e.get('country', 'N/A')}): {e.get('title', 'N/A')}"
-                for e in upcoming_events[:3] # Hiển thị 3 sự kiện gần nhất
-            )
-            self.nt_events.set(events_str)
-        else:
-            lines.append("Key level: N/A")
-
-        return "\n".join(lines)
 
     def _populate_symbol_list(self) -> None:
         def worker(cancel_token: CancelToken) -> list[str]:
