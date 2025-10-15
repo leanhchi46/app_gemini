@@ -235,8 +235,11 @@ def upload_image_to_gemini(
         Đối tượng tệp Gemini nếu thành công, nếu không thì None.
     """
     if genai is None:
-        logger.critical("SDK google-generativeai chưa được cài đặt. Không thể tải tệp lên.")
-        raise RuntimeError("SDK google-generativeai bị thiếu. Cài đặt bằng: pip install google-generativeai")
+        logger.critical(
+            "SDK google-generativeai chưa được cài đặt. Bỏ qua việc tải tệp '%s'.",
+            image_path.name,
+        )
+        return None
 
     if not display_name:
         display_name = image_path.name

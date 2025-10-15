@@ -8,7 +8,10 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-import google.generativeai as genai
+try:
+    import google.generativeai as genai  # type: ignore[import]
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    genai = None
 
 from APP.analysis import context_builder, image_processor, prompt_builder
 from APP.core.trading import actions as trade_actions
@@ -110,7 +113,7 @@ class AnalysisWorker:
             remote_name = image_processor.UploadCache.lookup(cache, path)
             file_obj = None
 
-            if remote_name:
+            if remote_name and genai is not None:
                 try:
                     logger.debug(f"Tìm thấy trong cache: {name}, đang lấy thông tin file...")
                     file_obj = genai.get_file(remote_name)
@@ -118,6 +121,11 @@ class AnalysisWorker:
                 except Exception as e:
                     logger.warning(f"Không thể lấy file từ cache cho {name} ({remote_name}): {e}. Sẽ upload lại.")
                     file_obj = None
+            elif remote_name:
+                logger.debug(
+                    "Bỏ qua việc lấy cache cho %s vì thiếu SDK google-generativeai.",
+                    name,
+                )
 
             if not file_obj:
                 cancel_token.raise_if_cancelled()

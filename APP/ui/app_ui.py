@@ -23,9 +23,6 @@ from tkinter.scrolledtext import ScrolledText
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
-from dotenv import load_dotenv
-from google.api_core import exceptions
-
 from APP.configs import workspace_config
 from APP.configs.feature_flags import FEATURE_FLAGS
 from APP.configs.app_config import (ApiConfig, AutoTradeConfig, ChartConfig,
@@ -46,6 +43,8 @@ from APP.ui.utils.timeframe_detector import TimeframeDetector
 from APP.ui.controllers import (AnalysisController, IOController,
                                 MT5Controller, NewsController)
 from APP.utils import general_utils
+from APP.utils.env_loader import load_dotenv
+from APP.utils.google_ai import GEMINI_AVAILABLE, exceptions
 from APP.utils.safe_data import SafeData
 from APP.utils.threading_utils import ThreadingManager
 

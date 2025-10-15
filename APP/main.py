@@ -74,7 +74,15 @@ def main(workspace_path: Optional[str] = None) -> None:
 
         logger.info("Ứng dụng đang khởi động...")
 
-        root = tk.Tk()
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            logger.error("Không thể khởi tạo giao diện Tkinter: %s", exc)
+            logger.info(
+                "Chế độ headless được phát hiện. Dừng khởi động UI và kết thúc chương trình."
+            )
+            return
+
         app = AppUI(root, initial_config=initial_config)
 
         # Cải tiến 3: Thêm xử lý tắt ứng dụng (Graceful Shutdown)

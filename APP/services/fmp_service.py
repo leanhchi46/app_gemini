@@ -3,8 +3,15 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
-import investpy
-import pandas as pd
+try:
+    import investpy  # type: ignore[import]
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    investpy = None
+
+try:
+    import pandas as pd  # type: ignore[import]
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    pd = None
 import pytz
 
 from APP.configs.app_config import FMPConfig
@@ -42,6 +49,15 @@ class FMPService:
             Exception: Nếu có lỗi xảy ra trong quá trình gọi API.
         """
         logger.debug("Đang lấy dữ liệu lịch kinh tế từ investpy...")
+        if investpy is None:
+            logger.warning(
+                "Không thể lấy dữ liệu lịch kinh tế vì thiếu thư viện investpy."
+            )
+            return []
+        if pd is None:
+            logger.warning(
+                "pandas chưa được cài đặt. Sử dụng cơ chế chuyển đổi dữ liệu dự phòng."
+            )
         try:
             today = datetime.now(pytz.utc)
             end_date = today + timedelta(days=days)
@@ -55,12 +71,13 @@ class FMPService:
                 to_date=to_date_str,
             )
 
-            if not isinstance(calendar_df, pd.DataFrame):
-                logger.warning("investpy không trả về DataFrame: %s", calendar_df)
+            if pd is not None and isinstance(calendar_df, pd.DataFrame):
+                calendar_data = calendar_df.to_dict('records')
+            elif isinstance(calendar_df, list):
+                calendar_data = calendar_df
+            else:
+                logger.warning("Không thể chuyển đổi dữ liệu lịch kinh tế: %s", calendar_df)
                 return []
-            
-            # Chuyển đổi DataFrame thành list of dicts
-            calendar_data = calendar_df.to_dict('records')
 
             logger.info("Lấy thành công %d sự kiện từ investpy cho %d ngày tới.", len(calendar_data), days)
             return calendar_data

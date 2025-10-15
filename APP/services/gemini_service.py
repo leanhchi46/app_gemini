@@ -5,11 +5,13 @@ import random
 import time
 from typing import Any, Generator, List, Optional, Union
 
-# Sửa lỗi pyright bằng cách import từ các submodule cụ thể theo gợi ý
-from google.generativeai.client import configure
-from google.generativeai.generative_models import GenerativeModel
-from google.generativeai.models import list_models
-from google.api_core import exceptions
+from APP.utils.google_ai import (
+    GEMINI_AVAILABLE,
+    GenerativeModel,
+    configure,
+    exceptions,
+    list_models,
+)
 
 # Khởi tạo logger cho service này
 logger = logging.getLogger(__name__)
@@ -44,6 +46,11 @@ def initialize_model(api_key: str, model_name: str) -> Optional[GenerativeModel]
     if not api_key:
         logger.error("Không thể khởi tạo model: API key bị thiếu.")
         return None
+    if not GEMINI_AVAILABLE:
+        logger.error(
+            "Không thể khởi tạo Gemini model vì thiếu thư viện google-generativeai."
+        )
+        return None
     try:
         # Cấu hình API key trước khi khởi tạo model.
         # Đây là cách làm đúng và an toàn, thay vì gán trực tiếp vào client.
@@ -75,6 +82,11 @@ def configure_and_get_models(api_key: str) -> List[str]:
     """
     if not api_key:
         logger.warning("API key bị thiếu, không thể lấy danh sách model.")
+        return []
+    if not GEMINI_AVAILABLE:
+        logger.warning(
+            "Bỏ qua việc lấy danh sách model vì thiếu thư viện google-generativeai."
+        )
         return []
     try:
         configure(api_key=api_key)

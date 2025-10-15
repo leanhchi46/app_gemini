@@ -3,7 +3,10 @@ from __future__ import annotations
 import logging
 from typing import Tuple
 
-import tradingeconomics as te
+try:
+    import tradingeconomics as te  # type: ignore[import]
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    te = None
 from urllib.error import HTTPError
 
 from APP.configs.app_config import TEConfig
@@ -26,6 +29,11 @@ class TEService:
             config: Đối tượng cấu hình TEConfig chứa API key.
         """
         self.config = config
+        if te is None:
+            raise RuntimeError(
+                "Không thể khởi tạo TEService vì thiếu thư viện tradingeconomics."
+            )
+
         api_key = (self.config.api_key or "").strip()
 
         if not api_key:
@@ -57,6 +65,10 @@ class TEService:
         import ssl
         
         logger.debug("Đang thực hiện cuộc gọi API đến Trading Economics...")
+
+        if te is None:
+            logger.warning("Bỏ qua cuộc gọi TE API vì thiếu thư viện tradingeconomics.")
+            return []
 
         # Lưu trữ hàm gốc, không phải kết quả của nó
         original_create_context = ssl._create_default_https_context

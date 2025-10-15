@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
+from APP.utils.env_loader import load_dotenv
 
 # Tải các biến môi trường từ file .env ở thư mục gốc của dự án
 # Điều này cho phép cấu hình linh hoạt mà không cần sửa code.

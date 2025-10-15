@@ -658,7 +658,7 @@ class ChartTab:
         if upcoming_events:
             events_str = "\n".join(
                 f"- {e['when_local'].strftime('%H:%M')} ({e.get('country', 'N/A')}): {e.get('title', 'N/A')}"
-                for e in upcoming_events[:3] # Hiển thị 3 sự kiện gần nhất
+                for e in upcoming_events[:3]
             )
             self.nt_events.set(events_str)
         else:
@@ -687,7 +687,7 @@ class ChartTab:
             }
             tf_code = tf_map.get(stream_config.timeframe, mt5_service.mt5.TIMEFRAME_M15)
             cnt = stream_config.candles
-
+>>>>>>> theirs
 
         key_metrics = metrics.key_levels
         if key_metrics.nearest and key_metrics.nearest.distance_pips is not None:

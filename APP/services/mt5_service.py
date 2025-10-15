@@ -11,17 +11,24 @@ from statistics import median
 from typing import TYPE_CHECKING, Any, Iterable, Optional, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import MetaTrader5 as mt5_lib
+try:
+    import MetaTrader5 as mt5_lib  # type: ignore[import]
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    mt5_lib = None
 
 from APP.analysis import ict_analyzer
 from APP.analysis.ict_analyzer import LiquidityLevel
 from APP.utils.safe_data import SafeData
 
-# Assign mt5_lib to a new variable typed as Any to suppress pyright errors
-mt5: Any = mt5_lib
-
-
 logger = logging.getLogger(__name__)
+
+# Assign mt5_lib to a new variable typed as Any to suppress pyright errors
+mt5: Any = mt5_lib if mt5_lib is not None else None
+
+if mt5 is None:
+    logger.warning(
+        "MetaTrader5 chưa được cài đặt. Các chức năng MT5 sẽ bị vô hiệu trong môi trường này."
+    )
 
 if TYPE_CHECKING:
     from APP.configs.app_config import MT5Config, RunConfig
