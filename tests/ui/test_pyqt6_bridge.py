@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import queue
 
 import pytest
@@ -28,6 +29,35 @@ def test_ui_queue_bridge_executes_callbacks(core_app):
 
     assert processed == 1
     assert called == ["ran"]
+
+
+def test_ui_queue_bridge_warns_on_backlog(core_app, caplog):
+    bridge = UiQueueBridge(queue.Queue(), warn_threshold=2, warn_interval_sec=0.0)
+
+    with caplog.at_level(logging.WARNING):
+        bridge.post(lambda: None)
+        bridge.post(lambda: None)
+        bridge.post(lambda: None)
+
+    assert any("vượt ngưỡng cảnh báo" in record.message for record in caplog.records)
+
+
+def test_ui_queue_bridge_drops_callbacks_when_threshold_exceeded(core_app, caplog):
+    dropped: list[object] = []
+    bridge = UiQueueBridge(queue.Queue(), drop_threshold=2, on_drop=lambda cb: dropped.append(cb))
+
+    cb1 = lambda: None
+    cb2 = lambda: None
+    cb3 = lambda: None
+
+    with caplog.at_level(logging.ERROR):
+        assert bridge.post(cb1) is True
+        assert bridge.post(cb2) is True
+        assert bridge.post(cb3) is False
+
+    assert bridge.queue.qsize() == 2
+    assert dropped == [cb3]
+    assert any("vượt ngưỡng loại bỏ" in record.message for record in caplog.records)
 
 
 def test_threading_adapter_routes_results_to_ui(core_app):

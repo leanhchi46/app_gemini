@@ -46,6 +46,11 @@
 - Bổ sung kiểm thử PyQt6 cho cầu nối controller (prompt/news/chart) nhằm xác nhận queue bridge cập nhật widget đúng.
 - Tạo `PyQtAnalysisAppAdapter` ánh xạ API Tkinter cho `AnalysisWorker`, bật chạy/huỷ phiên phân tích thật qua `AnalysisController` và lập lịch autorun bằng `QTimer` để khớp luồng nền với PyQt6.
 
+## Giai đoạn 5 - Kiểm thử & hardening (Hoàn thành)
+- Bổ sung cảnh báo backlog và ngưỡng loại bỏ cho `UiQueueBridge`, cho phép cấu hình trực tiếp từ `PyQtApplication` để đồng bộ hành vi với Tkinter.
+- Tham số hoá ngưỡng queue UI (cảnh báo/loại bỏ) giúp giảm nguy cơ backlog trong môi trường thật và cấu hình lớn.
+- Bổ sung test PyQt6 bao phủ cảnh báo backlog, hành vi loại bỏ callback và việc reset state của `PyQtAnalysisAppAdapter` trước mỗi phiên phân tích.
+
 ## Checklist theo giai đoạn
 
 ### Giai đoạn 0 – Chuẩn bị & kiểm thử hiện trạng
@@ -84,3 +89,8 @@
 - [x] Đồng bộ lại cấu hình Options cho services và kích hoạt autorun tin tức sau mỗi thay đổi.
 - [x] Bổ sung kiểm thử PyQt6 xác nhận bridge controller (prompt/news/chart) hoạt động chính xác.
 - [x] Hoàn thiện adapter AnalysisController cùng cơ chế autorun PyQt6 (QTimer, cập nhật trạng thái session).
+
+### Giai đoạn 5 - Kiểm thử & hardening
+- [x] Thêm cảnh báo backlog và ngưỡng loại bỏ vào `UiQueueBridge`, cấu hình được từ `PyQtApplication`.
+- [x] Bổ sung test PyQt6 cho cảnh báo/loại bỏ backlog và việc chuẩn bị state của adapter phân tích.
+- [x] Cập nhật tài liệu giai đoạn 5 cùng checklist chi tiết.

@@ -33,13 +33,21 @@ class PyQtApplication:
         threading_manager: Optional[ThreadingManager] = None,
         ui_queue: Optional[queue.Queue[Any]] = None,
         qapp: Optional[QApplication] = None,
+        ui_warn_threshold: int = 50,
+        ui_drop_threshold: Optional[int] = None,
+        ui_warn_interval_sec: float = 1.0,
     ) -> None:
         self._config_state = config_state
         self._threading_manager = threading_manager or ThreadingManager()
         self._ui_queue = ui_queue or queue.Queue()
         self._qapp = ensure_qapplication(qapp)
 
-        self.ui_bridge = UiQueueBridge(self._ui_queue)
+        self.ui_bridge = UiQueueBridge(
+            self._ui_queue,
+            warn_threshold=ui_warn_threshold,
+            drop_threshold=ui_drop_threshold,
+            warn_interval_sec=ui_warn_interval_sec,
+        )
         self.threading = QtThreadingAdapter(self._threading_manager, self.ui_bridge)
         self._coordinator = ControllerCoordinator(
             config_state=config_state,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import queue
+from time import monotonic
 from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -23,6 +24,10 @@ class UiQueueBridge(QObject):
         ui_queue: queue.Queue[Any],
         *,
         interval_ms: int = 50,
+        warn_threshold: Optional[int] = None,
+        drop_threshold: Optional[int] = None,
+        warn_interval_sec: float = 1.0,
+        on_drop: Optional[Callable[[Callable[[], Any]], None]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -31,6 +36,15 @@ class UiQueueBridge(QObject):
         self._timer.setInterval(interval_ms)
         self._timer.timeout.connect(self._drain_once)
         self.callback_received.connect(self._execute_callback)
+
+        self._warn_threshold = warn_threshold if warn_threshold and warn_threshold > 0 else None
+        drop = drop_threshold if drop_threshold and drop_threshold > 0 else None
+        if drop is not None and self._warn_threshold is not None and drop < self._warn_threshold:
+            drop = self._warn_threshold
+        self._drop_threshold = drop
+        self._warn_interval = max(0.1, warn_interval_sec)
+        self._last_warn_log = 0.0
+        self._on_drop = on_drop
 
     def start(self) -> None:
         """Bắt đầu polling queue để phát tín hiệu trên thread UI."""
@@ -46,10 +60,41 @@ class UiQueueBridge(QObject):
             logger.debug("Dừng timer chuyển queue → signal")
             self._timer.stop()
 
-    def post(self, callback: Callable[[], Any]) -> None:
-        """Đưa callback mới vào queue và xử lý trên thread UI."""
+    def post(self, callback: Callable[[], Any]) -> bool:
+        """Đưa callback mới vào queue và xử lý trên thread UI.
+
+        Returns:
+            bool: ``True`` nếu callback được xếp vào queue, ``False`` nếu bị loại bỏ do quá tải.
+        """
+
+        backlog = self._queue.qsize()
+        if self._drop_threshold is not None and backlog >= self._drop_threshold:
+            logger.error(
+                "UI queue backlog=%s vượt ngưỡng loại bỏ=%s; bỏ qua callback %s",
+                backlog,
+                self._drop_threshold,
+                getattr(callback, "__name__", repr(callback)),
+            )
+            if self._on_drop:
+                try:
+                    self._on_drop(callback)
+                except Exception:  # pragma: no cover - chỉ log để không phá UI thread
+                    logger.exception("Lỗi khi gọi hook on_drop cho UI queue.")
+            return False
 
         self._queue.put(callback)
+        backlog += 1
+
+        if self._warn_threshold is not None and backlog >= self._warn_threshold:
+            now = monotonic()
+            if now - self._last_warn_log >= self._warn_interval:
+                logger.warning(
+                    "UI queue backlog=%s vượt ngưỡng cảnh báo=%s",
+                    backlog,
+                    self._warn_threshold,
+                )
+                self._last_warn_log = now
+        return True
 
     @property
     def queue(self) -> queue.Queue[Any]:
@@ -121,6 +166,7 @@ class QtThreadingAdapter(QObject):
         )
 
         if on_result or on_error:
+
             def _notify(future: Any) -> None:
                 try:
                     result = future.result()
@@ -152,6 +198,6 @@ class QtThreadingAdapter(QObject):
         return self._threading_manager.await_idle(group=group, timeout=timeout)
 
     def shutdown(self, *, wait: bool = True, timeout: Optional[float] = None, force: bool = False) -> None:
-        """Đóng ThreadingManager khi UI PyQt6 thoát."""
+        """Dừng ThreadingManager khi UI PyQt6 thoát."""
 
         self._threading_manager.shutdown(wait=wait, timeout=timeout, force=force)
