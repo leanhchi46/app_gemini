@@ -1788,7 +1788,7 @@ class AppUI:
     def _update_tree_row(self, index: int, status: str):
         """Cập nhật trạng thái của một hàng trong cây file."""
         if self.tree and self.tree.exists(str(index)):
-            self.tree.set(str(index), "Status", status)
+            self.tree.set(str(index), "status", status)
 
     def _finalize_stopped(self):
         """Hoàn tất tác vụ khi bị dừng."""

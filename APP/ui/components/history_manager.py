@@ -291,13 +291,10 @@ class HistoryManager:
         if self.json_manager:
             self.json_manager.refresh()
 
-    def open_reports_folder(self) -> None:
-        """
-        Mở thư mục chứa báo cáo.
 
-        - Nếu một mục đang được chọn trong danh sách, mở thư mục Reports của symbol đó.
-        - Nếu không, mở thư mục gốc (Screenshots).
-        """
+
+    def open_reports_folder(self) -> None:
+        """Mở thư mục chứa các báo cáo và context đã sinh ra."""
         self.logger.debug("Yêu cầu mở thư mục báo cáo.")
         try:
             base_folder_str = self.app.folder_path.get()
@@ -305,34 +302,60 @@ class HistoryManager:
                 ui_builder.show_message("Thông báo", "Vui lòng chọn thư mục ảnh trước.")
                 return
 
-            target_path: Path | None = None
             base_folder = Path(base_folder_str)
+            target_path: Path | None = None
 
-            # Sửa lỗi: Gọi _get_selected_path từ md_manager (hoặc json_manager)
             selected_path: Path | None = None
             if self.md_manager:
                 selected_path = self.md_manager._get_selected_path()
+            if not selected_path and self.json_manager:
+                selected_path = self.json_manager._get_selected_path()
+            app_tree = getattr(self.app, "tree", None)
+            if not selected_path and app_tree is not None:
+                selection = app_tree.selection()
+                if selection:
+                    try:
+                        idx = int(selection[0])
+                    except (TypeError, ValueError):
+                        idx = -1
+                    if 0 <= idx < len(self.app.results):
+                        result_path = self.app.results[idx].get("path")
+                        if result_path:
+                            try:
+                                selected_path = Path(result_path)
+                            except TypeError:
+                                selected_path = None
 
             if selected_path:
-                target_path = selected_path.parent  # Thư mục Reports của mục được chọn
-            else:
-                # Nếu không có gì được chọn, mặc định mở thư mục gốc
-                target_path = base_folder
+                if selected_path.is_file():
+                    target_path = selected_path.parent
+                elif selected_path.is_dir():
+                    target_path = selected_path
+
+            if target_path is None:
+                symbol = (self.app.mt5_symbol_var.get() or "").strip()
+                if symbol:
+                    target_path = workspace_config.get_reports_dir(base_folder, symbol)
+                else:
+                    target_path = base_folder
+
+            if target_path and target_path.is_file():
+                target_path = target_path.parent
 
             if target_path and target_path.is_dir():
                 os.startfile(target_path)
-                self.logger.info(f"Đã gửi yêu cầu mở thư mục: {target_path}")
+                self.app.ui_status(f"Mở thư mục báo cáo: {target_path}")
+                self.logger.info(f"Đã gọi yêu cầu mở thư mục: {target_path}")
             else:
                 self.logger.warning(f"Thư mục đích không tồn tại: {target_path}")
                 ui_builder.show_message("Thông báo", "Thư mục đích không tồn tại.")
         except Exception as e:
             self.logger.error(f"Lỗi khi mở thư mục báo cáo: {e}", exc_info=True)
-            ui_builder.show_message("Lỗi", f"Không thể mở thư mục báo cáo:\n{e}")
+            ui_builder.show_message("Lỗi", f"Không thể mở thư mục báo cáo\n{e}")
 
     # --- Compatibility Layer ---
     # Các phương thức này được giữ lại để tương thích ngược với ui_builder,
     # chúng chỉ đơn giản ủy quyền lệnh gọi cho các manager tương ứng.
-
     def refresh_history_list(self) -> None:
         """Tương thích ngược: Làm mới danh sách báo cáo .md."""
         if self.md_manager:
