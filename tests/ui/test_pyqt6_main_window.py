@@ -35,13 +35,14 @@ from APP.ui.pyqt6.dialogs import JsonPreviewDialog, ShutdownDialog
 from APP.ui.pyqt6.event_bridge import UiQueueBridge
 from APP.ui.pyqt6.main_window import TradingMainWindow
 from APP.ui.state import AutorunState, PromptState, UiConfigState
-from APP.utils.threading_utils import CancelToken, TaskRecord
+from APP.utils.threading_utils import CancelToken, TaskRecord, ThreadingManager
 
 
 class ImmediateThreadingAdapter:
     """Threading adapter thực thi tác vụ đồng bộ để dễ kiểm thử."""
 
     def __init__(self, ui_bridge: UiQueueBridge) -> None:
+        self.threading_manager = ThreadingManager(max_workers=1)
         self._bridge = ui_bridge
 
     def submit(
