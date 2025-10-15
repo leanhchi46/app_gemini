@@ -223,64 +223,131 @@ def upload_image_to_gemini(
 ) -> Any | None:
     """
     Tải một hình ảnh duy nhất lên Gemini File API.
-
+    
     Nó đợi cho đến khi tệp trở nên ACTIVE, với một timeout toàn cục.
-
+    
     Args:
         image_path: Đường dẫn đến tệp hình ảnh cần tải lên.
         display_name: Tên hiển thị tùy chọn cho tệp trong API.
         timeout: Thời gian chờ tối đa (tính bằng giây).
-
+    
     Returns:
         Đối tượng tệp Gemini nếu thành công, nếu không thì None.
     """
+
     if genai is None:
-        logger.critical(
-            "SDK google-generativeai chưa được cài đặt. Bỏ qua việc tải tệp '%s'.",
-            image_path.name,
-        )
+        logger.critical("SDK google-generativeai chua duoc cai dat. Bo qua upload cho '%s'.", image_path.name)
         return None
 
     if not display_name:
         display_name = image_path.name
-        
-    logger.info(f"Đang tải '{display_name}' lên Gemini File API...")
-    
-    try:
-        mime_type, _ = mimetypes.guess_type(image_path)
-        uploaded_file = genai.upload_file(
-            path=image_path,
-            mime_type=mime_type or "application/octet-stream",
-            display_name=display_name,
-        )
-        logger.debug(f"Yêu cầu tải lên đã được gửi. Tên từ xa: {uploaded_file.name}. Đang chờ trạng thái ACTIVE.")
 
-        # Đợi tệp được xử lý với timeout
+    logger.info("Dang tai '%s' len Gemini File API...", display_name)
+    mime_type, _ = mimetypes.guess_type(str(image_path))
+    upload_kwargs = {
+        "path": str(image_path),
+        "mime_type": mime_type or "application/octet-stream",
+        "display_name": display_name,
+    }
+
+    client = None
+    files_api = None
+
+    try:
+        upload_fn = getattr(genai, "upload_file", None)
+        if callable(upload_fn):
+            file_obj = upload_fn(**upload_kwargs)
+        else:
+            client_cls = getattr(genai, "Client", None)
+            if client_cls is None:
+                raise RuntimeError("Phien ban google-generativeai khong ho tro upload_file API.")
+
+            client = client_cls()
+            files_api = getattr(client, "files", None)
+            if files_api is None or not hasattr(files_api, "upload"):
+                raise RuntimeError("Client.files API khong kha dung cho upload.")
+            file_obj = files_api.upload(**upload_kwargs)
+
+        if not file_obj:
+            logger.error("Upload API khong tra ve doi tuong file cho '%s'.", display_name)
+            return None
+
+        file_name = getattr(file_obj, "name", None) or getattr(file_obj, "id", None) or getattr(file_obj, "uri", None)
+        if not file_name:
+            logger.error("Khong nhan duoc dinh danh file sau khi upload '%s'.", display_name)
+            return None
+
+        get_file_fn = getattr(genai, "get_file", None)
+        delete_file_fn = getattr(genai, "delete_file", None)
+        can_poll = callable(get_file_fn) or (files_api is not None and hasattr(files_api, "get"))
+
+        def _poll(name: str):
+            if callable(get_file_fn):
+                return get_file_fn(name)
+            if files_api is not None and hasattr(files_api, "get"):
+                return files_api.get(name=name)
+            return None
+
+        def _delete(name: str):
+            if callable(delete_file_fn):
+                return delete_file_fn(name)
+            if files_api is not None and hasattr(files_api, "delete"):
+                return files_api.delete(name=name)
+            return None
+
+        def _extract_state(file_status: Any) -> str:
+            if file_status is None:
+                return "UNKNOWN"
+            state = getattr(file_status, "state", None)
+            if isinstance(state, str):
+                return state
+            if state is not None:
+                name_attr = getattr(state, "name", None)
+                if isinstance(name_attr, str):
+                    return name_attr
+                return str(state)
+            return "UNKNOWN"
+
+        if not can_poll:
+            logger.debug("SDK khong ho tro kiem tra trang thai file sau upload; tra ve ket qua ngay.")
+            return file_obj
+
         start_time = time.monotonic()
         delay = 0.6
+        last_state = "UNKNOWN"
+
         while time.monotonic() - start_time < timeout:
-            time.sleep(delay)
-            file_status = genai.get_file(uploaded_file.name)
-            state_name = getattr(getattr(file_status, "state", None), "name", "UNKNOWN")
-            logger.debug(f"Kiểm tra trạng thái tệp cho '{display_name}': {state_name}. Thời gian đã trôi qua: {time.monotonic() - start_time:.1f}s")
+            file_status = _poll(file_name)
+            if file_status is None:
+                logger.debug("Khong lay duoc trang thai file; tra ve ket qua upload ban dau.")
+                return file_obj
 
-            if state_name == "ACTIVE":
-                logger.info(f"Đã tải lên và xử lý thành công '{display_name}'.")
+            state = _extract_state(file_status)
+            last_state = state
+            logger.debug("Trang thai file '%s': %s sau %.1fs", display_name, state, time.monotonic() - start_time)
+
+            if state == "ACTIVE":
+                logger.info("Da tai len thanh cong '%s'.", display_name)
                 return file_status
-            if state_name == "FAILED":
-                logger.error(f"Tải lên không thành công cho '{display_name}'. Trạng thái là FAILED.")
-                try:
-                    genai.delete_file(uploaded_file.name)
-                    logger.debug(f"Đã xóa cấu phần tệp không thành công: {uploaded_file.name}")
-                except Exception as del_e:
-                    logger.warning(f"Không thể xóa cấu phần tệp không thành công: {del_e}")
-                return None
-            
-            delay = min(delay * 1.5, 3.0) # Backoff hàm mũ với giới hạn
 
-        logger.error(f"Hết thời gian chờ ({timeout}s) cho tệp '{display_name}' trở nên ACTIVE.")
+            if state == "FAILED":
+                logger.error("Tai len khong thanh cong cho '%s'. Trang thai FAILED.", display_name)
+                try:
+                    _delete(file_name)
+                except Exception as del_err:
+                    logger.warning("Khong the xoa tep that bai '%s': %s", file_name, del_err)
+                return None
+
+            time.sleep(delay)
+            delay = min(delay * 1.5, 3.0)
+
+        logger.error("Het thoi gian cho (%ss) de tep '%s' tro thanh ACTIVE. Trang thai cuoi: %s.", timeout, display_name, last_state)
+        try:
+            _delete(file_name)
+        except Exception as del_err:
+            logger.warning("Khong the xoa tep khi het thoi gian '%s': %s", file_name, del_err)
         return None
 
     except Exception as e:
-        logger.error(f"Đã xảy ra lỗi không mong muốn trong quá trình tải tệp lên cho '{display_name}': {e}", exc_info=True)
+        logger.error(f"Da xay ra loi khong mong muon trong qua trinh tai tep len cho '{display_name}': {e}", exc_info=True)
         return None

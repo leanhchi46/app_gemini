@@ -5,6 +5,7 @@ Module để xử lý ghi log, bao gồm log debug của ứng dụng và log qu
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -63,6 +64,15 @@ def setup_logging(config: Optional[LoggingConfig] = None) -> None:
         if root_logger.hasHandlers():
             for handler in root_logger.handlers[:]:
                 root_logger.removeHandler(handler)
+
+        # Ensure stdout uses UTF-8 so Unicode logging does not fail on Windows
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            else:
+                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
         logging.basicConfig(
             level=logging.DEBUG,

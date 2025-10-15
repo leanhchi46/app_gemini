@@ -452,7 +452,10 @@ class AnalysisWorker:
                 images_changed = True
                 self.uploaded_files.append((file_obj, self.paths[index]))
         elif error_msg:
-            raise RuntimeError(error_msg)
+            # Thay vì raise lỗi, chỉ ghi log. Điều này cho phép worker tiếp tục
+            # ngay cả khi upload ảnh thất bại, phù hợp với kịch bản tạm thời
+            # vô hiệu hóa chức năng upload.
+            logger.error(f"Không thể xử lý ảnh tại index {index}: {error_msg}")
 
         return files_processed, images_changed
 
@@ -466,8 +469,7 @@ class AnalysisWorker:
 
         all_media = [f for f in self.file_slots if f is not None]
         if not all_media:
-            logger.error("Không có media nào để gửi đến model. Bỏ qua giai đoạn 4.")
-            return True
+            logger.warning("Khong co media nao duoc upload thanh cong; tiep tuc goi model voi prompt van ban.")
 
         prompt_no_entry = self.app.prompt_manager.get_prompts().get("no_entry", "")
         prompt_entry_run = self.app.prompt_manager.get_prompts().get("entry_run", "")

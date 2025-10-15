@@ -326,7 +326,10 @@ class NewsService:
         timeout_sec: int,
         priority: str,
     ) -> list[dict[str, Any]]:
-        """Thu thập dữ liệu thô từ các provider đã bật."""
+        """
+        Thu thập dữ liệu thô từ các provider đã bật.
+        Logic được thiết kế để vẫn thành công ngay cả khi chỉ một provider hoạt động.
+        """
 
         with self._lock:
             fmp_service = self.fmp_service
@@ -366,11 +369,16 @@ class NewsService:
             provider_records.append((provider_name, transform_fn, record))
 
         aggregated: list[dict[str, Any]] = []
+        successful_providers = 0
         for provider_name, transform_fn, record in provider_records:
             try:
                 raw_data = record.future.result(timeout=timeout_sec)
                 cancel_token.raise_if_cancelled()
+
+                # Một lệnh gọi thành công, ngay cả khi không có dữ liệu, vẫn được tính là thành công.
                 self._record_provider_success(provider_name)
+                successful_providers += 1
+
                 if raw_data:
                     aggregated.extend(transform_fn(raw_data))
             except CancelledError:
@@ -381,6 +389,13 @@ class NewsService:
             except Exception as exc:
                 logger.warning("Provider %s gặp lỗi: %s", provider_name, exc)
                 self._record_provider_failure(provider_name)
+
+        if not successful_providers and provider_records:
+            logger.warning(
+                "Tất cả các nhà cung cấp tin tức (%d) đều thất bại. "
+                "Phân tích sẽ tiếp tục với dữ liệu tin tức trống.",
+                len(provider_records)
+            )
 
         return aggregated
 

@@ -104,6 +104,8 @@ class ChartTab:
         self.acc_leverage = tk.StringVar(value="-")
         self.acc_currency = tk.StringVar(value="-")
         self.acc_status = tk.StringVar(value="Chưa kết nối MT5")
+        self.nt_status = tk.StringVar(value="❓ Không có dữ liệu")
+        self.nt_session_gate = tk.StringVar(value="-")
 
         # UI component handles initialised during build steps
         self.tab = ttk.Frame(self.notebook, padding=8)
