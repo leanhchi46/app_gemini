@@ -131,6 +131,26 @@ class ChartTab:
         self._nt_reasons_box: Optional[scrolledtext.ScrolledText] = None
         self._nt_metrics_box: Optional[scrolledtext.ScrolledText] = None
         self._nt_events_box: Optional[scrolledtext.ScrolledText] = None
+
+        # Matplotlib widgets (được khởi tạo trong quá trình build UI)
+        self.fig: Optional[Figure] = None
+        self.ax_price: Optional[Any] = None
+        self.canvas: Optional[FigureCanvasTkAgg] = None
+        self.toolbar: Optional[NavigationToolbar2Tk] = None
+
+        # Xây dựng layout chính cho tab Chart
+        self.tab = ttk.Frame(self.notebook, padding=8)
+        self.tab.columnconfigure(0, weight=3)
+        self.tab.columnconfigure(1, weight=2)
+        self.tab.rowconfigure(1, weight=1)
+        self.tab.rowconfigure(2, weight=1)
+        self.notebook.add(self.tab, text="Chart")
+
+        self._build_controls()
+        self._build_chart_area()
+        self._build_right_panel()
+        self._build_bottom_grids()
+
         logger.debug("Kết thúc hàm _init_vars.")
 
     def _build_controls(self):
@@ -544,11 +564,11 @@ class ChartTab:
         tasks = [
             (
                 conditions.check_no_trade_conditions,
-                (safe_mt5_data, current_config, self.app.news_service),
+                (safe_mt5_data, run_config, self.app.news_service),
                 {"now_utc": datetime.now(timezone.utc)},
             ),
-            (self.app.news_service.get_upcoming_events, (current_config.mt5.symbol,), {}),
-            (mt5_service.get_history_deals, (current_config.mt5.symbol,), {"days": 7}),
+            (self.app.news_service.get_upcoming_events, (run_config.mt5.symbol,), {}),
+            (mt5_service.get_history_deals, (run_config.mt5.symbol,), {"days": 7}),
         ]
         results = threading_utils.run_in_parallel(tasks)
         cancel_token.raise_if_cancelled()
@@ -566,7 +586,7 @@ class ChartTab:
             "upcoming_events": results.get("get_upcoming_events", []),
             "history_deals": results.get("get_history_deals", []),
             "status_message": "Kết nối MT5 OK",
-            "run_config": current_config,
+            "run_config": run_config,
         }
 
     def _apply_data_updates(self, payload: Dict[str, Any]):
