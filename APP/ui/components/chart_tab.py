@@ -544,11 +544,11 @@ class ChartTab:
         tasks = [
             (
                 conditions.check_no_trade_conditions,
-                (safe_mt5_data, run_config, self.app.news_service),
+                (safe_mt5_data, current_config, self.app.news_service),
                 {"now_utc": datetime.now(timezone.utc)},
             ),
-            (self.app.news_service.get_upcoming_events, (run_config.mt5.symbol,), {}),
-            (mt5_service.get_history_deals, (run_config.mt5.symbol,), {"days": 7}),
+            (self.app.news_service.get_upcoming_events, (current_config.mt5.symbol,), {}),
+            (mt5_service.get_history_deals, (current_config.mt5.symbol,), {"days": 7}),
         ]
         results = threading_utils.run_in_parallel(tasks)
         cancel_token.raise_if_cancelled()
@@ -566,7 +566,7 @@ class ChartTab:
             "upcoming_events": results.get("get_upcoming_events", []),
             "history_deals": results.get("get_history_deals", []),
             "status_message": "Kết nối MT5 OK",
-            "run_config": run_config,
+            "run_config": current_config,
         }
 
     def _apply_data_updates(self, payload: Dict[str, Any]):
