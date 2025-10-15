@@ -1,0 +1,70 @@
+"""Kiểm thử các adapter PyQt6 ở giai đoạn 2."""
+
+from __future__ import annotations
+
+import queue
+
+import pytest
+
+PyQt6 = pytest.importorskip("PyQt6")
+from PyQt6.QtCore import QCoreApplication  # type: ignore[attr-defined]
+
+from APP.ui.pyqt6.event_bridge import QtThreadingAdapter, UiQueueBridge
+from APP.utils.threading_utils import ThreadingManager
+
+
+@pytest.fixture()
+def core_app():
+    app = QCoreApplication.instance() or QCoreApplication([])
+    yield app
+
+
+def test_ui_queue_bridge_executes_callbacks(core_app):
+    bridge = UiQueueBridge(queue.Queue())
+    called: list[str] = []
+
+    bridge.post(lambda: called.append("ran"))
+    processed = bridge.drain_once()
+
+    assert processed == 1
+    assert called == ["ran"]
+
+
+def test_threading_adapter_routes_results_to_ui(core_app):
+    tm = ThreadingManager(max_workers=1)
+    bridge = UiQueueBridge(queue.Queue())
+    adapter = QtThreadingAdapter(tm, bridge)
+
+    results: list[str] = []
+
+    def _job() -> str:
+        return "ok"
+
+    adapter.submit(func=_job, group="test", name="job", on_result=lambda value: results.append(value))
+
+    tm.await_idle(group="test", timeout=5)
+    bridge.drain_once()
+
+    assert results == ["ok"]
+    tm.shutdown(force=True)
+
+
+def test_threading_adapter_routes_errors(core_app):
+    tm = ThreadingManager(max_workers=1)
+    bridge = UiQueueBridge(queue.Queue())
+    adapter = QtThreadingAdapter(tm, bridge)
+
+    errors: list[str] = []
+
+    def _boom() -> None:
+        raise ValueError("bad")
+
+    record = adapter.submit(func=_boom, group="test", name="boom", on_error=lambda exc: errors.append(str(exc)))
+
+    with pytest.raises(ValueError):
+        record.future.result(timeout=5)
+
+    bridge.drain_once()
+
+    assert errors == ["bad"]
+    tm.shutdown(force=True)

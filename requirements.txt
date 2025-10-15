@@ -10,6 +10,7 @@ holidays
 google-generativeai
 
 # UI
+PyQt6
 matplotlib
 mplfinance
 beautifulsoup4

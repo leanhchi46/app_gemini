@@ -42,6 +42,13 @@ from APP.ui.utils import ui_builder
 from APP.ui.utils.timeframe_detector import TimeframeDetector
 from APP.ui.controllers import (AnalysisController, IOController,
                                 MT5Controller, NewsController)
+from APP.ui.state import (
+    AutorunState,
+    PromptState,
+    UiConfigState,
+    parse_mapping_string,
+    parse_priority_keywords,
+)
 from APP.utils import general_utils
 from APP.utils.env_loader import load_dotenv
 from APP.utils.google_ai import GEMINI_AVAILABLE, exceptions
@@ -631,50 +638,11 @@ class AppUI:
             widget.insert("1.0", content)
         widget.config(state=tk.NORMAL)
 
-    def _parse_priority_keywords(self, raw: str) -> list[str]:
-        text = raw.strip()
-        if not text:
-            return []
-        try:
-            parsed = json.loads(text)
-            if isinstance(parsed, list):
-                keywords = [str(item).strip() for item in parsed if str(item).strip()]
-                return keywords
-        except json.JSONDecodeError:
-            pass
-        return [kw.strip() for kw in text.split(",") if kw.strip()]
 
-    def _parse_mapping_string(
-        self, raw: str
-    ) -> dict[str, list[str]] | None:
-        text = raw.strip()
-        if not text:
-            return None
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError as exc:
-            logger.warning("Không thể parse JSON mapping tin tức: %s", exc)
-            return None
-        if not isinstance(parsed, dict):
-            logger.warning("JSON mapping tin tức phải là đối tượng dict, nhận %s", type(parsed))
-            return None
-        normalized: dict[str, list[str]] = {}
-        for key, value in parsed.items():
-            if not key:
-                continue
-            if isinstance(value, (list, tuple, set)):
-                cleaned = [str(item).strip() for item in value if str(item).strip()]
-            else:
-                cleaned = [str(value).strip()] if str(value).strip() else []
-            if cleaned:
-                normalized[key.strip().upper()] = cleaned
-        return normalized or None
 
-    def _collect_config_data(self) -> dict:
-        """
-        Thu thập tất cả các giá trị cấu hình từ các biến Tkinter và trả về một dictionary.
-        """
-        logger.debug("Bắt đầu thu thập dữ liệu cấu hình từ UI.")
+    def _build_config_state(self) -> UiConfigState:
+        """Chuyển đổi trạng thái Tkinter hiện tại sang UiConfigState trung lập."""
+
         summer_schedule = self._gather_killzone_schedule(self.killzone_summer_vars)
         winter_schedule = self._gather_killzone_schedule(self.killzone_winter_vars)
         currency_aliases_raw = self._get_text_widget_content(
@@ -685,134 +653,141 @@ class AppUI:
         )
         self.news_currency_aliases_var.set(currency_aliases_raw)
         self.news_symbol_overrides_var.set(symbol_overrides_raw)
-        keywords_list = self._parse_priority_keywords(self.news_priority_keywords_var.get())
-        currency_aliases = self._parse_mapping_string(currency_aliases_raw)
-        symbol_overrides = self._parse_mapping_string(symbol_overrides_raw)
-        no_run_config: dict[str, Any] = {
-            "weekend_enabled": self.no_run_weekend_enabled_var.get(),
-            "killzone_enabled": self.norun_killzone_var.get(),
-            "holiday_check_enabled": self.no_run_holiday_check_var.get(),
-            "holiday_check_country": self.no_run_holiday_country_var.get(),
-            "timezone": self.no_run_timezone_var.get(),
-        }
-        if summer_schedule:
-            no_run_config["killzone_summer"] = summer_schedule
-        if winter_schedule:
-            no_run_config["killzone_winter"] = winter_schedule
 
-        return {
-            "folder": {
-                "folder_path": self.folder_path.get().strip(),
-                "delete_after": self.delete_after_var.get(),
-                "max_files": self.max_files_var.get(),
-                "only_generate_if_changed": self.only_generate_if_changed_var.get(),
-            },
-            "upload": {
-                "upload_workers": self.upload_workers_var.get(),
-                "cache_enabled": self.cache_enabled_var.get(),
-                "optimize_lossless": self.optimize_lossless_var.get(),
-            },
-            "image_processing": {
-                "max_width": self.image_max_width_var.get(),
-                "jpeg_quality": self.image_jpeg_quality_var.get(),
-            },
-            "api": {
-                "tries": self.api_tries_var.get(),
-                "delay": self.api_delay_var.get(),
-            },
-            "fmp": {
-                "enabled": self.fmp_enabled_var.get(),
-                "api_key": self.fmp_api_key_var.get().strip(),
-            },
-            "te": {
-                "enabled": self.te_enabled_var.get(),
-                "api_key": self.te_api_key_var.get().strip(),
-                "skip_ssl_verify": self.te_skip_ssl_var.get(),
-            },
-            "context": {
-                "ctx_limit": self.context_limit_chars_var.get(),
-                "create_ctx_json": self.create_ctx_json_var.get(),
-                "prefer_ctx_json": self.prefer_ctx_json_var.get(),
-                "ctx_json_n": self.ctx_json_n_var.get(),
-                "remember_context": self.remember_context_var.get(),
-                "n_reports": self.context_n_reports_var.get(),
-            },
-            "telegram": {
-                "enabled": self.telegram_enabled_var.get(),
-                "token": self.telegram_token_var.get().strip(),
-                "chat_id": self.telegram_chat_id_var.get().strip(),
-                "skip_verify": self.telegram_skip_verify_var.get(),
-                "ca_path": self.telegram_ca_path_var.get().strip(),
-                "notify_on_early_exit": self.telegram_notify_early_exit_var.get(),
-            },
-            "mt5": {
-                "enabled": self.mt5_enabled_var.get(),
-                "terminal_path": self.mt5_term_path_var.get().strip(),
-                "symbol": self.mt5_symbol_var.get().strip(),
-                "n_M1": self.mt5_n_M1.get(),
-                "n_M5": self.mt5_n_M5.get(),
-                "n_M15": self.mt5_n_M15.get(),
-                "n_H1": self.mt5_n_H1.get(),
-            },
-            "no_run": no_run_config,
-            "no_trade": {
-                "enabled": self.no_trade_enabled_var.get(),
-                "spread_max_pips": self.nt_spread_max_pips_var.get(),
-                "min_atr_m5_pips": self.nt_min_atr_m5_pips_var.get(),
-                "min_dist_keylvl_pips": self.trade_min_dist_keylvl_pips_var.get(),
-                "allow_session_asia": self.trade_allow_session_asia_var.get(),
-                "allow_session_london": self.trade_allow_session_london_var.get(),
-                "allow_session_ny": self.trade_allow_session_ny_var.get(),
-            },
-            "auto_trade": {
-                "enabled": self.auto_trade_enabled_var.get(),
-                "strict_bias": self.trade_strict_bias_var.get(),
-                "size_mode": self.trade_size_mode_var.get(),
-                "risk_per_trade": self.trade_equity_risk_pct_var.get(),
-                "split_tp_enabled": self.trade_split_tp1_pct_var.get() > 0,
-                "split_tp_ratio": self.trade_split_tp1_pct_var.get(),
-                "deviation": self.trade_deviation_points_var.get(),
-                "magic_number": self.trade_magic_var.get(),
-                "comment": self.trade_comment_prefix_var.get(),
-                "pending_ttl_min": self.trade_pending_ttl_min_var.get(),
-                "min_rr_tp2": self.trade_min_rr_tp2_var.get(),
-                "cooldown_min": self.trade_cooldown_min_var.get(),
-                "dynamic_pending": self.trade_dynamic_pending_var.get(),
-                "dry_run": self.auto_trade_dry_run_var.get(),
-                "move_to_be_after_tp1": self.trade_move_to_be_after_tp1_var.get(),
-                "trailing_atr_mult": self.trade_trailing_atr_mult_var.get(),
-                "filling_type": self.trade_filling_type_var.get(),
-            },
-            "news": {
-                "block_enabled": self.news_block_enabled_var.get(),
-                "block_before_min": self.trade_news_block_before_min_var.get(),
-                "block_after_min": self.trade_news_block_after_min_var.get(),
-                "cache_ttl_sec": self.news_cache_ttl_var.get(),
-                "priority_keywords": keywords_list,
-                "surprise_score_threshold": self.news_surprise_threshold_var.get(),
-                "provider_error_threshold": self.news_provider_error_threshold_var.get(),
-                "provider_error_backoff_sec": self.news_provider_backoff_var.get(),
-                "currency_country_overrides": currency_aliases,
-                "symbol_country_overrides": symbol_overrides,
-            },
-            "persistence": {
-                "max_md_reports": self.persistence_max_md_reports_var.get(),
-            },
-            "prompts": {
-                "prompt_file_path": self.prompt_file_path_var.get().strip(),
-                "auto_load_prompt_txt": self.auto_load_prompt_txt_var.get(),
-            },
-            "model": self.model_var.get(),
-            "autorun": self.autorun_var.get(),
-            "autorun_secs": self.autorun_seconds_var.get(),
-            # Thêm thu thập dữ liệu từ ChartTab
-            "chart": {
-                "timeframe": self.chart_tab.tf_var.get() if self.chart_tab else "M15",
-                "num_candles": self.chart_tab.n_candles_var.get() if self.chart_tab else 150,
-                "chart_type": self.chart_tab.chart_type_var.get() if self.chart_tab else "Nến",
-                "refresh_interval_secs": self.chart_tab.refresh_secs_var.get() if self.chart_tab else 5,
-            },
-        }
+        keywords_list = parse_priority_keywords(self.news_priority_keywords_var.get())
+        currency_aliases = parse_mapping_string(currency_aliases_raw)
+        symbol_overrides = parse_mapping_string(symbol_overrides_raw)
+
+        return UiConfigState(
+            folder=FolderConfig(
+                folder=self.folder_path.get().strip(),
+                delete_after=self.delete_after_var.get(),
+                max_files=self.max_files_var.get(),
+                only_generate_if_changed=self.only_generate_if_changed_var.get(),
+            ),
+            upload=UploadConfig(
+                upload_workers=self.upload_workers_var.get(),
+                cache_enabled=self.cache_enabled_var.get(),
+                optimize_lossless=self.optimize_lossless_var.get(),
+            ),
+            image_processing=ImageProcessingConfig(
+                max_width=self.image_max_width_var.get(),
+                jpeg_quality=self.image_jpeg_quality_var.get(),
+            ),
+            context=ContextConfig(
+                ctx_limit=self.context_limit_chars_var.get(),
+                create_ctx_json=self.create_ctx_json_var.get(),
+                prefer_ctx_json=self.prefer_ctx_json_var.get(),
+                ctx_json_n=self.ctx_json_n_var.get(),
+                remember_context=self.remember_context_var.get(),
+                n_reports=self.context_n_reports_var.get(),
+            ),
+            api=ApiConfig(
+                tries=self.api_tries_var.get(),
+                delay=self.api_delay_var.get(),
+            ),
+            telegram=TelegramConfig(
+                enabled=self.telegram_enabled_var.get(),
+                token=self.telegram_token_var.get().strip(),
+                chat_id=self.telegram_chat_id_var.get().strip(),
+                skip_verify=self.telegram_skip_verify_var.get(),
+                ca_path=self.telegram_ca_path_var.get().strip(),
+                notify_on_early_exit=self.telegram_notify_early_exit_var.get(),
+            ),
+            mt5=MT5Config(
+                enabled=self.mt5_enabled_var.get(),
+                symbol=self.mt5_symbol_var.get().strip(),
+                n_M1=self.mt5_n_M1.get(),
+                n_M5=self.mt5_n_M5.get(),
+                n_M15=self.mt5_n_M15.get(),
+                n_H1=self.mt5_n_H1.get(),
+            ),
+            mt5_terminal_path=self.mt5_term_path_var.get().strip(),
+            no_run=NoRunConfig(
+                weekend_enabled=self.no_run_weekend_enabled_var.get(),
+                killzone_enabled=self.norun_killzone_var.get(),
+                holiday_check_enabled=self.no_run_holiday_check_var.get(),
+                holiday_check_country=self.no_run_holiday_country_var.get(),
+                timezone=self.no_run_timezone_var.get(),
+                killzone_summer=summer_schedule,
+                killzone_winter=winter_schedule,
+            ),
+            no_trade=NoTradeConfig(
+                enabled=self.no_trade_enabled_var.get(),
+                spread_max_pips=self.nt_spread_max_pips_var.get(),
+                min_atr_m5_pips=self.nt_min_atr_m5_pips_var.get(),
+                min_dist_keylvl_pips=self.trade_min_dist_keylvl_pips_var.get(),
+                allow_session_asia=self.trade_allow_session_asia_var.get(),
+                allow_session_london=self.trade_allow_session_london_var.get(),
+                allow_session_ny=self.trade_allow_session_ny_var.get(),
+            ),
+            auto_trade=AutoTradeConfig(
+                enabled=self.auto_trade_enabled_var.get(),
+                strict_bias=self.trade_strict_bias_var.get(),
+                size_mode=self.trade_size_mode_var.get(),
+                risk_per_trade=self.trade_equity_risk_pct_var.get(),
+                split_tp_enabled=self.trade_split_tp1_pct_var.get() > 0,
+                split_tp_ratio=self.trade_split_tp1_pct_var.get(),
+                deviation=self.trade_deviation_points_var.get(),
+                magic_number=self.trade_magic_var.get(),
+                comment=self.trade_comment_prefix_var.get(),
+                pending_ttl_min=self.trade_pending_ttl_min_var.get(),
+                min_rr_tp2=self.trade_min_rr_tp2_var.get(),
+                cooldown_min=self.trade_cooldown_min_var.get(),
+                dynamic_pending=self.trade_dynamic_pending_var.get(),
+                dry_run=self.auto_trade_dry_run_var.get(),
+                move_to_be_after_tp1=self.trade_move_to_be_after_tp1_var.get(),
+                trailing_atr_mult=self.trade_trailing_atr_mult_var.get(),
+                filling_type=self.trade_filling_type_var.get(),
+            ),
+            news=NewsConfig(
+                block_enabled=self.news_block_enabled_var.get(),
+                block_before_min=self.trade_news_block_before_min_var.get(),
+                block_after_min=self.trade_news_block_after_min_var.get(),
+                cache_ttl_sec=self.news_cache_ttl_var.get(),
+                priority_keywords=tuple(keywords_list) if keywords_list else None,
+                surprise_score_threshold=self.news_surprise_threshold_var.get(),
+                provider_error_threshold=self.news_provider_error_threshold_var.get(),
+                provider_error_backoff_sec=self.news_provider_backoff_var.get(),
+                currency_country_overrides=currency_aliases,
+                symbol_country_overrides=symbol_overrides,
+            ),
+            persistence=PersistenceConfig(
+                max_md_reports=self.persistence_max_md_reports_var.get()
+            ),
+            fmp=FMPConfig(
+                enabled=self.fmp_enabled_var.get(),
+                api_key=self.fmp_api_key_var.get().strip(),
+            ),
+            te=TEConfig(
+                enabled=self.te_enabled_var.get(),
+                api_key=self.te_api_key_var.get().strip(),
+                skip_ssl_verify=self.te_skip_ssl_var.get(),
+            ),
+            chart=ChartConfig(
+                timeframe=self.chart_tab.tf_var.get() if self.chart_tab else "M15",
+                num_candles=self.chart_tab.n_candles_var.get() if self.chart_tab else 150,
+                chart_type=self.chart_tab.chart_type_var.get() if self.chart_tab else "Nến",
+                refresh_interval_secs=self.chart_tab.refresh_secs_var.get() if self.chart_tab else 5,
+            ),
+            model=self.model_var.get(),
+            autorun=AutorunState(
+                enabled=self.autorun_var.get(),
+                interval_secs=self.autorun_seconds_var.get(),
+            ),
+            prompt=PromptState(
+                file_path=self.prompt_file_path_var.get().strip(),
+                auto_load_from_disk=self.auto_load_prompt_txt_var.get(),
+            ),
+        )
+
+    def _collect_config_data(self) -> dict:
+        """
+        Thu thập tất cả các giá trị cấu hình từ các biến Tkinter và trả về một dictionary.
+        """
+        logger.debug("Bắt đầu thu thập dữ liệu cấu hình từ UI.")
+        state = self._build_config_state()
+        return state.to_workspace_payload()
 
     def apply_config(self, config_data: dict):
         """
@@ -1011,135 +986,16 @@ class AppUI:
         self._update_services_config()
 
         logger.info("Đã áp dụng cấu hình lên UI thành công.")
+
+
     def _snapshot_config(self) -> "RunConfig":
         """
         Chụp lại toàn bộ trạng thái cấu hình hiện tại từ giao diện người dùng
         và trả về một đối tượng RunConfig đã được nhóm lại.
         """
         logger.debug("Bắt đầu chụp ảnh nhanh cấu hình từ UI.")
-        summer_schedule = self._gather_killzone_schedule(self.killzone_summer_vars)
-        winter_schedule = self._gather_killzone_schedule(self.killzone_winter_vars)
-        currency_aliases_raw = self._get_text_widget_content(
-            self.news_currency_aliases_text, self.news_currency_aliases_var
-        )
-        symbol_overrides_raw = self._get_text_widget_content(
-            self.news_symbol_overrides_text, self.news_symbol_overrides_var
-        )
-        keywords_list = self._parse_priority_keywords(self.news_priority_keywords_var.get())
-        currency_aliases = self._parse_mapping_string(currency_aliases_raw)
-        symbol_overrides = self._parse_mapping_string(symbol_overrides_raw)
-        return RunConfig(
-            folder=FolderConfig(
-                folder=self.folder_path.get(),
-                delete_after=self.delete_after_var.get(),
-                max_files=self.max_files_var.get(),
-                only_generate_if_changed=self.only_generate_if_changed_var.get(),
-            ),
-            upload=UploadConfig(
-                upload_workers=self.upload_workers_var.get(),
-                cache_enabled=self.cache_enabled_var.get(),
-                optimize_lossless=self.optimize_lossless_var.get(),
-            ),
-            image_processing=ImageProcessingConfig(
-                max_width=self.image_max_width_var.get(),
-                jpeg_quality=self.image_jpeg_quality_var.get(),
-            ),
-            context=ContextConfig(
-                ctx_limit=self.context_limit_chars_var.get(),
-                create_ctx_json=self.create_ctx_json_var.get(),
-                prefer_ctx_json=self.prefer_ctx_json_var.get(),
-                ctx_json_n=self.ctx_json_n_var.get(),
-                remember_context=self.remember_context_var.get(),
-                n_reports=self.context_n_reports_var.get(),
-            ),
-            api=ApiConfig(
-                tries=self.api_tries_var.get(),
-                delay=self.api_delay_var.get(),
-            ),
-            fmp=FMPConfig(
-                enabled=self.fmp_enabled_var.get(),
-                api_key=self.fmp_api_key_var.get(),
-            ),
-            te=TEConfig(
-                enabled=self.te_enabled_var.get(),
-                api_key=self.te_api_key_var.get(),
-                skip_ssl_verify=self.te_skip_ssl_var.get(),
-            ),
-            telegram=TelegramConfig(
-                enabled=self.telegram_enabled_var.get(),
-                token=self.telegram_token_var.get(),
-                chat_id=self.telegram_chat_id_var.get(),
-                skip_verify=self.telegram_skip_verify_var.get(),
-                ca_path=self.telegram_ca_path_var.get(),
-                notify_on_early_exit=self.telegram_notify_early_exit_var.get(),
-            ),
-            mt5=MT5Config(
-                enabled=self.mt5_enabled_var.get(),
-                symbol=self.mt5_symbol_var.get(),
-                n_M1=self.mt5_n_M1.get(),
-                n_M5=self.mt5_n_M5.get(),
-                n_M15=self.mt5_n_M15.get(),
-                n_H1=self.mt5_n_H1.get(),
-            ),
-            no_run=NoRunConfig(
-                weekend_enabled=self.no_run_weekend_enabled_var.get(),
-                killzone_enabled=self.norun_killzone_var.get(),
-                holiday_check_enabled=self.no_run_holiday_check_var.get(),
-                holiday_check_country=self.no_run_holiday_country_var.get(),
-                timezone=self.no_run_timezone_var.get(),
-                killzone_summer=summer_schedule,
-                killzone_winter=winter_schedule,
-            ),
-            no_trade=NoTradeConfig(
-                enabled=self.no_trade_enabled_var.get(),
-                spread_max_pips=self.nt_spread_max_pips_var.get(),
-                min_atr_m5_pips=self.nt_min_atr_m5_pips_var.get(),
-                min_dist_keylvl_pips=self.trade_min_dist_keylvl_pips_var.get(),
-                allow_session_asia=self.trade_allow_session_asia_var.get(),
-                allow_session_london=self.trade_allow_session_london_var.get(),
-                allow_session_ny=self.trade_allow_session_ny_var.get(),
-            ),
-            auto_trade=AutoTradeConfig(
-                enabled=self.auto_trade_enabled_var.get(),
-                strict_bias=self.trade_strict_bias_var.get(),
-                size_mode=self.trade_size_mode_var.get(),
-                risk_per_trade=self.trade_equity_risk_pct_var.get(),
-                split_tp_enabled=self.trade_split_tp1_pct_var.get() > 0,
-                split_tp_ratio=self.trade_split_tp1_pct_var.get(),
-                deviation=self.trade_deviation_points_var.get(),
-                magic_number=self.trade_magic_var.get(),
-                comment=self.trade_comment_prefix_var.get(),
-                pending_ttl_min=self.trade_pending_ttl_min_var.get(),
-                min_rr_tp2=self.trade_min_rr_tp2_var.get(),
-                cooldown_min=self.trade_cooldown_min_var.get(),
-                dynamic_pending=self.trade_dynamic_pending_var.get(),
-                dry_run=self.auto_trade_dry_run_var.get(),
-                move_to_be_after_tp1=self.trade_move_to_be_after_tp1_var.get(),
-                trailing_atr_mult=self.trade_trailing_atr_mult_var.get(),
-                filling_type=self.trade_filling_type_var.get(),
-            ),
-            news=NewsConfig(
-                block_enabled=self.news_block_enabled_var.get(),
-                block_before_min=self.trade_news_block_before_min_var.get(),
-                block_after_min=self.trade_news_block_after_min_var.get(),
-                cache_ttl_sec=self.news_cache_ttl_var.get(),
-                priority_keywords=tuple(keywords_list) if keywords_list else None,
-                surprise_score_threshold=self.news_surprise_threshold_var.get(),
-                provider_error_threshold=self.news_provider_error_threshold_var.get(),
-                provider_error_backoff_sec=self.news_provider_backoff_var.get(),
-                currency_country_overrides=currency_aliases,
-                symbol_country_overrides=symbol_overrides,
-            ),
-            persistence=PersistenceConfig(
-                max_md_reports=self.persistence_max_md_reports_var.get()
-            ),
-            chart=ChartConfig(
-                timeframe=self.chart_tab.tf_var.get() if self.chart_tab else "M15",
-                num_candles=self.chart_tab.n_candles_var.get() if self.chart_tab else 150,
-                chart_type=self.chart_tab.chart_type_var.get() if self.chart_tab else "Nến",
-                refresh_interval_secs=self.chart_tab.refresh_secs_var.get() if self.chart_tab else 5,
-            ),
-        )
+        state = self._build_config_state()
+        return state.to_run_config()
 
     def _save_workspace(self):
         """Bắt đầu quá trình lưu cấu hình workspace trong luồng nền."""
