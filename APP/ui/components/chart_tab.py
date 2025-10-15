@@ -128,8 +128,9 @@ class ChartTab:
         # Biến cho panel No-Trade
         self.nt_status = tk.StringVar(value="Đang tải...")
         self.nt_session_gate = tk.StringVar(value="-")
-        self.nt_reasons = tk.StringVar(value="")
-        self.nt_events = tk.StringVar(value="")
+        self._nt_reasons_box: Optional[scrolledtext.ScrolledText] = None
+        self._nt_metrics_box: Optional[scrolledtext.ScrolledText] = None
+        self._nt_events_box: Optional[scrolledtext.ScrolledText] = None
         logger.debug("Kết thúc hàm _init_vars.")
 
     def _build_controls(self):
@@ -541,7 +542,11 @@ class ChartTab:
             return {"mt5_data": None, "status_message": "Không lấy được dữ liệu MT5."}
 
         tasks = [
-            (conditions.check_no_trade_conditions, (safe_mt5_data, current_config, self.app.news_service), {}),
+            (
+                conditions.check_no_trade_conditions,
+                (safe_mt5_data, current_config, self.app.news_service),
+                {"now_utc": datetime.now(timezone.utc)},
+            ),
             (self.app.news_service.get_upcoming_events, (current_config.mt5.symbol,), {}),
             (mt5_service.get_history_deals, (current_config.mt5.symbol,), {"days": 7}),
         ]
@@ -561,6 +566,7 @@ class ChartTab:
             "upcoming_events": results.get("get_upcoming_events", []),
             "history_deals": results.get("get_history_deals", []),
             "status_message": "Kết nối MT5 OK",
+            "run_config": current_config,
         }
 
     def _apply_data_updates(self, payload: Dict[str, Any]):
