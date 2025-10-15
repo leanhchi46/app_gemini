@@ -687,7 +687,7 @@ class ChartTab:
             }
             tf_code = tf_map.get(stream_config.timeframe, mt5_service.mt5.TIMEFRAME_M15)
             cnt = stream_config.candles
->>>>>>> theirs
+
 
         key_metrics = metrics.key_levels
         if key_metrics.nearest and key_metrics.nearest.distance_pips is not None:
