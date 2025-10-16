@@ -97,31 +97,3 @@ class NewsFakeFeed(_AsyncQtEmitter):
 
     def push_news(self, items: Sequence[Dict[str, Any]], *, delay_ms: int = 0) -> None:
         self._emit_async(self.news_refreshed, list(items), delay_ms=delay_ms)
-
-
-@pytest.fixture
-def mt5_fake_gateway() -> Mt5FakeGateway:
-    """Provide a Qt-driven fake MT5 gateway for PyQt6 UI tests."""
-
-    gateway = Mt5FakeGateway()
-    yield gateway
-    gateway.deleteLater()
-
-
-@pytest.fixture
-def gemini_fake_client() -> GeminiFakeClient:
-    """Provide a Qt-driven fake Gemini client for PyQt6 UI tests."""
-
-    client = GeminiFakeClient()
-    yield client
-    client.deleteLater()
-
-
-@pytest.fixture
-def news_fake_feed() -> NewsFakeFeed:
-    """Provide a Qt-driven fake news feed for PyQt6 UI tests."""
-
-    feed = NewsFakeFeed()
-    yield feed
-    feed.deleteLater()
-

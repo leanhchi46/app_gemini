@@ -18,3 +18,4 @@ cloudscraper
 fmp-py
 tradingeconomics
 pytest-xdist
+pytest-qt

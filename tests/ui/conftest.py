@@ -172,6 +172,27 @@ def config_state(tmp_path: Path) -> UiConfigState:
     )
 
 
+@pytest.fixture
+def mt5_fake_gateway(qapp) -> "Mt5FakeGateway":
+    from tests.ui.pyqt6_fakes import Mt5FakeGateway
+    gateway = Mt5FakeGateway()
+    yield gateway
+    gateway.deleteLater()
+
+@pytest.fixture
+def gemini_fake_client(qapp) -> "GeminiFakeClient":
+    from tests.ui.pyqt6_fakes import GeminiFakeClient
+    client = GeminiFakeClient()
+    yield client
+    client.deleteLater()
+
+@pytest.fixture
+def news_fake_feed(qapp) -> "NewsFakeFeed":
+    from tests.ui.pyqt6_fakes import NewsFakeFeed
+    feed = NewsFakeFeed()
+    yield feed
+    feed.deleteLater()
+
 @pytest.fixture()
 def pyqt_threading_adapter(qtbot) -> PyQtThreadingHarness:
     """Cung cấp Qt threading adapter thật giúp test quan sát signal/queue."""
