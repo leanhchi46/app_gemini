@@ -403,6 +403,7 @@ class StubDialogProvider:
         return ShutdownDialog()
 
 
+@pytest.mark.xdist_group(name="ui")
 def test_main_window_prompt_flow(qapp, config_state: UiConfigState, tmp_path: Path) -> None:
     prompt_path = Path(config_state.prompt.file_path)
     prompt_path.write_text(
@@ -424,6 +425,7 @@ def test_main_window_prompt_flow(qapp, config_state: UiConfigState, tmp_path: Pa
         assert "Xin chào" in window.prompt_tab.no_entry_editor.toPlainText()
 
 
+@pytest.mark.xdist_group(name="ui")
 def test_main_window_history_open_json(tmp_path: Path, qapp, config_state: UiConfigState) -> None:
     dialogs = StubDialogProvider(tmp_path)
 
@@ -438,6 +440,7 @@ def test_main_window_history_open_json(tmp_path: Path, qapp, config_state: UiCon
         assert dialogs.json_dialogs and dialogs.json_dialogs[0].endswith("ctx_1.json")
 
 
+@pytest.mark.xdist_group(name="ui")
 def test_main_window_history_open_markdown(tmp_path: Path, qapp, config_state: UiConfigState) -> None:
     dialogs = StubDialogProvider(tmp_path)
 
@@ -451,6 +454,7 @@ def test_main_window_history_open_markdown(tmp_path: Path, qapp, config_state: U
 
         assert dialogs.opened_paths and dialogs.opened_paths[0] == str(md_file.parent)
 
+@pytest.mark.xdist_group(name="ui")
 def test_main_window_history_refresh_and_preview(qapp, config_state: UiConfigState, tmp_path: Path) -> None:
     workspace = Path(config_state.folder.folder)
     reports_dir = workspace / "XAUUSD" / "Reports"
@@ -478,6 +482,7 @@ def test_main_window_history_refresh_and_preview(qapp, config_state: UiConfigSta
     assert "Báo cáo" in window.history_tab.preview_box.toPlainText()
 
 
+@pytest.mark.xdist_group(name="ui")
 def test_main_window_reports_refresh_and_delete(qapp, config_state: UiConfigState, tmp_path: Path) -> None:
     workspace = Path(config_state.folder.folder)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -501,6 +506,7 @@ def test_main_window_reports_refresh_and_delete(qapp, config_state: UiConfigStat
     assert not report_file.exists()
 
 
+@pytest.mark.xdist_group(name="ui")
 def test_main_window_options_updates(qapp, config_state: UiConfigState, tmp_path: Path) -> None:
     ui_queue: queue.Queue = queue.Queue()
     bridge = UiQueueBridge(ui_queue)
@@ -523,6 +529,7 @@ def test_main_window_options_updates(qapp, config_state: UiConfigState, tmp_path
     assert any(".env" in line for line in window.overview_tab.log_view.toPlainText().splitlines())
 
 
+@pytest.mark.xdist_group(name="ui")
 def test_main_window_snapshot_ui_state(qapp, config_state: UiConfigState, tmp_path: Path) -> None:
     ui_queue: queue.Queue = queue.Queue()
     bridge = UiQueueBridge(ui_queue)
@@ -543,6 +550,7 @@ def test_main_window_snapshot_ui_state(qapp, config_state: UiConfigState, tmp_pa
     assert state.chart.timeframe == "H1"
 
 
+@pytest.mark.xdist_group(name="ui")
 def test_main_window_build_workspace_payload(qapp, config_state: UiConfigState, tmp_path: Path) -> None:
     ui_queue: queue.Queue = queue.Queue()
     bridge = UiQueueBridge(ui_queue)
@@ -574,6 +582,7 @@ def test_main_window_build_workspace_payload(qapp, config_state: UiConfigState, 
     assert payload["api_keys"]["google_ai"] == "secret"
 
 
+@pytest.mark.xdist_group(name="ui")
 def test_main_window_ui_status_and_log(qapp, config_state: UiConfigState, tmp_path: Path) -> None:
     ui_queue: queue.Queue = queue.Queue()
     bridge = UiQueueBridge(ui_queue)
@@ -591,6 +600,7 @@ def test_main_window_ui_status_and_log(qapp, config_state: UiConfigState, tmp_pa
     assert dialogs.info_messages[-1] == ("Thông báo", "Hoàn tất")
 
 
+@pytest.mark.xdist_group(name="ui")
 def test_main_window_ui_progress_modes(qapp, config_state: UiConfigState, tmp_path: Path) -> None:
     dialogs = StubDialogProvider(tmp_path)
 
@@ -614,6 +624,7 @@ def test_main_window_ui_progress_modes(qapp, config_state: UiConfigState, tmp_pa
         assert not window.overview_tab.progress_bar.isVisible()
 
 
+@pytest.mark.xdist_group(name="ui")
 def test_main_window_ui_detail_and_error(qapp, config_state: UiConfigState, tmp_path: Path) -> None:
     ui_queue: queue.Queue = queue.Queue()
     bridge = UiQueueBridge(ui_queue)

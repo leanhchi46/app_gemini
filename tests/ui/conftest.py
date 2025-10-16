@@ -55,7 +55,11 @@ class PyQtThreadingHarness:
     def await_idle(self, *, group: str | None = None, timeout: float = 5.0) -> None:
         """Chờ ThreadingManager hoàn tất group và drain hàng đợi UI."""
 
-        self.threading_manager.await_idle(group=group, timeout=timeout)
+        def is_idle() -> bool:
+            self.pump_events()
+            return self.threading_manager.is_idle(group=group)
+
+        self.qtbot.waitUntil(is_idle, timeout=int(timeout * 1000))
         self.pump_events()
 
     def close(self) -> None:
