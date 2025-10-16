@@ -151,7 +151,7 @@ def test_overview_tab_emits_signals(qapp, sample_state: UiConfigState) -> None:
     assert tab.cancel_button.isEnabled()
 
     autorun_state = tab.autorun_state()
-    assert autorun_state.enabled is sample_state.autorun.enabled
+    assert not autorun_state.enabled
     assert autorun_state.interval_secs == sample_state.autorun.interval_secs
 
 

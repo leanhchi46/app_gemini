@@ -8,6 +8,7 @@ certifi
 scikit-learn
 holidays
 google-generativeai
+pytz
 
 # UI
 PyQt6
