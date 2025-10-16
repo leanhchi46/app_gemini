@@ -50,6 +50,9 @@
 - Bổ sung cảnh báo backlog và ngưỡng loại bỏ cho `UiQueueBridge`, cho phép cấu hình trực tiếp từ `PyQtApplication` để đồng bộ hành vi với Tkinter.
 - Tham số hoá ngưỡng queue UI (cảnh báo/loại bỏ) giúp giảm nguy cơ backlog trong môi trường thật và cấu hình lớn.
 - Bổ sung test PyQt6 bao phủ cảnh báo backlog, hành vi loại bỏ callback và việc reset state của `PyQtAnalysisAppAdapter` trước mỗi phiên phân tích.
+- Thiết lập harness `pyqt_threading_adapter` trên pytest để bảo đảm mọi signal/callback chạy qua `UiQueueBridge` trước khi assert.
+- Viết kiểm thử tích hợp `test_pyqt6_threading_integration.py` xác nhận các luồng manual analysis, news refresh, upload cache và autorun cập nhật UI khi đi qua ThreadingManager.
+- Cập nhật checklist kiểm thử thủ công & tài liệu triển khai với kết quả thực thi (autorun, lỗi provider news, blackout, tải/lưu workspace) sau khi hoàn tất vòng test.
 
 ## Checklist theo giai đoạn
 
@@ -89,8 +92,23 @@
 - [x] Đồng bộ lại cấu hình Options cho services và kích hoạt autorun tin tức sau mỗi thay đổi.
 - [x] Bổ sung kiểm thử PyQt6 xác nhận bridge controller (prompt/news/chart) hoạt động chính xác.
 - [x] Hoàn thiện adapter AnalysisController cùng cơ chế autorun PyQt6 (QTimer, cập nhật trạng thái session).
+- [x] Thay thế `queue.Queue` bằng cơ chế signal/QMetaObject theo dõi backlog, giữ nguyên cảnh báo và ngưỡng loại bỏ để bảo đảm hành vi cũ.
+- [x] Đảm bảo `NewsService`, `gemini_service`, `mt5_service` chạy nền đúng `RunConfig` thông qua state PyQt6 mới.
 
 ### Giai đoạn 5 - Kiểm thử & hardening
 - [x] Thêm cảnh báo backlog và ngưỡng loại bỏ vào `UiQueueBridge`, cấu hình được từ `PyQtApplication`.
 - [x] Bổ sung test PyQt6 cho cảnh báo/loại bỏ backlog và việc chuẩn bị state của adapter phân tích.
-- [x] Cập nhật tài liệu giai đoạn 5 cùng checklist chi tiết.
+- [x] Rà soát và cập nhật toàn bộ kiểm thử tích hợp với MT5, Gemini, upload cache để đảm bảo UI mới không phá vỡ luồng nghiệp vụ.
+  - [x] Điều chỉnh fixture và fake API cho MT5/Gemini để phát tín hiệu PyQt6 thay cho callback Tkinter cũ.
+    - [x] Nâng cấp fixture `mt5_fake_gateway` và `gemini_fake_client` để chèn `QtCore.Signal`/`QTimer.singleShot`, loại bỏ phụ thuộc `after()`.
+    - [x] Cập nhật fake API phát emit signal `price_updated`, `news_refreshed` và dùng `QSignalSpy` xác thực trong test.
+    - [x] Điều chỉnh pytest fixture `qtbot`/`pyqt_threading_adapter` đảm bảo signal trả về thông qua `UiQueueBridge` trước khi assert (harness mới tự động drain queue và chờ ThreadingManager). 
+  - [x] Bảo đảm bài kiểm thử upload cache vẫn kích hoạt luồng `ThreadingManager` qua signal PyQt6 và xác nhận trạng thái UI (case `analysis.upload` trong `test_pyqt6_threading_integration.py`).
+  - [x] Bổ sung assertion cho đường dẫn nghiệp vụ chính (autorun, đồng bộ lệnh, ghi log) sau khi chuyển sang UI mới (autorun stub, log status trong kiểm thử tích hợp mới).
+- [x] Thực hiện kiểm thử thủ công: autorun sessions, xử lý lỗi provider news, blackout no-trade, tải/lưu workspace (bao gồm mã hoá) – checklist đã chạy và ghi nhận kết quả PASS cho từng kịch bản.
+- [x] Cập nhật tài liệu hướng dẫn sử dụng và quy trình triển khai sau khi hoàn tất kiểm thử.
+
+### Giai đoạn 6 – Chuyển giao & dọn dẹp
+- [ ] Xoá hoặc vô hiệu hóa dần các module Tkinter còn lại, bảo đảm mã chính không còn phụ thuộc `tkinter`.
+- [ ] Cập nhật script khởi chạy (`main.py`) để mặc định dùng PyQt6, cung cấp flag fallback trong thời gian chuyển tiếp.
+- [ ] Rà soát cấu trúc gói để chắc chắn các module UI mới tuân thủ chuẩn logging, cấu hình và threading của dự án.
