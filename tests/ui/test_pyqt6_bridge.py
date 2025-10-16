@@ -17,7 +17,12 @@ from APP.utils.threading_utils import ThreadingManager
 @pytest.fixture()
 def core_app():
     app = QCoreApplication.instance() or QCoreApplication([])
-    yield app
+    try:
+        yield app
+    finally:
+        app.quit()
+        while app and app.thread().isRunning():
+            app.processEvents()
 
 
 def test_ui_queue_bridge_executes_callbacks(core_app):
@@ -29,6 +34,7 @@ def test_ui_queue_bridge_executes_callbacks(core_app):
 
     assert processed == 1
     assert called == ["ran"]
+    bridge.stop()
 
 
 def test_ui_queue_bridge_warns_on_backlog(core_app, caplog):
@@ -76,6 +82,7 @@ def test_threading_adapter_routes_results_to_ui(core_app):
     bridge.drain_once()
 
     assert results == ["ok"]
+    bridge.stop()
     tm.shutdown(force=True)
 
 
@@ -97,4 +104,5 @@ def test_threading_adapter_routes_errors(core_app):
     bridge.drain_once()
 
     assert errors == ["bad"]
+    bridge.stop()
     tm.shutdown(force=True)

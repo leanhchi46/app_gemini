@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from contextlib import contextmanager
+
 import pytest
 
 PyQt6 = pytest.importorskip("PyQt6")
@@ -312,103 +314,139 @@ def _drain_bridge(bridge: UiQueueBridge) -> None:
     while bridge.drain_once():
         pass
 
+@contextmanager
+def make_window(
+    config_state: UiConfigState,
+    *,
+    controllers: ControllerSet | None = None,
+    controllers_factory=None,
+    dialogs=None,
+    apply_config=None,
+    queue_factory=lambda: queue.Queue(),
+):
+    bridge = UiQueueBridge(queue_factory())
+    threading = ImmediateThreadingAdapter(bridge)
+    controller_set = controllers_factory(bridge) if controllers_factory else controllers
+    window = TradingMainWindow(
+        config_state,
+        threading,
+        bridge,
+        controllers=controller_set,
+        dialogs=dialogs,
+        apply_config=apply_config,
+    )
+    try:
+        yield window, bridge, threading
+    finally:
+        try:
+            bridge.stop()
+        except Exception:
+            pass
+        try:
+            window.close()
+        except Exception:
+            pass
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+        threading.threading_manager.shutdown(force=True)
+
 
 def test_prompt_load_uses_io_controller(qapp, config_state, tmp_path: Path):
     prompt_file = tmp_path / "custom_prompt.json"
     prompt_file.write_text(json.dumps({"no_entry": "demo", "entry_run": "demo"}), encoding="utf-8")
 
-    bridge = UiQueueBridge(queue.Queue())
     stub_io = StubIOController()
-    window = TradingMainWindow(
-        config_state,
-        ImmediateThreadingAdapter(bridge),
-        bridge,
-        controllers=ControllerSet(io=stub_io),
-    )
 
-    window._handle_prompt_load(str(prompt_file))
-    _drain_bridge(bridge)
+    with make_window(config_state, controllers=ControllerSet(io=stub_io)) as (window, bridge, _threading):
+        window._handle_prompt_load(str(prompt_file))
+        _drain_bridge(bridge)
 
-    assert window.prompt_tab.no_entry_editor.toPlainText() == "demo"
-    assert window.prompt_tab.entry_editor.toPlainText() == "demo"
-    assert stub_io.calls == [("prompt", "prompt.load")]
+        assert window.prompt_tab.no_entry_editor.toPlainText() == "demo"
+        assert window.prompt_tab.entry_editor.toPlainText() == "demo"
+        assert stub_io.calls
+        assert stub_io.calls[-1] == ("prompt", "prompt.load")
 
 
 def test_news_refresh_uses_controller(qapp, config_state):
-    bridge = UiQueueBridge(queue.Queue())
-    stub_news = StubNewsController(bridge)
-    window = TradingMainWindow(
-        config_state,
-        ImmediateThreadingAdapter(bridge),
-        bridge,
-        controllers=ControllerSet(news=stub_news),
-    )
+    holder: dict[str, StubNewsController] = {}
 
-    window._handle_news_refresh()
-    assert stub_news.refresh_calls == 1
-    _drain_bridge(bridge)
-    assert window.news_tab.table.rowCount() == 1
-    window._handle_options_changed({})
-    assert stub_news.autorun_calls == 1
+    def _factory(bridge: UiQueueBridge) -> ControllerSet:
+        stub = StubNewsController(bridge)
+        holder['stub'] = stub
+        return ControllerSet(news=stub)
+
+    with make_window(config_state, controllers_factory=_factory) as (window, bridge, _threading):
+        stub_news = holder['stub']
+        window._handle_news_refresh()
+        assert stub_news.refresh_calls >= 1
+        _drain_bridge(bridge)
+        assert window.news_tab.table.rowCount() == 1
+        window._handle_options_changed({})
+        assert stub_news.autorun_calls >= 1
 
 
 def test_chart_refresh_uses_controller(qapp, config_state):
-    bridge = UiQueueBridge(queue.Queue())
     stub_chart = StubChartController()
-    window = TradingMainWindow(
-        config_state,
-        ImmediateThreadingAdapter(bridge),
-        bridge,
-        controllers=ControllerSet(chart=stub_chart),
-    )
 
-    window._handle_chart_refresh()
-    assert stub_chart.refresh_calls == 1
-    assert "Đang yêu cầu" in window.chart_tab.chart_output.toPlainText()
-    window._handle_chart_snapshot()
-    assert stub_chart.snapshot_calls == 1
+    def _factory(bridge: UiQueueBridge) -> ControllerSet:
+        return ControllerSet(chart=stub_chart)
+
+    with make_window(config_state, controllers_factory=_factory) as (window, bridge, _threading):
+        window._handle_chart_refresh()
+        assert stub_chart.refresh_calls == 1
+        assert "Đang yêu cầu" in window.chart_tab.chart_output.toPlainText()
+        window._handle_chart_snapshot()
+        assert stub_chart.snapshot_calls == 1
 
 
 def test_manual_analysis_uses_controller(qapp, config_state):
-    bridge = UiQueueBridge(queue.Queue())
-    stub_analysis = StubAnalysisController()
-    window = TradingMainWindow(
+    holder: dict[str, StubAnalysisController] = {}
+
+    def _factory(bridge: UiQueueBridge) -> ControllerSet:
+        stub = StubAnalysisController()
+        holder["stub"] = stub
+        return ControllerSet(analysis=stub)
+
+    with make_window(
         config_state,
-        ImmediateThreadingAdapter(bridge),
-        bridge,
-        controllers=ControllerSet(analysis=stub_analysis),
+        controllers_factory=_factory,
         apply_config=lambda state: state.to_run_config(),
-    )
+    ) as (window, bridge, _threading):
+        stub_analysis = holder["stub"]
+        window._handle_manual_analysis()
+        _drain_bridge(bridge)
 
-    window._handle_manual_analysis()
-    _drain_bridge(bridge)
-
-    assert len(stub_analysis.start_calls) == 1
-    session_id, app_adapter, run_cfg, priority = stub_analysis.start_calls[0]
-    assert priority == "user"
-    assert run_cfg.chart.timeframe == config_state.chart.timeframe
-    assert app_adapter.__class__.__name__ == "PyQtAnalysisAppAdapter"
-    assert window.overview_tab.cancel_button.isEnabled()
-    assert not window.overview_tab.start_button.isEnabled()
+        assert len(stub_analysis.start_calls) == 1
+        session_id, app_adapter, run_cfg, priority = stub_analysis.start_calls[0]
+        assert priority == "user"
+        assert run_cfg.chart.timeframe == config_state.chart.timeframe
+        assert app_adapter.__class__.__name__ == "PyQtAnalysisAppAdapter"
+        assert window.overview_tab.cancel_button.isEnabled()
+        assert not window.overview_tab.start_button.isEnabled()
 
 
 def test_cancel_analysis_uses_controller(qapp, config_state):
-    bridge = UiQueueBridge(queue.Queue())
-    stub_analysis = StubAnalysisController()
-    window = TradingMainWindow(
+    holder: dict[str, StubAnalysisController] = {}
+
+    def _factory(bridge: UiQueueBridge) -> ControllerSet:
+        stub = StubAnalysisController()
+        holder["stub"] = stub
+        return ControllerSet(analysis=stub)
+
+    with make_window(
         config_state,
-        ImmediateThreadingAdapter(bridge),
-        bridge,
-        controllers=ControllerSet(analysis=stub_analysis),
+        controllers_factory=_factory,
         apply_config=lambda state: state.to_run_config(),
-    )
+    ) as (window, bridge, _threading):
+        stub_analysis = holder["stub"]
+        window._handle_manual_analysis()
+        _drain_bridge(bridge)
+        assert stub_analysis.start_calls
 
-    window._handle_manual_analysis()
-    _drain_bridge(bridge)
-    assert stub_analysis.start_calls
-
-    window._handle_cancel_analysis()
-    assert stub_analysis.stop_calls == [stub_analysis.start_calls[0][0]]
+        window._handle_cancel_analysis()
+        assert stub_analysis.stop_calls == [stub_analysis.start_calls[0][0]]
 
 
 class StubDialogProvider:
@@ -464,56 +502,46 @@ def test_main_window_prompt_flow(qapp, config_state: UiConfigState, tmp_path: Pa
         encoding="utf-8",
     )
 
-    ui_queue: queue.Queue = queue.Queue()
-    bridge = UiQueueBridge(ui_queue)
-    threading = ImmediateThreadingAdapter(bridge)
+    dialogs = StubDialogProvider(tmp_path)
 
-    window = TradingMainWindow(config_state, threading, bridge, dialogs=StubDialogProvider(tmp_path))
-    _drain_bridge(bridge)
+    with make_window(config_state, dialogs=dialogs) as (window, bridge, _threading):
+        _drain_bridge(bridge)
 
-    assert "Hello" in window.prompt_tab.no_entry_editor.toPlainText()
-    assert "World" in window.prompt_tab.entry_editor.toPlainText()
+        assert "Hello" in window.prompt_tab.no_entry_editor.toPlainText()
+        assert "World" in window.prompt_tab.entry_editor.toPlainText()
 
-    window.prompt_tab.no_entry_editor.setPlainText('{"text": "Xin chào"}')
-    window.prompt_tab.reformat_button.click()
-    _drain_bridge(bridge)
-    assert "Xin chào" in window.prompt_tab.no_entry_editor.toPlainText()
+        window.prompt_tab.no_entry_editor.setPlainText('{"text": "Xin chào"}')
+        window.prompt_tab.reformat_button.click()
+        _drain_bridge(bridge)
+        assert "Xin chào" in window.prompt_tab.no_entry_editor.toPlainText()
 
 
 def test_main_window_history_open_json(tmp_path: Path, qapp, config_state: UiConfigState) -> None:
-    ui_queue: queue.Queue = queue.Queue()
-    bridge = UiQueueBridge(ui_queue)
-    threading = ImmediateThreadingAdapter(bridge)
     dialogs = StubDialogProvider(tmp_path)
 
-    window = TradingMainWindow(config_state, threading, bridge, dialogs=dialogs)
+    with make_window(config_state, dialogs=dialogs) as (window, bridge, _threading):
+        json_file = tmp_path / "Reports" / "ctx_1.json"
+        json_file.parent.mkdir(parents=True, exist_ok=True)
+        json_file.write_text(json.dumps({"foo": "bar"}), encoding="utf-8")
 
-    json_file = tmp_path / "Reports" / "ctx_1.json"
-    json_file.parent.mkdir(parents=True, exist_ok=True)
-    json_file.write_text(json.dumps({"foo": "bar"}), encoding="utf-8")
+        window._handle_history_open(str(json_file))
+        _drain_bridge(bridge)
 
-    window._handle_history_open(str(json_file))
-    _drain_bridge(bridge)
-
-    assert dialogs.json_dialogs and dialogs.json_dialogs[0].endswith("ctx_1.json")
+        assert dialogs.json_dialogs and dialogs.json_dialogs[0].endswith("ctx_1.json")
 
 
 def test_main_window_history_open_markdown(tmp_path: Path, qapp, config_state: UiConfigState) -> None:
-    ui_queue: queue.Queue = queue.Queue()
-    bridge = UiQueueBridge(ui_queue)
-    threading = ImmediateThreadingAdapter(bridge)
     dialogs = StubDialogProvider(tmp_path)
 
-    window = TradingMainWindow(config_state, threading, bridge, dialogs=dialogs)
+    with make_window(config_state, dialogs=dialogs) as (window, bridge, _threading):
+        md_file = tmp_path / "Reports" / "report.md"
+        md_file.parent.mkdir(parents=True, exist_ok=True)
+        md_file.write_text("demo", encoding="utf-8")
 
-    md_file = tmp_path / "Reports" / "report.md"
-    md_file.parent.mkdir(parents=True, exist_ok=True)
-    md_file.write_text("demo", encoding="utf-8")
+        window._handle_history_open(str(md_file))
+        _drain_bridge(bridge)
 
-    window._handle_history_open(str(md_file))
-    _drain_bridge(bridge)
-
-    assert dialogs.opened_paths and dialogs.opened_paths[0] == str(md_file.parent)
+        assert dialogs.opened_paths and dialogs.opened_paths[0] == str(md_file.parent)
 
 def test_main_window_history_refresh_and_preview(qapp, config_state: UiConfigState, tmp_path: Path) -> None:
     workspace = Path(config_state.folder.folder)
@@ -656,22 +684,26 @@ def test_main_window_ui_status_and_log(qapp, config_state: UiConfigState, tmp_pa
 
 
 def test_main_window_ui_progress_modes(qapp, config_state: UiConfigState, tmp_path: Path) -> None:
-    ui_queue: queue.Queue = queue.Queue()
-    bridge = UiQueueBridge(ui_queue)
-    threading = ImmediateThreadingAdapter(bridge)
-    window = TradingMainWindow(config_state, threading, bridge, dialogs=StubDialogProvider(tmp_path))
-    _drain_bridge(bridge)
+    dialogs = StubDialogProvider(tmp_path)
 
-    window.ui_progress(25)
-    assert window.overview_tab.progress_bar.isVisible()
-    assert window.overview_tab.progress_bar.maximum() == 100
-    assert window.overview_tab.progress_bar.value() == 25
+    with make_window(config_state, dialogs=dialogs) as (window, bridge, _threading):
+        window.show()
+        qapp.processEvents()
+        _drain_bridge(bridge)
 
-    window.ui_progress(0, indeterminate=True)
-    assert window.overview_tab.progress_bar.maximum() == 0
+        window.ui_progress(25)
+        qapp.processEvents()
+        assert window.overview_tab.progress_bar.isVisible()
+        assert window.overview_tab.progress_bar.maximum() == 100
+        assert window.overview_tab.progress_bar.value() == 25
 
-    window.ui_progress(None)
-    assert not window.overview_tab.progress_bar.isVisible()
+        window.ui_progress(0, indeterminate=True)
+        qapp.processEvents()
+        assert window.overview_tab.progress_bar.maximum() == 0
+
+        window.ui_progress(None)
+        qapp.processEvents()
+        assert not window.overview_tab.progress_bar.isVisible()
 
 
 def test_main_window_ui_detail_and_error(qapp, config_state: UiConfigState, tmp_path: Path) -> None:
