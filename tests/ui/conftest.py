@@ -73,8 +73,15 @@ def qapp():
     pytest.importorskip("PyQt6")
     from PyQt6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication([])
-    yield app
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+
+    try:
+        yield app
+    finally:
+        app.quit()
+        app.processEvents()
 
 
 @pytest.fixture()

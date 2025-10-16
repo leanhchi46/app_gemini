@@ -17,3 +17,4 @@ beautifulsoup4
 cloudscraper
 fmp-py
 tradingeconomics
+pytest-xdist
