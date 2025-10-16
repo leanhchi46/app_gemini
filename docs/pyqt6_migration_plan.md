@@ -109,15 +109,6 @@
 - [x] Cập nhật tài liệu hướng dẫn sử dụng và quy trình triển khai sau khi hoàn tất kiểm thử.
 
 ### Giai đoạn 6 – Chuyển giao & dọn dẹp
-- [ ] Rà soát mã nguồn để PyQt6 trở thành toolkit duy nhất được biên dịch.
-  - [ ] Loại bỏ hoặc vô hiệu hóa hoàn toàn các module Tkinter còn sót (`APP/ui/tkinter`, tiện ích `ui_builder`, dialog cũ).
-  - [ ] Kiểm tra `requirements.txt`, script build/distribution để bảo đảm không còn phụ thuộc Tkinter hoặc extension chỉ dùng cho Tk.
-  - [ ] Chạy `rg "tkinter"` (hoặc tương đương) xác nhận không còn import Tkinter trong codebase ngoài lớp tương thích tạm thời.
-- [ ] Cập nhật luồng khởi chạy và cấu hình triển khai.
-  - [ ] Điều chỉnh `APP/main.py`/entrypoint CLI để mặc định khởi tạo `PyQtApplication`, cung cấp flag `--use-tk` tạm thời và log cảnh báo khi bật.
-  - [ ] Đồng bộ script/hướng dẫn chạy dịch vụ nền (autorun, scheduler) để sử dụng instance PyQt6 mới và hàng đợi signal.
-  - [ ] Kiểm thử smoke trên môi trường đóng gói (PyInstaller/virtualenv) nhằm xác thực import PyQt6, Qt plugin và data file cần thiết.
-- [ ] Chuẩn hóa tài liệu và công cụ vận hành sau chuyển giao.
-  - [ ] Cập nhật README, hướng dẫn triển khai, SOP hỗ trợ để phản ánh UI PyQt6 và hành vi mới của threading/queue.
-  - [ ] Đính kèm checklist QA và hướng dẫn manual test hậu chuyển giao (khởi động, autorun, lỗi provider, lưu workspace) trong thư mục `docs/`.
-  - [ ] Bàn giao tri thức: ghi lại FAQ, kịch bản rollback sang Tkinter, đầu mối hỗ trợ và lịch bảo trì vào Confluence/knowledge base.
+- [ ] Xoá hoặc vô hiệu hóa dần các module Tkinter còn lại, bảo đảm mã chính không còn phụ thuộc `tkinter`.
+- [ ] Cập nhật script khởi chạy (`main.py`) để mặc định dùng PyQt6, cung cấp flag fallback trong thời gian chuyển tiếp.
+- [ ] Rà soát cấu trúc gói để chắc chắn các module UI mới tuân thủ chuẩn logging, cấu hình và threading của dự án.
