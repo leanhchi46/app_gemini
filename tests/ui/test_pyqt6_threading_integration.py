@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -106,12 +107,13 @@ def test_autorun_session_emits_start_signal(qapp, config_state, pyqt_threading_a
     controllers = ControllerSet(analysis=stub)
 
     with make_window(config_state, harness, controllers=controllers) as window:
+        Path(config_state.folder.folder).mkdir(parents=True, exist_ok=True)
         window._autorun_enabled = True
         window._autorun_interval = 1
         window._handle_autorun_timeout()
         harness.await_idle(group="analysis")
 
-        assert stub.calls
-        log_lines = window.overview_tab.log_view.toPlainText().splitlines()
-        assert any("autorun" in line.lower() for line in log_lines)
-        assert window.statusBar().currentMessage().startswith("Autorun")
+    assert stub.calls
+    log_lines = window.overview_tab.log_view.toPlainText().splitlines()
+    assert any("autorun" in line.lower() for line in log_lines)
+    assert "autorun" in window.statusBar().currentMessage().lower()

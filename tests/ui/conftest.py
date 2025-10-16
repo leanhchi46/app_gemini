@@ -3,8 +3,11 @@ import queue
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Generator
 
 import pytest
+
+from tests.ui.pyqt6_fakes import GeminiFakeClient, Mt5FakeGateway, NewsFakeFeed
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
@@ -173,28 +176,25 @@ def config_state(tmp_path: Path) -> UiConfigState:
 
 
 @pytest.fixture
-def mt5_fake_gateway(qapp) -> "Mt5FakeGateway":
-    from tests.ui.pyqt6_fakes import Mt5FakeGateway
+def mt5_fake_gateway(qapp) -> Generator[Mt5FakeGateway, None, None]:
     gateway = Mt5FakeGateway()
     yield gateway
     gateway.deleteLater()
 
 @pytest.fixture
-def gemini_fake_client(qapp) -> "GeminiFakeClient":
-    from tests.ui.pyqt6_fakes import GeminiFakeClient
+def gemini_fake_client(qapp) -> Generator[GeminiFakeClient, None, None]:
     client = GeminiFakeClient()
     yield client
     client.deleteLater()
 
 @pytest.fixture
-def news_fake_feed(qapp) -> "NewsFakeFeed":
-    from tests.ui.pyqt6_fakes import NewsFakeFeed
+def news_fake_feed(qapp) -> Generator[NewsFakeFeed, None, None]:
     feed = NewsFakeFeed()
     yield feed
     feed.deleteLater()
 
 @pytest.fixture()
-def pyqt_threading_adapter(qtbot) -> PyQtThreadingHarness:
+def pyqt_threading_adapter(qtbot) -> Generator[PyQtThreadingHarness, None, None]:
     """Cung cấp Qt threading adapter thật giúp test quan sát signal/queue."""
 
     pytest.importorskip("PyQt6")
