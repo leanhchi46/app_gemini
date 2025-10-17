@@ -116,7 +116,7 @@ class NewsConfig:
     block_enabled: bool
     block_before_min: int
     block_after_min: int
-    cache_ttl_sec: int
+    cache_ttl_sec: int = 3600
     provider_timeout_sec: int = 20
     priority_keywords: tuple[str, ...] | None = None
     provider_error_threshold: int = 2

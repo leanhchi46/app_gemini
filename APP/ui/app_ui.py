@@ -564,7 +564,7 @@ class AppUI:
         self.news_block_enabled_var = tk.BooleanVar(value=True)
         self.trade_news_block_before_min_var = tk.IntVar(value=15)
         self.trade_news_block_after_min_var = tk.IntVar(value=15)
-        self.news_cache_ttl_var = tk.IntVar(value=300)
+        self.news_cache_ttl_var = tk.IntVar(value=3600)
         self.news_priority_keywords_var = tk.StringVar(
             value=", ".join(sorted(DEFAULT_HIGH_IMPACT_KEYWORDS))
         )
