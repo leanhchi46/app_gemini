@@ -26,7 +26,7 @@ from APP.utils.safe_data import SafeData
 
 if TYPE_CHECKING:
     from APP.configs.app_config import RunConfig
-    from APP.ui.app_ui import AppUI
+    from APP.ui.interfaces import AnalysisUi
 
 logger = logging.getLogger(__name__)
 

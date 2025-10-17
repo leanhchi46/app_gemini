@@ -1,20 +1,16 @@
 # -*- coding: utf-8 -*-
-"""
-Điểm khởi đầu của ứng dụng.
-
-Khởi tạo và chạy giao diện người dùng chính của ứng dụng giao dịch.
-"""
+"""Application entry point."""
 
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
-import tkinter as tk
+import warnings
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-# Thêm thư mục gốc của dự án vào sys.path
+# Ensure project root is on sys.path so that relative imports work when running directly
 try:
     project_root = Path(__file__).resolve().parent.parent
     if str(project_root) not in sys.path:
@@ -27,78 +23,96 @@ except (NameError, IndexError):
 from APP.configs import workspace_config
 from APP.configs.app_config import LoggingConfig
 from APP.persistence.log_handler import setup_logging
-from APP.ui.app_ui import AppUI
+from APP.ui.pyqt6 import PyQtApplication
+from APP.ui.state import UiConfigState
 
 logger = logging.getLogger(__name__)
 
 
 def parse_arguments() -> argparse.Namespace:
-    """
-    Phân tích các đối số dòng lệnh được truyền vào khi chạy ứng dụng.
-    """
-    parser = argparse.ArgumentParser(description="Ứng dụng Giao dịch và Phân tích Tự động.")
+    """Parse command-line arguments for the application."""
+
+    parser = argparse.ArgumentParser(description="Automated Trading & Analysis UI")
     parser.add_argument(
         "--workspace",
         type=str,
         default=None,
-        help="Đường dẫn đến file workspace.json cần tải khi khởi động.",
+        help="Path to workspace.json to load at startup.",
+    )
+    parser.add_argument(
+        "--use-tk",
+        action="store_true",
+        help="Launch the deprecated Tkinter UI instead of the PyQt6 interface.",
     )
     return parser.parse_args()
 
 
-def main(workspace_path: Optional[str] = None) -> None:
-    """
-    Hàm chính để khởi tạo và chạy ứng dụng.
+def _emit_ui_backend_telemetry(backend: str) -> None:
+    """Log lightweight telemetry about the selected UI backend."""
 
-    Thực hiện các bước:
-    1. Tải cấu hình ban đầu từ file workspace.
-    2. Thiết lập logging dựa trên cấu hình vừa tải.
-    3. Khởi tạo cửa sổ chính Tkinter.
-    4. Tạo instance của AppUI, truyền cấu hình vào.
-    5. Thiết lập xử lý tắt ứng dụng an toàn (graceful shutdown).
-    6. Bắt đầu vòng lặp sự kiện chính.
-    """
+    logger.info("telemetry.ui_backend=%s", backend)
+
+
+def _run_tk_legacy(initial_config: dict[str, Any]) -> int:
+    """Start the legacy Tkinter UI for transitional purposes."""
+
+    warnings.warn(
+        "The Tkinter UI is deprecated and will be removed in a future release.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     try:
-        # Đảm bảo thư mục làm việc tồn tại trước khi thực hiện bất kỳ thao tác nào khác
-        workspace_config.setup_workspace()
+        import tkinter as tk  # type: ignore[import-not-found]
+    except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency path
+        logger.error("Tkinter is not available in this environment: %s", exc)
+        return 1
 
-        # Tải cấu hình ban đầu một cách tường minh
+    from APP.ui.app_ui import AppUI  # Local import to avoid importing Tk modules eagerly
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        logger.error("Unable to initialise Tkinter UI: %s", exc)
+        logger.info("Headless environment detected; skipping legacy UI startup.")
+        return 1
+
+    logger.info("Launching legacy Tkinter UI (deprecated mode).")
+    app = AppUI(root, initial_config=initial_config)
+    root.protocol("WM_DELETE_WINDOW", app.shutdown)
+    root.mainloop()
+    return 0
+
+
+def main(workspace_path: Optional[str] = None, *, use_tk: bool = False) -> int:
+    """Initialise logging, load configuration and start the requested UI backend."""
+
+    try:
+        workspace_config.setup_workspace()
         initial_config = workspace_config.load_config_from_file(workspace_path)
 
-        # Trích xuất hoặc tạo cấu hình logging
         logging_dict = initial_config.get("logging", {})
         logging_config = LoggingConfig(**logging_dict)
-
-        # Thiết lập logging VỚI cấu hình
         setup_logging(config=logging_config)
 
-        logger.info("Ứng dụng đang khởi động...")
+        logger.info("Application starting...")
 
-        try:
-            root = tk.Tk()
-        except tk.TclError as exc:
-            logger.error("Không thể khởi tạo giao diện Tkinter: %s", exc)
-            logger.info(
-                "Chế độ headless được phát hiện. Dừng khởi động UI và kết thúc chương trình."
-            )
-            return
+        if use_tk:
+            _emit_ui_backend_telemetry("tkinter")
+            logger.warning("Legacy Tkinter UI requested via --use-tk; this mode is deprecated.")
+            return _run_tk_legacy(initial_config)
 
-        app = AppUI(root, initial_config=initial_config)
-
-        # Cải tiến 3: Thêm xử lý tắt ứng dụng (Graceful Shutdown)
-        # Gán phương thức shutdown của app cho sự kiện đóng cửa sổ.
-        root.protocol("WM_DELETE_WINDOW", app.shutdown)
-
-        root.mainloop()
-
-        logger.info("Ứng dụng đã đóng thành công.")
+        config_state = UiConfigState.from_workspace_config(initial_config)
+        _emit_ui_backend_telemetry("pyqt6")
+        app = PyQtApplication(config_state=config_state)
+        exit_code = app.run()
+        logger.info("Application closed successfully.")
+        return exit_code
     except Exception:
-        logger.exception("Đã xảy ra lỗi nghiêm trọng trong hàm main.")
+        logger.exception("Fatal exception occurred in main().")
         raise
 
 
 if __name__ == "__main__":
-    # Cải tiến 1: Thêm cơ chế xử lý đối số dòng lệnh
     args = parse_arguments()
-    # Cải tiến 2: Cấu hình một cách tường minh hơn
-    main(workspace_path=args.workspace)
+    sys.exit(main(workspace_path=args.workspace, use_tk=args.use_tk))

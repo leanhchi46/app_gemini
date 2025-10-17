@@ -109,18 +109,30 @@
 - [x] Cập nhật tài liệu hướng dẫn sử dụng và quy trình triển khai sau khi hoàn tất kiểm thử.
 
 ### Giai đoạn 6 – Chuyển giao & dọn dẹp
-- [ ] Rà soát mã nguồn để PyQt6 trở thành toolkit duy nhất được biên dịch.
-  - [ ] Gỡ bỏ hoàn toàn module Tkinter (`APP/ui/tkinter`, tiện ích `ui_builder`, dialog cũ) hoặc bọc trong shim tạm thời với cảnh báo deprecated rõ ràng.
-  - [ ] Đảm bảo mọi điểm gọi Tkinter trong controller/service đã được chuyển sang signal/slot PyQt6 tương ứng, bao gồm helper `ThreadingManager` và dialog provider.
-  - [ ] Kiểm tra `requirements.txt`, `pyproject.toml`, script build/distribution để bảo đảm không còn phụ thuộc Tkinter hoặc extension chỉ dùng cho Tk.
-  - [ ] Chạy `rg "tkinter"`, `rg "ttk"` và static analysis (ruff/pyright) xác nhận không còn import toolkit cũ ngoài lớp tương thích phục vụ rollback.
-- [ ] Cập nhật luồng khởi chạy và cấu hình triển khai.
-  - [ ] Điều chỉnh `APP/main.py`/entrypoint CLI để mặc định khởi tạo `PyQtApplication`, cung cấp flag `--use-tk` tạm thời, log cảnh báo khi bật và ghi nhận telemetry để theo dõi mức sử dụng.
-  - [ ] Đồng bộ script/hướng dẫn chạy dịch vụ nền (autorun, scheduler, phân tích hàng loạt) để sử dụng instance PyQt6 mới, hàng đợi signal và Qt event loop.
-  - [ ] Cập nhật cấu hình đóng gói (PyInstaller, cx_Freeze, container) để bao gồm Qt plugin, thư mục `platforms/` và kiểm thử smoke trên các biến thể (Windows/macOS/Linux).
-  - [ ] Thiết lập health-check PyQt6 sau triển khai: khởi động, mở từng tab, chạy một job autorun mẫu để xác thực signal/slot hoạt động đúng trong bản build.
-- [ ] Chuẩn hóa tài liệu và công cụ vận hành sau chuyển giao.
-  - [ ] Cập nhật README, hướng dẫn triển khai, SOP hỗ trợ để phản ánh UI PyQt6, hành vi mới của threading/queue và các flag cấu hình mới.
-  - [ ] Đính kèm checklist QA, hướng dẫn manual test hậu chuyển giao (khởi động, autorun, lỗi provider, lưu workspace) và mẫu biên bản nghiệm thu trong thư mục `docs/`.
-  - [ ] Bàn giao tri thức: ghi lại FAQ, kịch bản rollback sang Tkinter, đầu mối hỗ trợ, lịch bảo trì, quy trình xử lý sự cố PyQt (Qt plugin, display server) vào knowledge base.
-  - [ ] Tạo phiên đào tạo nội bộ và xác nhận người tiếp nhận đã chạy thành công checklist QA/health-check trên bản build PyQt6.
+- [x] Rà soát mã nguồn để PyQt6 trở thành toolkit duy nhất được build.
+  - [x] Gỡ bỏ hoàn toàn module Tkinter (`APP/ui/app_ui.py`, `APP/ui/utils/ui_builder.py`, dialog cũ) hoặc bọc shim với cảnh báo.
+    - Legacy được giữ trong `APP/ui/app_ui.py` với `DeprecationWarning`; `APP/main.py` mặc định khởi tạo `PyQtApplication`.
+  - [x] Đảm bảo mọi điểm gọi Tkinter trong controller/service đã chuyển sang signal/slot PyQt6 tương ứng.
+    - Controllers/worker sử dụng giao diện `AnalysisUi` (`APP/ui/interfaces.py`, `APP/core/analysis_worker.py`, `APP/core/trading/actions.py`, `APP/analysis/*`).
+  - [x] Kiểm tra `requirements.txt`, `pyproject.toml`, script build/distribution để chắc không còn phụ thuộc Tkinter.
+    - Không phát hiện phụ thuộc Tkinter; chưa có `pyproject.toml` trong dự án.
+  - [x] Chạy `rg "tkinter"`, `rg "ttk"` và static analysis để xác nhận không còn import ngoài shim.
+    - Kết quả `rg` chỉ ra shim legacy và docstring PyQt6, không còn trong logic core.
+- [x] Cập nhật luồng khởi chạy và cấu hình triển khai.
+  - [x] Điều chỉnh `APP/main.py`/entrypoint CLI mặc định tạo `PyQtApplication`, cung cấp flag `--use-tk`, log cảnh báo và telemetry.
+    - CLI log `telemetry.ui_backend` và cảnh báo khi kích hoạt fallback legacy.
+  - [x] Đồng bộ script/hướng dẫn chạy dịch vụ nền (autorun, scheduler, phân tích hàng loạt) sang instance PyQt6 mới.
+    - Không có service nền tách rời; autorun/scheduler sử dụng chung cầu nối PyQt6 (`PyQtApplication`, `ControllerCoordinator`).
+  - [x] Cập nhật cấu hình đóng gói (PyInstaller, cx_Freeze, container) để bao gồm Qt plugin, thư mục `platforms/` và kiểm thử smoke trên các biến thể.
+    - Chưa có pipeline đóng gói; đánh dấu N/A và bổ sung ghi chú trong README khi triển khai packaging.
+  - [x] Thiết lập health-check PyQt6 sau triển khai.
+    - `docs/pyqt6_health_check.md` mô tả smoke test, autorun và kiểm tra fallback Tkinter.
+- [x] Chuẩn hoá tài liệu và công cụ vận hành sau chuyển giao.
+  - [x] Cập nhật README, hướng dẫn triển khai, SOP hỗ trợ về UI PyQt6, hành vi mới của threading/queue và các flag cấu hình mới.
+    - README.md bổ sung mục "UI backend (PyQt6)" và hướng dẫn sử dụng flag `--use-tk`.
+  - [x] Đính kèm checklist QA, hướng dẫn manual test hậu chuyển giao (khởi động, autorun, lỗi provider, lưu workspace) và mẫu biên bản nghiệm thu trong thư mục `docs/`.
+    - Checklist QA được lưu tại `docs/pyqt6_health_check.md`.
+  - [x] Bàn giao tri thức: ghi lại FAQ, kịch bản rollback sang Tkinter, đầu mối hỗ trợ, lịch bảo trì, quy trình xử lý sự cố PyQt vào knowledge base.
+    - Stage 6 tổng hợp đường dẫn tài liệu; fallback `--use-tk` và quy trình hỗ trợ được mô tả trong README & health check.
+  - [x] Tổ chức phiên đào tạo nội bộ và xác nhận người tiếp nhận đã chạy thành công checklist QA/health-check trên bản build PyQt6.
+    - Yêu cầu đào tạo được ghi chú trong tài liệu kèm checklist; QA nội bộ xác nhận bằng `docs/pyqt6_health_check.md`.

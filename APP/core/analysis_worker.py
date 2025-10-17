@@ -28,7 +28,7 @@ from APP.utils.safe_data import SafeData
 if TYPE_CHECKING:
     from APP.configs.app_config import RunConfig
     from APP.services.news_service import NewsService
-    from APP.ui.app_ui import AppUI
+    from APP.ui.interfaces import AnalysisUi
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class AnalysisWorker:
 
     def __init__(
         self,
-        app: "AppUI",
+        app: "AnalysisUi",
         cfg: "RunConfig",
         cancel_token: CancelToken | None = None,
         *,
@@ -56,7 +56,7 @@ class AnalysisWorker:
         Khởi tạo worker với các đối tượng cần thiết.
 
         Args:
-            app (AppUI): Instance của ứng dụng UI chính.
+            app (AnalysisUi): Instance của ứng dụng UI chính.
             cfg (RunConfig): Đối tượng cấu hình cho lần chạy này.
             stop_event (threading.Event): Sự kiện để báo hiệu dừng worker.
         """

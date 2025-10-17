@@ -5,13 +5,13 @@ from typing import TYPE_CHECKING, Dict, Any, List, Optional
 
 if TYPE_CHECKING:
     from APP.configs.app_config import RunConfig
-    from APP.ui.app_ui import AppUI
+    from APP.ui.interfaces import AnalysisUi
 from APP.utils.safe_data import SafeData
 
 logger = logging.getLogger(__name__)
 
 def select_prompt(
-    app: "AppUI",
+    app: "AnalysisUi",
     cfg: "RunConfig",
     safe_mt5_data: Optional["SafeData"],
     prompt_no_entry: str,
@@ -41,7 +41,7 @@ def select_prompt(
     return prompt_no_entry
 
 def construct_prompt(
-    app: "AppUI",
+    app: "AnalysisUi",
     prompt: str,
     mt5_dict: Dict[str, Any],
     context_block: str,

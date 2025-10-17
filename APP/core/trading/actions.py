@@ -14,13 +14,13 @@ from APP.services import mt5_service
 
 if TYPE_CHECKING:
     from APP.configs.app_config import RunConfig
-    from APP.ui.app_ui import AppUI
+    from APP.ui.interfaces import AnalysisUi
 
 logger = logging.getLogger(__name__)
 
 
 def execute_trade_action(
-    app: AppUI, combined_text: str, mt5_ctx: dict[str, Any], cfg: RunConfig
+    app: AnalysisUi, combined_text: str, mt5_ctx: dict[str, Any], cfg: RunConfig
 ) -> bool:
     """Phân tích, đánh giá và đặt lệnh dựa trên phân tích chuyên sâu của AI."""
     if not cfg.auto_trade.enabled or mt5 is None:
@@ -89,7 +89,7 @@ def execute_trade_action(
 
 
 def manage_existing_trades(
-    app: AppUI, combined_text: str, mt5_ctx: dict[str, Any], cfg: RunConfig
+    app: AnalysisUi, combined_text: str, mt5_ctx: dict[str, Any], cfg: RunConfig
 ) -> bool:
     """Quản lý các giao dịch hiện có dựa trên phân tích chuyên sâu của AI."""
     open_positions = mt5_ctx.get("positions", [])

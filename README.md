@@ -2,6 +2,12 @@
 
 Tài liệu này tóm tắt cách vận hành kiến trúc đa luồng sau giai đoạn refactor, đồng thời cung cấp hướng dẫn rollback khi cần.
 
+## UI backend (PyQt6)
+
+- UI mặc định chạy qua PyQtApplication (`APP/ui/pyqt6/`, `APP/main.py`).
+- Flag `--use-tk` giữ legacy Tkinter như fallback tạm thời (có DeprecationWarning & telemetry).
+- Controllers/worker sử dụng giao diện chung `AnalysisUi` (`APP/ui/interfaces.py`) nên không phụ thuộc Tkinter.
+
 ## Facade/Controller cho UI
 
 | Thành phần | Facade | Nhóm task | Ghi chú |

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import queue
+import warnings
 import threading
 import tkinter as tk
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
@@ -59,6 +60,12 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+warnings.warn(
+    "AppUI (Tkinter) is deprecated and kept only for --use-tk fallback.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 class AppUI:
