@@ -296,16 +296,6 @@ def _build_opts_api_keys(app: "AppUI", parent: ttk.Notebook) -> None:
     app.api_entry.grid(row=0, column=1, sticky="ew", padx=6)
     ttk.Checkbutton(api_keys_frame, text="Hiện", command=app._toggle_api_visibility).grid(row=0, column=2, sticky="w", padx=(0, 10))
 
-    # FMP
-    fmp_frame = ttk.Frame(api_keys_frame)
-    fmp_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=4)
-    fmp_frame.columnconfigure(2, weight=1)
-    app.fmp_enabled_check = ttk.Checkbutton(fmp_frame, text="Bật FMP", variable=app.fmp_enabled_var)
-    app.fmp_enabled_check.grid(row=0, column=0, sticky="w")
-    ttk.Label(fmp_frame, text="FMP Key:").grid(row=0, column=1, sticky="w", padx=(10, 4))
-    app.fmp_api_entry = ttk.Entry(fmp_frame, textvariable=app.fmp_api_key_var, show="*", width=50)
-    app.fmp_api_entry.grid(row=0, column=2, sticky="ew")
-
     # Trading Economics
     te_frame = ttk.Frame(api_keys_frame)
     te_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=4)
@@ -565,11 +555,11 @@ def _build_opts_conditions(app: "AppUI", parent: ttk.Notebook) -> None:
     ttk.Label(card3, text="Nhà cung cấp tin tức:").grid(row=2, column=0, sticky="w")
     app.news_provider_combo = ttk.Combobox(
         card3,
-        textvariable=app.news_provider_var,
-        values=["FMP", "TE"],
+        values=["Fair Economy"],
         state="readonly",
         width=12,
     )
+    app.news_provider_combo.set("Fair Economy")
     app.news_provider_combo.grid(row=2, column=1, sticky="w", padx=(6, 0), pady=2)
 
     ttk.Label(card3, text="Chặn trước khi tin ra (phút):").grid(row=3, column=0, sticky="w", pady=2)

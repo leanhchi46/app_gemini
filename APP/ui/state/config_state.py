@@ -11,7 +11,6 @@ from APP.configs.app_config import (
     AutoTradeConfig,
     ChartConfig,
     ContextConfig,
-    FMPConfig,
     FolderConfig,
     ImageProcessingConfig,
     MT5Config,
@@ -65,7 +64,6 @@ class UiConfigState:
     auto_trade: AutoTradeConfig
     news: NewsConfig
     persistence: PersistenceConfig
-    fmp: FMPConfig
     chart: ChartConfig
     model: str
     autorun: AutorunState
@@ -85,7 +83,6 @@ class UiConfigState:
             no_trade=self.no_trade,
             auto_trade=self.auto_trade,
             news=self.news,
-            fmp=self.fmp,
             persistence=self.persistence,
             chart=self.chart,
             api=self.api,
@@ -117,10 +114,6 @@ class UiConfigState:
             "api": {
                 "tries": self.api.tries,
                 "delay": self.api.delay,
-            },
-            "fmp": {
-                "enabled": self.fmp.enabled,
-                "api_key": self.fmp.api_key,
             },
             "telegram": {
                 "enabled": self.telegram.enabled,
@@ -421,12 +414,6 @@ class UiConfigState:
             filling_type=_clean_str(auto_trade_cfg.get("filling_type"), "IOC") or "IOC",
         )
 
-        fmp_cfg = data.get("fmp") or {}
-        fmp = FMPConfig(
-            enabled=_as_bool(fmp_cfg.get("enabled"), False),
-            api_key=_clean_str(fmp_cfg.get("api_key")),
-        )
-
         news_cfg = data.get("news") or {}
         keywords = _normalize_keywords(news_cfg.get("priority_keywords"))
         if not keywords:
@@ -491,7 +478,6 @@ class UiConfigState:
             auto_trade=auto_trade,
             news=news,
             persistence=persistence,
-            fmp=fmp,
             chart=chart,
             model=model_name,
             autorun=autorun_state,

@@ -18,7 +18,6 @@ from APP.configs.app_config import (
     AutoTradeConfig,
     ChartConfig,
     ContextConfig,
-    FMPConfig,
     FolderConfig,
     ImageProcessingConfig,
     MT5Config,
@@ -1387,12 +1386,6 @@ class TradingMainWindow(QMainWindow):
             ),
         )
 
-        fmp_cfg = options.get("fmp", {})
-        fmp_state = FMPConfig(
-            enabled=bool(fmp_cfg.get("enabled", base.fmp.enabled)),
-            api_key=str(fmp_cfg.get("api_key", base.fmp.api_key)),
-        )
-
         persistence_cfg = options.get("persistence", {})
         persistence_state = PersistenceConfig(
             max_md_reports=int(
@@ -1426,7 +1419,6 @@ class TradingMainWindow(QMainWindow):
             auto_trade=auto_trade_state,
             news=news_state,
             persistence=persistence_state,
-            fmp=fmp_state,
             chart=chart_state,
             model=self._config_state.model,
             autorun=autorun_state,

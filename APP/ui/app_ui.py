@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from APP.configs import workspace_config
 from APP.configs.feature_flags import FEATURE_FLAGS
 from APP.configs.app_config import (ApiConfig, AutoTradeConfig, ChartConfig,
-                                    ContextConfig, FMPConfig, FolderConfig,
+                                    ContextConfig, FolderConfig,
                                     ImageProcessingConfig, MT5Config,
                                     NewsConfig, NoRunConfig, NoTradeConfig,
                                     PersistenceConfig, RunConfig,
@@ -114,8 +114,6 @@ class AppUI:
         self.status_var: tk.StringVar
         self.progress_var: tk.DoubleVar
         self.api_key_var: tk.StringVar
-        self.fmp_api_key_var: tk.StringVar
-        self.fmp_enabled_var: tk.BooleanVar
         self.model_var: tk.StringVar
         self.delete_after_var: tk.BooleanVar
         self.max_files_var: tk.IntVar
@@ -181,7 +179,6 @@ class AppUI:
         self.trade_news_block_before_min_var: tk.IntVar
         self.trade_news_block_after_min_var: tk.IntVar
         self.news_cache_ttl_var: tk.IntVar
-        self.news_provider_var: tk.StringVar
         self.news_priority_keywords_var: tk.StringVar
         self.news_surprise_threshold_var: tk.DoubleVar
         self.news_provider_error_threshold_var: tk.IntVar
@@ -222,8 +219,6 @@ class AppUI:
         self.prompt_nb: Optional[ttk.Notebook] = None
         self.model_combo: Optional[ttk.Combobox] = None
         self.api_entry: Optional[tk.Entry] = None
-        self.fmp_api_entry: Optional[tk.Entry] = None
-        self.fmp_enabled_check: Optional[ttk.Checkbutton] = None
         self.prompt_entry_run_text: Optional[tk.Text] = None
         self.prompt_no_entry_text: Optional[tk.Text] = None
         self.start_btn: Optional[ttk.Button] = None
@@ -245,7 +240,6 @@ class AppUI:
         self.news_before_spin: Optional[ttk.Spinbox] = None
         self.news_after_spin: Optional[ttk.Spinbox] = None
         self.news_cache_spin: Optional[ttk.Spinbox] = None
-        self.news_provider_combo: Optional[ttk.Combobox] = None
         self.news_keywords_entry: Optional[ttk.Entry] = None
         self.news_surprise_spin: Optional[ttk.Spinbox] = None
         self.news_error_threshold_spin: Optional[ttk.Spinbox] = None
@@ -452,7 +446,6 @@ class AppUI:
         import json
         api_keys = {
             "google": os.environ.get("GOOGLE_API_KEY", ""),
-            "fmp": os.environ.get("FMP_API_KEY", ""),
         }
         if PATHS.ALL_API_KEYS_ENC.exists():
             try:
@@ -470,11 +463,6 @@ class AppUI:
             )
 
         self.api_key_var = tk.StringVar(value=api_keys.get("google", ""))
-        self.fmp_api_key_var = tk.StringVar(value=api_keys.get("fmp", ""))
-        self.fmp_enabled_var = tk.BooleanVar(value=False)
-
-        # Thêm trace để cập nhật UI khi nhà cung cấp tin tức thay đổi
-        self.fmp_enabled_var.trace_add("write", lambda *args: self._update_news_widgets_state())
 
         self.model_var = tk.StringVar(value=MODELS.DEFAULT_VISION)
         self.api_key_var.trace_add("write", lambda *args: self._configure_gemini_api_and_update_ui())
@@ -577,7 +565,6 @@ class AppUI:
         self.trade_news_block_before_min_var = tk.IntVar(value=15)
         self.trade_news_block_after_min_var = tk.IntVar(value=15)
         self.news_cache_ttl_var = tk.IntVar(value=300)
-        self.news_provider_var = tk.StringVar(value="FMP")
         self.news_priority_keywords_var = tk.StringVar(
             value=", ".join(sorted(DEFAULT_HIGH_IMPACT_KEYWORDS))
         )
@@ -753,10 +740,6 @@ class AppUI:
             persistence=PersistenceConfig(
                 max_md_reports=self.persistence_max_md_reports_var.get()
             ),
-            fmp=FMPConfig(
-                enabled=self.fmp_enabled_var.get(),
-                api_key=self.fmp_api_key_var.get().strip(),
-            ),
             chart=ChartConfig(
                 timeframe=self.chart_tab.tf_var.get() if self.chart_tab else "M15",
                 num_candles=self.chart_tab.n_candles_var.get() if self.chart_tab else 150,
@@ -889,10 +872,6 @@ class AppUI:
         self.trade_move_to_be_after_tp1_var.set(get_nested(auto_trade_cfg, ["move_to_be_after_tp1"], True))
         self.trade_trailing_atr_mult_var.set(get_nested(auto_trade_cfg, ["trailing_atr_mult"], 0.5))
         self.trade_filling_type_var.set(get_nested(auto_trade_cfg, ["filling_type"], "IOC"))
-
-        fmp_cfg = config_data.get("fmp", {})
-        self.fmp_enabled_var.set(get_nested(fmp_cfg, ["enabled"], False))
-        self.fmp_api_key_var.set(get_nested(fmp_cfg, ["api_key"], ""))
 
         news_cfg = config_data.get("news", {})
         self.news_block_enabled_var.set(get_nested(news_cfg, ["block_enabled"], True))
@@ -1481,7 +1460,7 @@ class AppUI:
 
     def _toggle_api_visibility(self):
         """Chuyển đổi trạng thái hiển thị của tất cả các ô nhập API key."""
-        entries = [self.api_entry, self.fmp_api_entry]
+        entries = [self.api_entry]
         # Xác định trạng thái mới dựa trên entry đầu tiên
         is_hidden = entries[0] and entries[0].cget("show") == "*"
         new_show_char = "" if is_hidden else "*"
@@ -1591,11 +1570,9 @@ class AppUI:
 
     def _update_news_widgets_state(self):
         """
-        Bật/tắt các widget con trong phần cài đặt tin tức dựa trên việc
-        có nhà cung cấp nào (FMP) được bật hay không.
+        Bật/tắt các widget con trong phần cài đặt tin tức.
         """
-        any_provider_enabled = self.fmp_enabled_var.get()
-        new_state = "normal" if any_provider_enabled else "disabled"
+        new_state = "normal"
 
         # Danh sách các widget cần thay đổi trạng thái
         widgets_to_toggle = [
@@ -1603,7 +1580,6 @@ class AppUI:
             self.news_before_spin,
             self.news_after_spin,
             self.news_cache_spin,
-            self.news_provider_combo,
             self.news_keywords_entry,
             self.news_surprise_spin,
             self.news_error_threshold_spin,
@@ -1618,10 +1594,7 @@ class AppUI:
 
         # Cập nhật cả tiêu đề của card để cung cấp phản hồi trực quan
         if self.news_card:
-            if not any_provider_enabled:
-                self.news_card.config(text="Chặn tin tức (Cần bật FMP)")
-            else:
-                self.news_card.config(text="Chặn giao dịch theo tin tức (News)")
+            self.news_card.config(text="Chặn giao dịch theo tin tức (News)")
 
     def _update_progress(self, current_step: int, total_steps: int):
         """Cập nhật thanh tiến trình dựa trên bước hiện tại và tổng số bước."""
@@ -1983,8 +1956,6 @@ class AppUI:
             keys_found = {}
             if key := os.environ.get("GOOGLE_API_KEY"):
                 keys_found["google"] = key
-            if key := os.environ.get("FMP_API_KEY"):
-                keys_found["fmp"] = key
 
             def update_ui():
                 self.ui_status("Sẵn sàng.")
@@ -1996,9 +1967,6 @@ class AppUI:
                 if "google" in keys_found:
                     self.api_key_var.set(keys_found["google"])
                     keys_loaded_names.append("GOOGLE_API_KEY")
-                if "fmp" in keys_found:
-                    self.fmp_api_key_var.set(keys_found["fmp"])
-                    keys_loaded_names.append("FMP_API_KEY")
 
                 msg = f"Đã tải các key sau từ .env:\n- " + "\n- ".join(keys_loaded_names)
                 ui_builder.show_message("Thành công", msg)
@@ -2017,7 +1985,6 @@ class AppUI:
         import json
         keys_to_save = {
             "google": self.api_key_var.get().strip(),
-            "fmp": self.fmp_api_key_var.get().strip(),
         }
         keys_to_save = {k: v for k, v in keys_to_save.items() if v}
 
@@ -2076,7 +2043,6 @@ class AppUI:
             
             def update_ui():
                 self.api_key_var.set("")
-                self.fmp_api_key_var.set("")
                 ui_builder.show_message("Thành công", "Đã xóa các API key đã lưu.")
                 self.ui_status("Đã xóa API keys.")
             

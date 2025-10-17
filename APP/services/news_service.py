@@ -10,9 +10,9 @@ from time import monotonic
 from typing import Any, Callable, Final, Iterable, List, Optional
 
 import pytz
+import requests
 
-from APP.configs.app_config import FMPConfig, NewsConfig, RunConfig
-from APP.services.fmp_service import FMPService
+from APP.configs.app_config import NewsConfig, RunConfig
 from APP.utils.threading_utils import CancelToken, ThreadingManager, TaskRecord
 
 logger = logging.getLogger(__name__)
@@ -51,15 +51,13 @@ class NewsService:
     """
     Dịch vụ chạy nền, tự động lấy và làm mới tin tức kinh tế định kỳ.
     """
+    NEWS_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
     def __init__(self):
         """Khởi tạo dịch vụ ở trạng thái chưa hoạt động."""
         self.news_config: Optional[NewsConfig] = None
-        self.fmp_config: Optional[FMPConfig] = None
         self.timezone_str: str = "Asia/Ho_Chi_Minh"
         
-        self.fmp_service: Optional[FMPService] = None
-
         self._cache: list[dict[str, Any]] = []
         self._cache_time: Optional[datetime] = None
         self._dedup_ids: set[str] = set()
@@ -77,7 +75,6 @@ class NewsService:
         
         self._provider_status_snapshot: dict[str, dict[str, Any]] = {}
         self._last_provider_report: dict[str, dict[str, Any]] = {}
-        self._fmp_last_error: Optional[str] = None
         
         # Threading attributes
         self._lock = Lock()
@@ -86,10 +83,9 @@ class NewsService:
         self._last_latency_sec: float = 0.0
 
     def update_config(self, config: RunConfig):
-        """C?p nh?t c?u h?nh cho d?ch v? m?t c?ch an ton."""
+        """Cập nhật cấu hình cho dịch vụ một cách an toàn."""
         with self._lock:
             self.news_config = config.news
-            self.fmp_config = config.fmp
             self.timezone_str = config.no_run.timezone
 
             self._priority_keywords = self._build_priority_keywords(
@@ -111,44 +107,18 @@ class NewsService:
                 config.news.symbol_country_overrides if config.news else None
             )
 
-            provider_states: dict[str, dict[str, Any]] = {}
-
-            # Khoi tao FMPService (neu duoc bat)
-            self.fmp_service = None
-            self._fmp_last_error = None
-            if config.fmp and config.fmp.enabled:
-                try:
-                    self.fmp_service = FMPService(config.fmp)
-                    notes = getattr(self.fmp_service, 'dependency_notes', [])
-                    available = bool(getattr(self.fmp_service, 'is_available', True))
-                    provider_states['fmp'] = {
-                        'enabled': True,
-                        'available': available,
-                        'state': 'ready' if available else 'degraded',
-                    }
-                    if notes:
-                        provider_states['fmp']['notes'] = list(notes)
-                except Exception as exc:
-                    self._fmp_last_error = str(exc)
-                    provider_states['fmp'] = {
-                        'enabled': True,
-                        'available': False,
-                        'state': 'error',
-                        'error': self._fmp_last_error,
-                    }
-                    logger.error('Kh?ng th? kh?i t?o FMPService: %s', exc, exc_info=True)
-            else:
-                provider_states['fmp'] = {
-                    'enabled': False,
-                    'available': False,
-                    'state': 'disabled',
+            provider_states: dict[str, dict[str, Any]] = {
+                'ff_calendar': {
+                    'enabled': True,
+                    'available': True,
+                    'state': 'ready',
                 }
-                self.fmp_service = None
+            }
 
             self._provider_status_snapshot = self._clone_provider_states(provider_states)
             self._last_provider_report = self._clone_provider_states(provider_states)
 
-            logger.debug('C?u h�nh NewsService da du?c c?p nh?t.')
+            logger.debug('Cấu hình NewsService đã được cập nhật.')
 
     def set_update_callback(self, callback: Callable[[List[dict[str, Any]]], None]):
         """Đăng ký một hàm callback để được gọi sau mỗi lần cache được cập nhật."""
@@ -348,6 +318,54 @@ class NewsService:
             "providers": provider_payload,
         }
 
+    def _fetch_ff_calendar_data(self) -> list[dict[str, Any]]:
+        """Lấy dữ liệu lịch kinh tế từ file JSON."""
+        try:
+            response = requests.get(self.NEWS_URL, timeout=15)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error("Lỗi khi tải dữ liệu lịch kinh tế: %s", e)
+            raise
+
+    def _transform_ff_data(self, events: list[dict]) -> list[dict]:
+        """Chuyển đổi dữ liệu lịch kinh tế từ file JSON."""
+        transformed = []
+        for event in events:
+            try:
+                date_str = event.get("date")
+                event_title = event.get("title")
+
+                if not date_str or not event_title:
+                    continue
+
+                dt_utc = datetime.fromisoformat(date_str)
+
+                event_id = f"ff_{dt_utc.isoformat()}_{event_title}"
+                if event_id in self._dedup_ids:
+                    continue
+
+                transformed.append(
+                    self._enrich_event_metrics(
+                        {
+                            "id": event_id,
+                            "when_utc": dt_utc,
+                            "title": event_title,
+                            "country": event.get("country"),
+                            "impact": event.get("impact"),
+                            "source": "ff_calendar",
+                            "actual": event.get("actual"),
+                            "forecast": event.get("forecast"),
+                            "previous": event.get("previous"),
+                            "unit": None,
+                        }
+                    )
+                )
+                self._dedup_ids.add(event_id)
+            except (ValueError, KeyError, TypeError) as e:
+                logger.warning(f"Bỏ qua sự kiện không hợp lệ: {event}. Lỗi: {e}")
+        return transformed
+
     def _collect_events(
         self,
         *,
@@ -359,18 +377,9 @@ class NewsService:
     ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         """Thu thập dữ liệu thô từ các provider và theo dõi trạng thái của chúng."""
 
-        with self._lock:
-            fmp_service = self.fmp_service
-
-        provider_state = self._prepare_provider_state(provider_state, fmp_service)
-
-        if not fmp_service:
-            logger.debug("Không có nhà cung cấp tin tức nào được kích hoạt.")
-            return [], provider_state
-
-        tasks: list[tuple[str, Callable[..., list[dict]], Callable[[list[dict]], list[dict]]]] = []
-        if fmp_service:
-            tasks.append(("fmp", fmp_service.get_economic_calendar, self._transform_fmp_data))
+        tasks: list[tuple[str, Callable[..., list[dict]], Callable[[list[dict]], list[dict]]]] = [
+            ("ff_calendar", self._fetch_ff_calendar_data, self._transform_ff_data)
+        ]
 
         provider_records: list[tuple[str, Callable[[list[dict]], list[dict]], TaskRecord]] = []
         provider_started: dict[str, float] = {}
@@ -460,86 +469,6 @@ class NewsService:
                 copied["notes"] = [str(notes)]
             cloned[name] = copied
         return cloned
-
-    def _prepare_provider_state(
-        self,
-        provider_state: dict[str, dict[str, Any]] | None,
-        fmp_service: Any,
-    ) -> dict[str, dict[str, Any]]:
-        """Chuẩn hóa trạng thái provider dựa trên dịch vụ hiện có."""
-
-        state = provider_state or {}
-        for name, service in [("fmp", fmp_service)]:
-            info = state.setdefault(name, {})
-            notes = info.get("notes")
-            if isinstance(notes, list):
-                info["notes"] = list(notes)
-            elif notes is None:
-                info["notes"] = []
-            else:
-                info["notes"] = [str(notes)]
-
-            enabled = info.get("enabled")
-            if enabled is None:
-                enabled = service is not None
-                info["enabled"] = enabled
-
-            if not enabled:
-                info.setdefault("state", "disabled")
-                info["available"] = False
-                info.setdefault("event_count", 0)
-                continue
-
-            if service is None:
-                info.setdefault("state", "error")
-                info["available"] = False
-            else:
-                info.setdefault("available", True)
-                if info.get("state") not in {"error", "degraded"}:
-                    info.setdefault("state", "ready")
-
-            info.setdefault("event_count", 0)
-        return state
-
-    def _transform_fmp_data(self, events: list[dict]) -> list[dict]:
-        """Chuyển đổi dữ liệu từ FMP API (thực chất là investpy)."""
-        transformed = []
-        for event in events:
-            try:
-                date_str = event.get("date")
-                time_str = event.get("time")
-                event_title = event.get("event")
-
-                if not all([date_str, time_str, event_title]): continue
-                event_id = f"investpy_{date_str}_{time_str}_{event_title}"
-                if event_id in self._dedup_ids: continue
-                if time_str.lower() == "all day": continue
-                
-                time_str_cleaned = time_str.strip()
-                datetime_str = f"{date_str} {time_str_cleaned}"
-                dt_naive = datetime.strptime(datetime_str, "%d/%m/%Y %H:%M")
-                dt_utc = pytz.utc.localize(dt_naive)
-
-                transformed.append(
-                    self._enrich_event_metrics(
-                        {
-                            "id": event_id,
-                            "when_utc": dt_utc,
-                            "title": event_title,
-                            "country": event.get("zone"),
-                            "impact": event.get("importance"),
-                            "source": "investpy",
-                            "actual": event.get("actual"),
-                            "forecast": event.get("forecast"),
-                            "previous": event.get("previous"),
-                            "unit": event.get("unit") or event.get("unit_text"),
-                        }
-                    )
-                )
-                self._dedup_ids.add(event_id)
-            except (ValueError, KeyError, TypeError) as e:
-                logger.warning(f"Bỏ qua sự kiện investpy không hợp lệ: {event}. Lỗi: {e}")
-        return transformed
 
     def _filter_high_impact(self, events: list[dict]) -> list[dict]:
         """Lọc các sự kiện có impact cao hoặc có trong danh sách ưu tiên."""

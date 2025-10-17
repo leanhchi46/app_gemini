@@ -115,7 +115,7 @@ class NewsTabWidget(QWidget):
         summary = getattr(self, "_provider_summary", "")
         if not events:
             message = (
-                "Không có tin tức quan trọng nào. Kiểm tra API key FMP hoặc cấu hình symbol MT5."
+                "Không có tin tức quan trọng nào. Kiểm tra lại kết nối mạng hoặc cấu hình."
             )
             if summary:
                 message = f"{message}\nNguồn dữ liệu: {summary}"
@@ -123,8 +123,7 @@ class NewsTabWidget(QWidget):
             return
 
         latency_text = f"{latency_sec:.1f}s" if latency_sec is not None else "?"
-        src_text = source or "không xác định"
-        message = f"Đã tải {len(events)} sự kiện từ {src_text} (độ trễ {latency_text})."
+        message = f"Đã tải {len(events)} sự kiện (độ trễ {latency_text})."
         if summary:
             message = f"{message}\nNguồn dữ liệu: {summary}"
         self.status_label.setText(message)

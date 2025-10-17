@@ -110,13 +110,6 @@ class AutoTradeConfig:
 
 
 @dataclass(frozen=True)
-class FMPConfig:
-    """Cấu hình cho Financial Modeling Prep API."""
-    enabled: bool
-    api_key: str
-
-
-@dataclass(frozen=True)
 class NewsConfig:
     """Cấu hình liên quan đến tin tức."""
 
@@ -180,7 +173,6 @@ class RunConfig:
     no_trade: NoTradeConfig
     auto_trade: AutoTradeConfig
     news: NewsConfig
-    fmp: FMPConfig
     persistence: PersistenceConfig
     chart: ChartConfig = field(default_factory=ChartConfig)
     api: ApiConfig = field(default_factory=ApiConfig)

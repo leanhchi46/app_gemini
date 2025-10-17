@@ -96,8 +96,8 @@ class NewsTab:
             guidance_message = (
                 "Không tìm thấy sự kiện nào. Vui lòng kiểm tra:\n"
                 "1. Đã nhập Symbol trong Options -> Services -> MT5.\n"
-                "2. Đã bật FMP hoặc TE và nhập API key trong Options -> API Keys.\n"
-                "3. Có thể không có tin tức quan trọng nào trong 7 ngày tới."
+                "2. Kiểm tra lại kết nối mạng hoặc cấu hình.\n"
+                "3. Có thể không có tin tức quan trọng nào trong tuần."
             )
             self.tree.insert("", "end", values=("", "", guidance_message, "", "", "", "", ""))
             return

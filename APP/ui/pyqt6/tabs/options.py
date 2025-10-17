@@ -159,16 +159,6 @@ class OptionsTabWidget(QWidget):
         api_row.addWidget(toggle_api)
         api_form.addRow("Google AI:", api_row)
 
-        self.fmp_enabled = QCheckBox("Bật FMP")
-        self._register_change(self.fmp_enabled, "stateChanged")
-        self.fmp_key_edit = QLineEdit()
-        self.fmp_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._register_change(self.fmp_key_edit)
-        fmp_row = QHBoxLayout()
-        fmp_row.addWidget(self.fmp_enabled)
-        fmp_row.addWidget(self.fmp_key_edit)
-        api_form.addRow("FMP:", fmp_row)
-
         self.te_enabled = QCheckBox("Bật TradingEconomics")
         self._register_change(self.te_enabled, "stateChanged")
         self.te_key_edit = QLineEdit()
@@ -557,8 +547,6 @@ class OptionsTabWidget(QWidget):
 
         self._state = state
         self.api_key_edit.setText("")
-        self.fmp_enabled.setChecked(state.fmp.enabled)
-        self.fmp_key_edit.setText(state.fmp.api_key)
         self.te_enabled.setChecked(state.telegram.enabled)
         self.te_key_edit.setText(state.telegram.token)
         self.te_skip_ssl.setChecked(state.telegram.skip_verify)
@@ -677,10 +665,6 @@ class OptionsTabWidget(QWidget):
             "api": {
                 "tries": self.api_tries_spin.value(),
                 "delay": float(self.api_delay_spin.value()),
-            },
-            "fmp": {
-                "enabled": self.fmp_enabled.isChecked(),
-                "api_key": self.fmp_key_edit.text().strip(),
             },
             "telegram": {
                 "enabled": self.telegram_enabled.isChecked(),
