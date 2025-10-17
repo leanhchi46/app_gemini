@@ -134,6 +134,8 @@ class _PyQtHistoryManager:
         self._window.history_tab.set_status("Đang cập nhật lịch sử…")
 
 
+from APP.services.news_service import NewsService
+
 class PyQtAnalysisAppAdapter:
     """Đưa TradingMainWindow về API mong đợi của AnalysisWorker."""
 
@@ -142,10 +144,12 @@ class PyQtAnalysisAppAdapter:
         window: "TradingMainWindow",
         ui_queue,
         threading_manager,
+        news_service: NewsService | None,
     ) -> None:
         self._window = window
         self.ui_queue = ui_queue
         self.threading_manager = threading_manager
+        self.news_service = news_service
         self.prompt_manager = _PyQtPromptManager(window)
         self.history_manager = _PyQtHistoryManager(window)
         self.timeframe_detector = TimeframeDetector()
@@ -242,6 +246,7 @@ class TradingMainWindow(QMainWindow):
             self,
             self._ui_queue,
             self._threading.threading_manager,
+            self._controllers.news_service,
         )
         self._analysis_adapter.update_from_state(self._config_state)
         self._is_running = False

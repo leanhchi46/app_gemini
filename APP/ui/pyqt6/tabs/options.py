@@ -559,9 +559,9 @@ class OptionsTabWidget(QWidget):
         self.api_key_edit.setText("")
         self.fmp_enabled.setChecked(state.fmp.enabled)
         self.fmp_key_edit.setText(state.fmp.api_key)
-        self.te_enabled.setChecked(state.te.enabled)
-        self.te_key_edit.setText(state.te.api_key)
-        self.te_skip_ssl.setChecked(state.te.skip_ssl_verify)
+        self.te_enabled.setChecked(state.telegram.enabled)
+        self.te_key_edit.setText(state.telegram.token)
+        self.te_skip_ssl.setChecked(state.telegram.skip_verify)
 
         self.delete_after_checkbox.setChecked(state.folder.delete_after)
         self.max_files_spin.setValue(state.folder.max_files)
@@ -681,11 +681,6 @@ class OptionsTabWidget(QWidget):
             "fmp": {
                 "enabled": self.fmp_enabled.isChecked(),
                 "api_key": self.fmp_key_edit.text().strip(),
-            },
-            "te": {
-                "enabled": self.te_enabled.isChecked(),
-                "api_key": self.te_key_edit.text().strip(),
-                "skip_ssl_verify": self.te_skip_ssl.isChecked(),
             },
             "telegram": {
                 "enabled": self.telegram_enabled.isChecked(),
