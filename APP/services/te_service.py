@@ -3,10 +3,17 @@ from __future__ import annotations
 import logging
 from typing import Tuple
 
+_te_import_error: Exception | None = None
+
 try:
     import tradingeconomics as te  # type: ignore[import]
-except ModuleNotFoundError:  # pragma: no cover - optional dependency
+except Exception as exc:  # pragma: no cover - optional dependency
     te = None
+    _te_import_error = exc
+    logging.getLogger(__name__).warning(
+        "Trading Economics SDK import failed; TEService disabled: %s",
+        exc,
+    )
 from urllib.error import HTTPError
 
 from APP.configs.app_config import TEConfig
@@ -30,9 +37,13 @@ class TEService:
         """
         self.config = config
         if te is None:
-            raise RuntimeError(
-                "Không thể khởi tạo TEService vì thiếu thư viện tradingeconomics."
+            message = (
+                "Cannot initialize TEService because the tradingeconomics dependency "
+                "is not available."
             )
+            if _te_import_error is not None:
+                raise RuntimeError(message) from _te_import_error
+            raise RuntimeError(message)
 
         api_key = (self.config.api_key or "").strip()
 
