@@ -117,14 +117,6 @@ class FMPConfig:
 
 
 @dataclass(frozen=True)
-class TEConfig:
-    """Cấu hình cho Trading Economics API."""
-    enabled: bool
-    api_key: str
-    skip_ssl_verify: bool = False
-
-
-@dataclass(frozen=True)
 class NewsConfig:
     """Cấu hình liên quan đến tin tức."""
 
@@ -189,7 +181,6 @@ class RunConfig:
     auto_trade: AutoTradeConfig
     news: NewsConfig
     fmp: FMPConfig
-    te: TEConfig
     persistence: PersistenceConfig
     chart: ChartConfig = field(default_factory=ChartConfig)
     api: ApiConfig = field(default_factory=ApiConfig)

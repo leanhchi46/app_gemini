@@ -115,7 +115,7 @@ class NewsTabWidget(QWidget):
         summary = getattr(self, "_provider_summary", "")
         if not events:
             message = (
-                "Không có tin tức quan trọng nào. Kiểm tra API key FMP/TE hoặc cấu hình symbol MT5."
+                "Không có tin tức quan trọng nào. Kiểm tra API key FMP hoặc cấu hình symbol MT5."
             )
             if summary:
                 message = f"{message}\nNguồn dữ liệu: {summary}"

@@ -26,7 +26,6 @@ from APP.configs.app_config import (
     NoRunConfig,
     NoTradeConfig,
     PersistenceConfig,
-    TEConfig,
     TelegramConfig,
     UploadConfig,
 )
@@ -803,8 +802,31 @@ class TradingMainWindow(QMainWindow):
                     "auto_load": default_auto,
                     "message": f"Không tìm thấy tệp prompt: {path}",
                 }
+            if path.is_dir():
+                return {
+                    "no_entry": "",
+                    "entry_run": "",
+                    "auto_load": default_auto,
+                    "message": f"Đường dẫn prompt {path} là thư mục, hãy chọn tệp hợp lệ.",
+                }
 
-            raw = path.read_text(encoding="utf-8", errors="ignore")
+            try:
+                raw = path.read_text(encoding="utf-8", errors="ignore")
+            except PermissionError as exc:
+                return {
+                    "no_entry": "",
+                    "entry_run": "",
+                    "auto_load": default_auto,
+                    "message": f"Không thể đọc tệp prompt {path}: {exc}",
+                }
+            except OSError as exc:
+                return {
+                    "no_entry": "",
+                    "entry_run": "",
+                    "auto_load": default_auto,
+                    "message": f"Lỗi khi mở tệp prompt {path}: {exc}",
+                }
+
             try:
                 data = json.loads(raw)
                 message = "Đã tải prompt ở định dạng JSON."
@@ -1366,13 +1388,6 @@ class TradingMainWindow(QMainWindow):
             api_key=str(fmp_cfg.get("api_key", base.fmp.api_key)),
         )
 
-        te_cfg = options.get("te", {})
-        te_state = TEConfig(
-            enabled=bool(te_cfg.get("enabled", base.te.enabled)),
-            api_key=str(te_cfg.get("api_key", base.te.api_key)),
-            skip_ssl_verify=bool(te_cfg.get("skip_ssl_verify", base.te.skip_ssl_verify)),
-        )
-
         persistence_cfg = options.get("persistence", {})
         persistence_state = PersistenceConfig(
             max_md_reports=int(
@@ -1407,7 +1422,6 @@ class TradingMainWindow(QMainWindow):
             news=news_state,
             persistence=persistence_state,
             fmp=fmp_state,
-            te=te_state,
             chart=chart_state,
             model=self._config_state.model,
             autorun=autorun_state,

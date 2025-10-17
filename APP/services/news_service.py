@@ -11,9 +11,8 @@ from typing import Any, Callable, Final, Iterable, List, Optional
 
 import pytz
 
-from APP.configs.app_config import FMPConfig, NewsConfig, RunConfig, TEConfig
+from APP.configs.app_config import FMPConfig, NewsConfig, RunConfig
 from APP.services.fmp_service import FMPService
-from APP.services.te_service import TEService
 from APP.utils.threading_utils import CancelToken, ThreadingManager, TaskRecord
 
 logger = logging.getLogger(__name__)
@@ -57,11 +56,9 @@ class NewsService:
         """Khởi tạo dịch vụ ở trạng thái chưa hoạt động."""
         self.news_config: Optional[NewsConfig] = None
         self.fmp_config: Optional[FMPConfig] = None
-        self.te_config: Optional[TEConfig] = None
         self.timezone_str: str = "Asia/Ho_Chi_Minh"
         
         self.fmp_service: Optional[FMPService] = None
-        self.te_service: Optional[TEService] = None
 
         self._cache: list[dict[str, Any]] = []
         self._cache_time: Optional[datetime] = None
@@ -81,8 +78,6 @@ class NewsService:
         self._provider_status_snapshot: dict[str, dict[str, Any]] = {}
         self._last_provider_report: dict[str, dict[str, Any]] = {}
         self._fmp_last_error: Optional[str] = None
-        self._te_last_error: Optional[str] = None
-        self._te_failed_signatures: dict[tuple[str, bool], str] = {}
         
         # Threading attributes
         self._lock = Lock()
@@ -91,11 +86,10 @@ class NewsService:
         self._last_latency_sec: float = 0.0
 
     def update_config(self, config: RunConfig):
-        """C?p nh?t c?u h?nh cho d?ch v? m?t c?ch an to�n."""
+        """C?p nh?t c?u h?nh cho d?ch v? m?t c?ch an ton."""
         with self._lock:
             self.news_config = config.news
             self.fmp_config = config.fmp
-            self.te_config = config.te
             self.timezone_str = config.no_run.timezone
 
             self._priority_keywords = self._build_priority_keywords(
@@ -150,42 +144,6 @@ class NewsService:
                     'state': 'disabled',
                 }
                 self.fmp_service = None
-
-            # Khoi tao TEService (neu duoc bat)
-            self.te_service = None
-            self._te_last_error = None
-            if config.te and config.te.enabled:
-                signature = ((config.te.api_key or '').strip(), bool(config.te.skip_ssl_verify))
-                try:
-                    self.te_service = TEService(config.te)
-                    provider_states['te'] = {
-                        'enabled': True,
-                        'available': True,
-                        'state': 'ready',
-                        'skip_ssl_verify': bool(config.te.skip_ssl_verify),
-                    }
-                    self._te_failed_signatures.pop(signature, None)
-                except Exception as exc:
-                    self._te_last_error = str(exc)
-                    previous = self._te_failed_signatures.get(signature)
-                    self._te_failed_signatures[signature] = self._te_last_error
-                    provider_states['te'] = {
-                        'enabled': True,
-                        'available': False,
-                        'state': 'error',
-                        'error': self._te_last_error,
-                    }
-                    if previous is None:
-                        logger.error('Kh?ng th? kh?i t?o TEService: %s', exc, exc_info=True)
-                    else:
-                        logger.debug('B? qua TEService do l?i tru?c do: %s', self._te_last_error)
-            else:
-                provider_states['te'] = {
-                    'enabled': False,
-                    'available': False,
-                    'state': 'disabled',
-                }
-                self._te_failed_signatures.clear()
 
             self._provider_status_snapshot = self._clone_provider_states(provider_states)
             self._last_provider_report = self._clone_provider_states(provider_states)
@@ -403,19 +361,16 @@ class NewsService:
 
         with self._lock:
             fmp_service = self.fmp_service
-            te_service = self.te_service
 
-        provider_state = self._prepare_provider_state(provider_state, fmp_service, te_service)
+        provider_state = self._prepare_provider_state(provider_state, fmp_service)
 
-        if not fmp_service and not te_service:
+        if not fmp_service:
             logger.debug("Không có nhà cung cấp tin tức nào được kích hoạt.")
             return [], provider_state
 
         tasks: list[tuple[str, Callable[..., list[dict]], Callable[[list[dict]], list[dict]]]] = []
         if fmp_service:
             tasks.append(("fmp", fmp_service.get_economic_calendar, self._transform_fmp_data))
-        if te_service:
-            tasks.append(("te", te_service.get_calendar_events, self._transform_te_data))
 
         provider_records: list[tuple[str, Callable[[list[dict]], list[dict]], TaskRecord]] = []
         provider_started: dict[str, float] = {}
@@ -510,12 +465,11 @@ class NewsService:
         self,
         provider_state: dict[str, dict[str, Any]] | None,
         fmp_service: Any,
-        te_service: Any,
     ) -> dict[str, dict[str, Any]]:
         """Chuẩn hóa trạng thái provider dựa trên dịch vụ hiện có."""
 
         state = provider_state or {}
-        for name, service in ("fmp", fmp_service), ("te", te_service):
+        for name, service in [("fmp", fmp_service)]:
             info = state.setdefault(name, {})
             notes = info.get("notes")
             if isinstance(notes, list):
@@ -585,36 +539,6 @@ class NewsService:
                 self._dedup_ids.add(event_id)
             except (ValueError, KeyError, TypeError) as e:
                 logger.warning(f"Bỏ qua sự kiện investpy không hợp lệ: {event}. Lỗi: {e}")
-        return transformed
-
-    def _transform_te_data(self, events: list[dict]) -> list[dict]:
-        """Chuyển đổi dữ liệu từ Trading Economics API."""
-        transformed = []
-        for event in events:
-            try:
-                event_id = f"te_{event.get('CalendarId', '')}"
-                if not event.get('CalendarId') or event_id in self._dedup_ids: continue
-
-                dt_utc = datetime.strptime(str(event["Date"]), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=pytz.utc)
-                transformed.append(
-                    self._enrich_event_metrics(
-                        {
-                            "id": event_id,
-                            "when_utc": dt_utc,
-                            "title": event.get("Event"),
-                            "country": event.get("Country"),
-                            "impact": event.get("Importance"),
-                            "source": "TE",
-                            "actual": event.get("Actual"),
-                            "forecast": event.get("Forecast"),
-                            "previous": event.get("Previous"),
-                            "unit": event.get("Unit"),
-                        }
-                    )
-                )
-                self._dedup_ids.add(event_id)
-            except (ValueError, KeyError, TypeError) as e:
-                logger.warning(f"Bỏ qua sự kiện TE không hợp lệ: {event}. Lỗi: {e}")
         return transformed
 
     def _filter_high_impact(self, events: list[dict]) -> list[dict]:

@@ -20,7 +20,6 @@ from APP.configs.app_config import (
     NoTradeConfig,
     PersistenceConfig,
     RunConfig,
-    TEConfig,
     TelegramConfig,
     UploadConfig,
 )
@@ -67,7 +66,6 @@ class UiConfigState:
     news: NewsConfig
     persistence: PersistenceConfig
     fmp: FMPConfig
-    te: TEConfig
     chart: ChartConfig
     model: str
     autorun: AutorunState
@@ -88,7 +86,6 @@ class UiConfigState:
             auto_trade=self.auto_trade,
             news=self.news,
             fmp=self.fmp,
-            te=self.te,
             persistence=self.persistence,
             chart=self.chart,
             api=self.api,
@@ -124,11 +121,6 @@ class UiConfigState:
             "fmp": {
                 "enabled": self.fmp.enabled,
                 "api_key": self.fmp.api_key,
-            },
-            "te": {
-                "enabled": self.te.enabled,
-                "api_key": self.te.api_key,
-                "skip_ssl_verify": self.te.skip_ssl_verify,
             },
             "telegram": {
                 "enabled": self.telegram.enabled,
@@ -435,13 +427,6 @@ class UiConfigState:
             api_key=_clean_str(fmp_cfg.get("api_key")),
         )
 
-        te_cfg = data.get("te") or {}
-        te = TEConfig(
-            enabled=_as_bool(te_cfg.get("enabled"), False),
-            api_key=_clean_str(te_cfg.get("api_key")),
-            skip_ssl_verify=_as_bool(te_cfg.get("skip_ssl_verify"), False),
-        )
-
         news_cfg = data.get("news") or {}
         keywords = _normalize_keywords(news_cfg.get("priority_keywords"))
         if not keywords:
@@ -507,7 +492,6 @@ class UiConfigState:
             news=news,
             persistence=persistence,
             fmp=fmp,
-            te=te,
             chart=chart,
             model=model_name,
             autorun=autorun_state,

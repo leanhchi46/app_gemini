@@ -30,7 +30,7 @@ from APP.configs.app_config import (ApiConfig, AutoTradeConfig, ChartConfig,
                                     ContextConfig, FMPConfig, FolderConfig,
                                     ImageProcessingConfig, MT5Config,
                                     NewsConfig, NoRunConfig, NoTradeConfig,
-                                    PersistenceConfig, RunConfig, TEConfig,
+                                    PersistenceConfig, RunConfig,
                                     TelegramConfig, UploadConfig)
 from APP.configs.constants import FILES, MODELS, PATHS
 from APP.services import gemini_service, mt5_service
@@ -116,8 +116,6 @@ class AppUI:
         self.api_key_var: tk.StringVar
         self.fmp_api_key_var: tk.StringVar
         self.fmp_enabled_var: tk.BooleanVar
-        self.te_api_key_var: tk.StringVar
-        self.te_enabled_var: tk.BooleanVar
         self.model_var: tk.StringVar
         self.delete_after_var: tk.BooleanVar
         self.max_files_var: tk.IntVar
@@ -226,8 +224,6 @@ class AppUI:
         self.api_entry: Optional[tk.Entry] = None
         self.fmp_api_entry: Optional[tk.Entry] = None
         self.fmp_enabled_check: Optional[ttk.Checkbutton] = None
-        self.te_api_entry: Optional[tk.Entry] = None
-        self.te_enabled_check: Optional[ttk.Checkbutton] = None
         self.prompt_entry_run_text: Optional[tk.Text] = None
         self.prompt_no_entry_text: Optional[tk.Text] = None
         self.start_btn: Optional[ttk.Button] = None
@@ -457,7 +453,6 @@ class AppUI:
         api_keys = {
             "google": os.environ.get("GOOGLE_API_KEY", ""),
             "fmp": os.environ.get("FMP_API_KEY", ""),
-            "te": os.environ.get("TE_API_KEY", ""),
         }
         if PATHS.ALL_API_KEYS_ENC.exists():
             try:
@@ -477,13 +472,9 @@ class AppUI:
         self.api_key_var = tk.StringVar(value=api_keys.get("google", ""))
         self.fmp_api_key_var = tk.StringVar(value=api_keys.get("fmp", ""))
         self.fmp_enabled_var = tk.BooleanVar(value=False)
-        self.te_api_key_var = tk.StringVar(value=api_keys.get("te", ""))
-        self.te_enabled_var = tk.BooleanVar(value=False)
-        self.te_skip_ssl_var = tk.BooleanVar(value=False)
 
         # Thêm trace để cập nhật UI khi nhà cung cấp tin tức thay đổi
         self.fmp_enabled_var.trace_add("write", lambda *args: self._update_news_widgets_state())
-        self.te_enabled_var.trace_add("write", lambda *args: self._update_news_widgets_state())
 
         self.model_var = tk.StringVar(value=MODELS.DEFAULT_VISION)
         self.api_key_var.trace_add("write", lambda *args: self._configure_gemini_api_and_update_ui())
@@ -766,11 +757,6 @@ class AppUI:
                 enabled=self.fmp_enabled_var.get(),
                 api_key=self.fmp_api_key_var.get().strip(),
             ),
-            te=TEConfig(
-                enabled=self.te_enabled_var.get(),
-                api_key=self.te_api_key_var.get().strip(),
-                skip_ssl_verify=self.te_skip_ssl_var.get(),
-            ),
             chart=ChartConfig(
                 timeframe=self.chart_tab.tf_var.get() if self.chart_tab else "M15",
                 num_candles=self.chart_tab.n_candles_var.get() if self.chart_tab else 150,
@@ -907,11 +893,6 @@ class AppUI:
         fmp_cfg = config_data.get("fmp", {})
         self.fmp_enabled_var.set(get_nested(fmp_cfg, ["enabled"], False))
         self.fmp_api_key_var.set(get_nested(fmp_cfg, ["api_key"], ""))
-
-        te_cfg = config_data.get("te", {})
-        self.te_enabled_var.set(get_nested(te_cfg, ["enabled"], False))
-        self.te_api_key_var.set(get_nested(te_cfg, ["api_key"], ""))
-        self.te_skip_ssl_var.set(get_nested(te_cfg, ["skip_ssl_verify"], False))
 
         news_cfg = config_data.get("news", {})
         self.news_block_enabled_var.set(get_nested(news_cfg, ["block_enabled"], True))
@@ -1500,7 +1481,7 @@ class AppUI:
 
     def _toggle_api_visibility(self):
         """Chuyển đổi trạng thái hiển thị của tất cả các ô nhập API key."""
-        entries = [self.api_entry, self.fmp_api_entry, self.te_api_entry]
+        entries = [self.api_entry, self.fmp_api_entry]
         # Xác định trạng thái mới dựa trên entry đầu tiên
         is_hidden = entries[0] and entries[0].cget("show") == "*"
         new_show_char = "" if is_hidden else "*"
@@ -1611,9 +1592,9 @@ class AppUI:
     def _update_news_widgets_state(self):
         """
         Bật/tắt các widget con trong phần cài đặt tin tức dựa trên việc
-        có nhà cung cấp nào (FMP/TE) được bật hay không.
+        có nhà cung cấp nào (FMP) được bật hay không.
         """
-        any_provider_enabled = self.fmp_enabled_var.get() or self.te_enabled_var.get()
+        any_provider_enabled = self.fmp_enabled_var.get()
         new_state = "normal" if any_provider_enabled else "disabled"
 
         # Danh sách các widget cần thay đổi trạng thái
@@ -1638,7 +1619,7 @@ class AppUI:
         # Cập nhật cả tiêu đề của card để cung cấp phản hồi trực quan
         if self.news_card:
             if not any_provider_enabled:
-                self.news_card.config(text="Chặn tin tức (Cần bật FMP hoặc TE)")
+                self.news_card.config(text="Chặn tin tức (Cần bật FMP)")
             else:
                 self.news_card.config(text="Chặn giao dịch theo tin tức (News)")
 
@@ -2004,8 +1985,6 @@ class AppUI:
                 keys_found["google"] = key
             if key := os.environ.get("FMP_API_KEY"):
                 keys_found["fmp"] = key
-            if key := os.environ.get("TE_API_KEY"):
-                keys_found["te"] = key
 
             def update_ui():
                 self.ui_status("Sẵn sàng.")
@@ -2020,9 +1999,6 @@ class AppUI:
                 if "fmp" in keys_found:
                     self.fmp_api_key_var.set(keys_found["fmp"])
                     keys_loaded_names.append("FMP_API_KEY")
-                if "te" in keys_found:
-                    self.te_api_key_var.set(keys_found["te"])
-                    keys_loaded_names.append("TE_API_KEY")
 
                 msg = f"Đã tải các key sau từ .env:\n- " + "\n- ".join(keys_loaded_names)
                 ui_builder.show_message("Thành công", msg)
@@ -2042,7 +2018,6 @@ class AppUI:
         keys_to_save = {
             "google": self.api_key_var.get().strip(),
             "fmp": self.fmp_api_key_var.get().strip(),
-            "te": self.te_api_key_var.get().strip(),
         }
         keys_to_save = {k: v for k, v in keys_to_save.items() if v}
 
@@ -2102,7 +2077,6 @@ class AppUI:
             def update_ui():
                 self.api_key_var.set("")
                 self.fmp_api_key_var.set("")
-                self.te_api_key_var.set("")
                 ui_builder.show_message("Thành công", "Đã xóa các API key đã lưu.")
                 self.ui_status("Đã xóa API keys.")
             
