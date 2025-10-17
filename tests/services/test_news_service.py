@@ -96,6 +96,9 @@ def test_refresh_uses_threading_manager_metadata(dummy_tm: DummyThreadingManager
 
     assert len(payload["events"]) == 1
     assert payload["source"] == "network"
+    providers = payload.get("providers") or {}
+    assert "fmp" in providers
+    assert providers["fmp"].get("state") in {"ready", "degraded"}
     assert dummy_tm.submitted[0]["kwargs"]["group"] == "news.polling"
     assert dummy_tm.submitted[0]["kwargs"]["metadata"]["priority"] == "autorun"
 
@@ -121,6 +124,7 @@ def test_refresh_uses_cache_when_within_ttl(dummy_tm: DummyThreadingManager) -> 
     )
 
     assert cached_payload["source"] == "cache"
+    assert "providers" in cached_payload
     assert dummy_tm.submitted == []
 
 

@@ -213,6 +213,16 @@ class ThreadingManager:
             record.token.cancel()
             record.future.cancel()
 
+    def is_idle(self, group: Optional[str] = None) -> bool:
+        """Kiểm tra nhanh xem nhóm task còn đang chạy hay không."""
+
+        with self._lock:
+            if group:
+                records = list(self._groups.get(group, []))
+            else:
+                records = [rec for recs in self._groups.values() for rec in recs]
+        return all(rec.future.done() for rec in records)
+
     def await_idle(self, group: Optional[str] = None, timeout: Optional[float] = None) -> bool:
         """Chờ tới khi nhóm (hoặc toàn bộ) task rỗng."""
 

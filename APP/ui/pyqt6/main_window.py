@@ -7,7 +7,7 @@ import json
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from PyQt6.QtCore import QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices
@@ -730,24 +730,59 @@ class TradingMainWindow(QMainWindow):
         source = str(payload.get("source") or "unknown")
         latency = float(payload.get("latency") or payload.get("latency_sec") or 0.0)
         priority = str(payload.get("priority") or "auto")
+        providers = payload.get("providers") or {}
         self._last_news_payload = {
             "events": events,
             "source": source,
             "latency": latency,
             "priority": priority,
+            "providers": providers,
         }
-        self.news_tab.update_events(events, source=source, latency_sec=latency)
+        self.news_tab.update_events(events, source=source, latency_sec=latency, providers=providers)
         self.news_tab.set_loading(False)
-        self.statusBar().showMessage(
-            f"Đã cập nhật tin tức ({priority}, nguồn {source}).",
-            4000,
-        )
+
+        warnings = self._summarize_provider_alerts(providers)
+        message = f"Đã cập nhật tin tức ({priority}, nguồn {source})."
+        duration = 4000 if not warnings else 6000
+        if warnings:
+            message = f"{message} Cảnh báo: {warnings}"
+        self.statusBar().showMessage(message, duration)
 
     def _handle_news_error(self, exc: BaseException) -> None:
         self.news_tab.set_loading(False)
         message = f"Lỗi khi tải tin tức: {exc}"
         self.news_tab.status_label.setText(message)
         self.statusBar().showMessage(message, 5000)
+
+    def _summarize_provider_alerts(self, providers: Mapping[str, Mapping[str, Any]] | None) -> str:
+        """Tạo chuỗi cảnh báo gọn cho các provider gặp vấn đề."""
+
+        if not providers:
+            return ""
+
+        alerts: list[str] = []
+        for name, info in providers.items():
+            enabled = info.get("enabled", True)
+            if not enabled:
+                continue
+
+            state = str(info.get("state") or "").lower()
+            error_text = str(info.get("error") or "").strip()
+            notes = info.get("notes") or []
+
+            if state in {"ready", "pending"} and not error_text:
+                continue
+
+            label = name.upper()
+            if state == "degraded" and not error_text:
+                detail = notes[0] if isinstance(notes, list) and notes else "hoạt động giới hạn"
+                alerts.append(f"{label}: {detail}")
+            elif error_text:
+                alerts.append(f"{label}: {error_text}")
+            elif state:
+                alerts.append(f"{label}: {state}")
+
+        return "; ".join(alerts)
 
     # ------------------------------------------------------------------
     # Handlers cho tab Prompt

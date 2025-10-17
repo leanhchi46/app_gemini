@@ -34,6 +34,20 @@ class FMPService:
             config: Đối tượng cấu hình FMPConfig chứa API key.
         """
         self.config = config
+        self.is_available: bool = investpy is not None
+        self._dependency_notes: list[str] = []
+        if investpy is None:
+            self._dependency_notes.append('Thi?u thu vi?n investpy - kh�ng th? goi economic_calendar.')
+        if pd is None:
+            self._dependency_notes.append(
+                'pandas chua du?c c�i d?t - dung fallback chuy?n d?i danh s�ch (kh�ng ?nh hu?ng ?n investpy).'
+            )
+
+    @property
+    def dependency_notes(self) -> list[str]:
+        """Tr? v? danh s�ch ghi ch� phu thu?c hi?n c� (neu co)."""
+
+        return list(self._dependency_notes)
 
     def get_economic_calendar(self, days: int = 7) -> list[dict]:
         """

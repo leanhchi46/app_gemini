@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from typing import Iterable, Mapping, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -37,6 +37,7 @@ class NewsTabWidget(QWidget):
         self.refresh_button.clicked.connect(self.manual_refresh_requested)
 
         self.status_label = QLabel("Chưa tải dữ liệu tin tức", self)
+        self._provider_summary: str = ""
 
         self.table = QTableWidget(self)
         self.table.setColumnCount(8)
@@ -85,7 +86,17 @@ class NewsTabWidget(QWidget):
         layout.addWidget(self.table)
 
     # ------------------------------------------------------------------
-    def update_events(self, events: Iterable[dict], *, source: str | None = None, latency_sec: float | None = None) -> None:
+    def update_events(
+        self,
+        events: Iterable[dict],
+        *,
+        source: str | None = None,
+        latency_sec: float | None = None,
+        providers: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> None:
+        if providers is not None:
+            self.set_provider_state(providers)
+
         events = list(events)
         self.table.setRowCount(len(events))
 
@@ -101,19 +112,66 @@ class NewsTabWidget(QWidget):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row, column, item)
 
+        summary = getattr(self, "_provider_summary", "")
         if not events:
-            self.status_label.setText(
+            message = (
                 "Không có tin tức quan trọng nào. Kiểm tra API key FMP/TE hoặc cấu hình symbol MT5."
             )
-        else:
-            latency_text = f"{latency_sec:.1f}s" if latency_sec is not None else "?"
-            src_text = source or "không xác định"
-            self.status_label.setText(f"Đã tải {len(events)} sự kiện từ {src_text} (độ trễ {latency_text}).")
+            if summary:
+                message = f"{message}\nNguồn dữ liệu: {summary}"
+            self.status_label.setText(message)
+            return
+
+        latency_text = f"{latency_sec:.1f}s" if latency_sec is not None else "?"
+        src_text = source or "không xác định"
+        message = f"Đã tải {len(events)} sự kiện từ {src_text} (độ trễ {latency_text})."
+        if summary:
+            message = f"{message}\nNguồn dữ liệu: {summary}"
+        self.status_label.setText(message)
 
     def set_loading(self, loading: bool) -> None:
         self.refresh_button.setEnabled(not loading)
         if loading:
             self.status_label.setText("Đang tải dữ liệu tin tức…")
+
+    def set_provider_state(self, providers: Mapping[str, Mapping[str, object]] | None) -> None:
+        """Chuẩn hóa trạng thái provider phục vụ hiển thị UI."""
+
+        if not providers:
+            self._provider_summary = ""
+            return
+
+        state_labels = {
+            "ready": "sẵn sàng",
+            "degraded": "giới hạn",
+            "error": "lỗi",
+            "timeout": "timeout",
+            "backoff": "tạm dừng",
+            "cancelled": "đã hủy",
+            "disabled": "tắt",
+            "pending": "đang chạy",
+        }
+        summary_parts: list[str] = []
+        for name, info in sorted(providers.items()):
+            label = name.upper()
+            state = str(info.get("state") or "không xác định").lower()
+            state_text = state_labels.get(state, state)
+            piece = f"{label}: {state_text}"
+
+            event_count = info.get("event_count")
+            if isinstance(event_count, int) and event_count > 0 and state == "ready":
+                piece += f" ({event_count})"
+
+            error = info.get("error")
+            notes = info.get("notes") or []
+            if error:
+                piece += f" - {error}"
+            elif notes:
+                piece += f" - {notes[0]}"
+
+            summary_parts.append(piece)
+
+        self._provider_summary = " | ".join(summary_parts)
 
     def _emit_override(self, state: int) -> None:
         enabled = state == Qt.CheckState.Checked.value

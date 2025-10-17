@@ -14,7 +14,7 @@ import pytz
 from APP.configs.app_config import FMPConfig, NewsConfig, RunConfig, TEConfig
 from APP.services.fmp_service import FMPService
 from APP.services.te_service import TEService
-from APP.utils.threading_utils import CancelToken, ThreadingManager
+from APP.utils.threading_utils import CancelToken, ThreadingManager, TaskRecord
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,12 @@ class NewsService:
         }
         self._symbol_country_overrides: dict[str, set[str]] = {}
         
+        self._provider_status_snapshot: dict[str, dict[str, Any]] = {}
+        self._last_provider_report: dict[str, dict[str, Any]] = {}
+        self._fmp_last_error: Optional[str] = None
+        self._te_last_error: Optional[str] = None
+        self._te_failed_signatures: dict[tuple[str, bool], str] = {}
+        
         # Threading attributes
         self._lock = Lock()
         self._update_callback: Optional[Callable[[List[dict[str, Any]]], None]] = None
@@ -85,7 +91,7 @@ class NewsService:
         self._last_latency_sec: float = 0.0
 
     def update_config(self, config: RunConfig):
-        """Cập nhật cấu hình cho dịch vụ một cách an toàn."""
+        """C?p nh?t c?u h?nh cho d?ch v? m?t c?ch an to�n."""
         with self._lock:
             self.news_config = config.news
             self.fmp_config = config.fmp
@@ -110,23 +116,81 @@ class NewsService:
             self._symbol_country_overrides = self._build_symbol_overrides(
                 config.news.symbol_country_overrides if config.news else None
             )
-            
-            # Khởi tạo lại các service con nếu cần
+
+            provider_states: dict[str, dict[str, Any]] = {}
+
+            # Khoi tao FMPService (neu duoc bat)
             self.fmp_service = None
+            self._fmp_last_error = None
             if config.fmp and config.fmp.enabled:
                 try:
                     self.fmp_service = FMPService(config.fmp)
+                    notes = getattr(self.fmp_service, 'dependency_notes', [])
+                    available = bool(getattr(self.fmp_service, 'is_available', True))
+                    provider_states['fmp'] = {
+                        'enabled': True,
+                        'available': available,
+                        'state': 'ready' if available else 'degraded',
+                    }
+                    if notes:
+                        provider_states['fmp']['notes'] = list(notes)
                 except Exception as exc:
-                    logger.error("Không thể khởi tạo FMPService: %s", exc, exc_info=True)
+                    self._fmp_last_error = str(exc)
+                    provider_states['fmp'] = {
+                        'enabled': True,
+                        'available': False,
+                        'state': 'error',
+                        'error': self._fmp_last_error,
+                    }
+                    logger.error('Kh?ng th? kh?i t?o FMPService: %s', exc, exc_info=True)
+            else:
+                provider_states['fmp'] = {
+                    'enabled': False,
+                    'available': False,
+                    'state': 'disabled',
+                }
+                self.fmp_service = None
 
+            # Khoi tao TEService (neu duoc bat)
             self.te_service = None
+            self._te_last_error = None
             if config.te and config.te.enabled:
+                signature = ((config.te.api_key or '').strip(), bool(config.te.skip_ssl_verify))
                 try:
                     self.te_service = TEService(config.te)
+                    provider_states['te'] = {
+                        'enabled': True,
+                        'available': True,
+                        'state': 'ready',
+                        'skip_ssl_verify': bool(config.te.skip_ssl_verify),
+                    }
+                    self._te_failed_signatures.pop(signature, None)
                 except Exception as exc:
-                    logger.error("Không thể khởi tạo TEService: %s", exc, exc_info=True)
+                    self._te_last_error = str(exc)
+                    previous = self._te_failed_signatures.get(signature)
+                    self._te_failed_signatures[signature] = self._te_last_error
+                    provider_states['te'] = {
+                        'enabled': True,
+                        'available': False,
+                        'state': 'error',
+                        'error': self._te_last_error,
+                    }
+                    if previous is None:
+                        logger.error('Kh?ng th? kh?i t?o TEService: %s', exc, exc_info=True)
+                    else:
+                        logger.debug('B? qua TEService do l?i tru?c do: %s', self._te_last_error)
+            else:
+                provider_states['te'] = {
+                    'enabled': False,
+                    'available': False,
+                    'state': 'disabled',
+                }
+                self._te_failed_signatures.clear()
 
-            logger.debug("Cấu hình NewsService đã được cập nhật.")
+            self._provider_status_snapshot = self._clone_provider_states(provider_states)
+            self._last_provider_report = self._clone_provider_states(provider_states)
+
+            logger.debug('C?u h�nh NewsService da du?c c?p nh?t.')
 
     def set_update_callback(self, callback: Callable[[List[dict[str, Any]]], None]):
         """Đăng ký một hàm callback để được gọi sau mỗi lần cache được cập nhật."""
@@ -261,6 +325,8 @@ class NewsService:
             ttl = self.news_config.cache_ttl_sec if self.news_config else 300
             last_time = self._cache_time
             cache_copy = list(self._cache)
+            provider_base = self._clone_provider_states(self._provider_status_snapshot)
+            provider_snapshot = self._clone_provider_states(self._last_provider_report)
 
         cache_age = (now_utc - last_time).total_seconds() if last_time else None
         if not force and cache_age is not None and cache_age < ttl:
@@ -276,24 +342,29 @@ class NewsService:
                 "priority": priority,
                 "ttl": ttl,
                 "latency_sec": 0.0,
+                "providers": provider_snapshot,
             }
 
         cancel_token.raise_if_cancelled()
-        events = self._collect_events(
+        events, provider_report = self._collect_events(
             threading_manager=threading_manager,
             cancel_token=cancel_token,
             timeout_sec=timeout_sec,
             priority=priority,
+            provider_state=provider_base,
         )
         cancel_token.raise_if_cancelled()
 
         filtered_events = self._filter_high_impact(events)
+        provider_payload = self._clone_provider_states(provider_report)
 
         with self._lock:
             self._cache = filtered_events
             self._cache_time = now_utc
             self._last_refresh = now_utc
             self._last_latency_sec = monotonic() - start_time
+            self._provider_status_snapshot = self._clone_provider_states(provider_report)
+            self._last_provider_report = self._clone_provider_states(provider_report)
             callback = self._update_callback
             cache_copy = list(self._cache)
 
@@ -316,6 +387,7 @@ class NewsService:
             "priority": priority,
             "ttl": ttl,
             "latency_sec": self._last_latency_sec,
+            "providers": provider_payload,
         }
 
     def _collect_events(
@@ -325,33 +397,36 @@ class NewsService:
         cancel_token: CancelToken,
         timeout_sec: int,
         priority: str,
-    ) -> list[dict[str, Any]]:
-        """
-        Thu thập dữ liệu thô từ các provider đã bật.
-        Logic được thiết kế để vẫn thành công ngay cả khi chỉ một provider hoạt động.
-        """
+        provider_state: dict[str, dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+        """Thu thập dữ liệu thô từ các provider và theo dõi trạng thái của chúng."""
 
         with self._lock:
             fmp_service = self.fmp_service
             te_service = self.te_service
 
+        provider_state = self._prepare_provider_state(provider_state, fmp_service, te_service)
+
         if not fmp_service and not te_service:
             logger.debug("Không có nhà cung cấp tin tức nào được kích hoạt.")
-            return []
+            return [], provider_state
 
-        tasks = []
+        tasks: list[tuple[str, Callable[..., list[dict]], Callable[[list[dict]], list[dict]]]] = []
         if fmp_service:
             tasks.append(("fmp", fmp_service.get_economic_calendar, self._transform_fmp_data))
         if te_service:
             tasks.append(("te", te_service.get_calendar_events, self._transform_te_data))
 
-        provider_records: list[tuple[str, Callable[[list[dict]], list[dict]], Any]] = []
+        provider_records: list[tuple[str, Callable[[list[dict]], list[dict]], TaskRecord]] = []
+        provider_started: dict[str, float] = {}
+        now_utc = datetime.now(pytz.utc)
         self._dedup_ids.clear()
 
-        now_monotonic = monotonic()
         for provider_name, fetch_fn, transform_fn in tasks:
-            if self._should_skip_provider(provider_name, now_monotonic):
+            state = provider_state.setdefault(provider_name, {})
+            if self._should_skip_provider(provider_name, monotonic()):
                 logger.info("Bỏ qua provider %s do đang trong thời gian backoff.", provider_name)
+                state.update({"state": "backoff", "available": False})
                 continue
 
             def provider_worker(cancel_token: CancelToken, fn=fetch_fn) -> list[dict]:
@@ -367,37 +442,110 @@ class NewsService:
                 metadata={"component": "news", "provider": provider_name, "priority": priority},
             )
             provider_records.append((provider_name, transform_fn, record))
+            provider_started[provider_name] = monotonic()
+            state.update({"state": "pending", "available": True, "enabled": True})
+            state.pop("error", None)
 
         aggregated: list[dict[str, Any]] = []
         successful_providers = 0
         for provider_name, transform_fn, record in provider_records:
+            state = provider_state.setdefault(provider_name, {})
             try:
                 raw_data = record.future.result(timeout=timeout_sec)
                 cancel_token.raise_if_cancelled()
 
-                # Một lệnh gọi thành công, ngay cả khi không có dữ liệu, vẫn được tính là thành công.
                 self._record_provider_success(provider_name)
                 successful_providers += 1
 
-                if raw_data:
-                    aggregated.extend(transform_fn(raw_data))
+                latency = monotonic() - provider_started.get(provider_name, monotonic())
+                state["latency_sec"] = latency
+                state["last_update_utc"] = now_utc.isoformat()
+
+                transformed = transform_fn(raw_data) if raw_data else []
+                state["event_count"] = len(transformed)
+                if transformed:
+                    aggregated.extend(transformed)
+
+                if state.get("state") not in {"degraded", "error"}:
+                    state["state"] = "ready"
             except CancelledError:
-                logger.info("Provider %s bị hủy do cancel token.", provider_name)
+                state.update({"state": "cancelled", "available": False})
+                state["last_update_utc"] = now_utc.isoformat()
             except TimeoutError:
-                logger.warning("Provider %s vượt quá timeout %ss.", provider_name, timeout_sec)
+                state.update({"state": "timeout", "available": False, "error": f"Timeout {timeout_sec}s"})
+                state["last_update_utc"] = now_utc.isoformat()
                 self._record_provider_failure(provider_name)
             except Exception as exc:
-                logger.warning("Provider %s gặp lỗi: %s", provider_name, exc)
+                state.update({"state": "error", "available": False, "error": str(exc)})
+                state["last_update_utc"] = now_utc.isoformat()
                 self._record_provider_failure(provider_name)
 
         if not successful_providers and provider_records:
             logger.warning(
-                "Tất cả các nhà cung cấp tin tức (%d) đều thất bại. "
-                "Phân tích sẽ tiếp tục với dữ liệu tin tức trống.",
-                len(provider_records)
+                "Tất cả các nhà cung cấp tin tức (%d) đều thất bại. Phân tích sẽ tiếp tục với dữ liệu trống.",
+                len(provider_records),
             )
 
-        return aggregated
+        return aggregated, provider_state
+
+    def _clone_provider_states(self, states: dict[str, dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+        """Tạo bản sao an toàn cho trạng thái provider nhằm tránh chia sẻ tham chiếu."""
+
+        if not states:
+            return {}
+        cloned: dict[str, dict[str, Any]] = {}
+        for name, info in states.items():
+            copied = dict(info)
+            notes = copied.get("notes")
+            if isinstance(notes, list):
+                copied["notes"] = list(notes)
+            elif notes is None:
+                copied["notes"] = []
+            else:
+                copied["notes"] = [str(notes)]
+            cloned[name] = copied
+        return cloned
+
+    def _prepare_provider_state(
+        self,
+        provider_state: dict[str, dict[str, Any]] | None,
+        fmp_service: Any,
+        te_service: Any,
+    ) -> dict[str, dict[str, Any]]:
+        """Chuẩn hóa trạng thái provider dựa trên dịch vụ hiện có."""
+
+        state = provider_state or {}
+        for name, service in ("fmp", fmp_service), ("te", te_service):
+            info = state.setdefault(name, {})
+            notes = info.get("notes")
+            if isinstance(notes, list):
+                info["notes"] = list(notes)
+            elif notes is None:
+                info["notes"] = []
+            else:
+                info["notes"] = [str(notes)]
+
+            enabled = info.get("enabled")
+            if enabled is None:
+                enabled = service is not None
+                info["enabled"] = enabled
+
+            if not enabled:
+                info.setdefault("state", "disabled")
+                info["available"] = False
+                info.setdefault("event_count", 0)
+                continue
+
+            if service is None:
+                info.setdefault("state", "error")
+                info["available"] = False
+            else:
+                info.setdefault("available", True)
+                if info.get("state") not in {"error", "degraded"}:
+                    info.setdefault("state", "ready")
+
+            info.setdefault("event_count", 0)
+        return state
 
     def _transform_fmp_data(self, events: list[dict]) -> list[dict]:
         """Chuyển đổi dữ liệu từ FMP API (thực chất là investpy)."""

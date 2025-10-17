@@ -21,6 +21,20 @@ from APP.configs.app_config import TEConfig
 logger = logging.getLogger(__name__)
 
 
+def tradingeconomics_available() -> bool:
+    """Cho biet thu vien tradingeconomics co san hay khong."""
+
+    return te is not None
+
+
+def tradingeconomics_dependency_error() -> str | None:
+    """Mo ta loi phu thuoc (neu co) tu tradingeconomics."""
+
+    if _te_import_error is None:
+        return None
+    return str(_te_import_error)
+
+
 class TEService:
     """
     Dịch vụ để tương tác với API của Trading Economics (TE).
