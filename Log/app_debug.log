@@ -1,0 +1,237 @@
+2025-10-17 03:42:27,284 - APP.persistence.log_handler - INFO - Đã cấu hình logging xoay vòng. File log: Log\app_debug.log, Size: 5MB, Backups: 5
+2025-10-17 03:42:27,284 - APP.persistence.log_handler - DEBUG - Hoàn tất thiết lập logging cho ứng dụng.
+2025-10-17 03:42:27,285 - __main__ - INFO - Application starting...
+2025-10-17 03:42:27,286 - __main__ - INFO - telemetry.ui_backend=pyqt6
+2025-10-17 03:42:27,286 - APP.utils.threading_utils - INFO - Khởi tạo ThreadPoolExecutor với tối đa 10 luồng.
+2025-10-17 03:42:27,400 - APP.configs.app_config - DEBUG - Bắt đầu hàm __post_init__ của RunConfig.
+2025-10-17 03:42:27,402 - APP.configs.app_config - DEBUG - RunConfig được khởi tạo: RunConfig(folder=FolderConfig(folder='C:/Users/leanhchi/AppData/Roaming/MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075/MQL5/Files/Screenshots', delete_after=True, max_files=0, only_generate_if_changed=False), upload=UploadConfig(upload_workers=4, cache_enabled=True, optimize_lossless=False), image_processing=ImageProcessingConfig(max_width=1600, jpeg_quality=85), context=ContextConfig(ctx_limit=2000, create_ctx_json=True, prefer_ctx_json=True, ctx_json_n=5, remember_context=True, n_reports=1), telegram=TelegramConfig(enabled=True, token='8401224691:AAHu14vQxwnOlD9IBPsU1yp59nZ8Ta0mMYk', chat_id='907737980', skip_verify=True, ca_path='', notify_on_early_exit=False), mt5=MT5Config(enabled=True, symbol='XAUUSD', n_M1=120, n_M5=180, n_M15=96, n_H1=120), no_run=NoRunConfig(weekend_enabled=True, killzone_enabled=False, holiday_check_enabled=True, holiday_check_country='US', timezone='Asia/Ho_Chi_Minh', killzone_summer={'asia': {'start': '06:00', 'end': '09:00'}, 'london': {'start': '14:00', 'end': '17:00'}, 'newyork_am': {'start': '19:30', 'end': '22:00'}, 'newyork_pm': {'start': '00:00', 'end': '03:00'}}, killzone_winter={'asia': {'start': '06:00', 'end': '09:00'}, 'london': {'start': '15:00', 'end': '18:00'}, 'newyork_am': {'start': '20:30', 'end': '23:00'}, 'newyork_pm': {'start': '01:00', 'end': '04:00'}}), no_trade=NoTradeConfig(enabled=True, spread_max_pips=4.2, min_atr_m5_pips=0.3, min_dist_keylvl_pips=5.0, allow_session_asia=True, allow_session_london=True, allow_session_ny=True), auto_trade=AutoTradeConfig(enabled=True, strict_bias=True, size_mode='risk_percent', risk_per_trade=1.0, split_tp_enabled=True, split_tp_ratio=50, deviation=20, magic_number=26092025, comment='AI-ICT', pending_ttl_min=90, min_rr_tp2=2.0, cooldown_min=10, dynamic_pending=True, dry_run=False, move_to_be_after_tp1=True, trailing_atr_mult=0.5, filling_type='IOC'), news=NewsConfig(block_enabled=True, block_before_min=5, block_after_min=5, cache_ttl_sec=600, provider_timeout_sec=20, priority_keywords=('business confidence', 'consumer confidence', 'consumer price index', 'cpi', 'gdp', 'gross domestic product', 'ifo', 'industrial production', 'inflation rate', 'interest rate', 'ism', 'nfp', 'non-farm payroll', 'pmi', 'purchasing managers', 'retail sales', 'trade balance', 'unemployment rate', 'zew'), provider_error_threshold=2, provider_error_backoff_sec=300, surprise_score_threshold=0.5, currency_country_overrides=None, symbol_country_overrides=None), fmp=FMPConfig(enabled=True, api_key='XL0taxDun2w72XyH70rVACj628PS0hxs'), te=TEConfig(enabled=True, api_key='2965e93128ff437:ovhzxu4u55gccrl', skip_ssl_verify=True), persistence=PersistenceConfig(max_md_reports=10, max_json_reports=10), chart=ChartConfig(timeframe='M1', num_candles=50, chart_type='Nến', refresh_interval_secs=1), api=ApiConfig(tries=5, delay=2.0), logging=LoggingConfig(log_dir='Log', log_file_name='app_debug.log', log_rotation_size_mb=5, log_rotation_backup_count=5))
+2025-10-17 03:42:27,403 - APP.configs.app_config - DEBUG - Kết thúc hàm __post_init__ của RunConfig.
+2025-10-17 03:42:27,404 - APP.services.news_service - ERROR - Không thể khởi tạo TEService: Cannot initialize TEService because the tradingeconomics dependency is not available.
+Traceback (most recent call last):
+  File "C:\tool\app_gemini-1\APP\services\te_service.py", line 9, in <module>
+    import tradingeconomics as te  # type: ignore[import]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\tradingeconomics\__init__.py", line 11, in <module>
+    from .historicalDB import getHistorical
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\tradingeconomics\historicalDB.py", line 4, in <module>
+    import pandas as pd
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\__init__.py", line 61, in <module>
+    from pandas.core.api import (
+    ...<62 lines>...
+    )
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\core\api.py", line 1, in <module>
+    from pandas._libs import (
+    ...<4 lines>...
+    )
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\_libs\__init__.py", line 18, in <module>
+    from pandas._libs.interval import Interval
+  File "pandas/_libs/interval.pyx", line 1, in init pandas._libs.interval
+  File "pandas/_libs/hashtable.pyx", line 1, in init pandas._libs.hashtable
+  File "pandas/_libs/missing.pyx", line 40, in init pandas._libs.missing
+AttributeError: partially initialized module 'pandas' from 'C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\__init__.py' has no attribute '_pandas_datetime_CAPI' (most likely due to a circular import)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool\app_gemini-1\APP\services\news_service.py", line 125, in update_config
+    self.te_service = TEService(config.te)
+                      ~~~~~~~~~^^^^^^^^^^^
+  File "C:\tool\app_gemini-1\APP\services\te_service.py", line 45, in __init__
+    raise RuntimeError(message) from _te_import_error
+RuntimeError: Cannot initialize TEService because the tradingeconomics dependency is not available.
+2025-10-17 03:42:27,429 - APP.services.news_service - DEBUG - Cấu hình NewsService đã được cập nhật.
+2025-10-17 03:42:27,462 - APP.configs.app_config - DEBUG - Bắt đầu hàm __post_init__ của RunConfig.
+2025-10-17 03:42:27,468 - APP.configs.app_config - DEBUG - RunConfig được khởi tạo: RunConfig(folder=FolderConfig(folder='C:/Users/leanhchi/AppData/Roaming/MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075/MQL5/Files/Screenshots', delete_after=True, max_files=0, only_generate_if_changed=False), upload=UploadConfig(upload_workers=4, cache_enabled=True, optimize_lossless=False), image_processing=ImageProcessingConfig(max_width=1600, jpeg_quality=85), context=ContextConfig(ctx_limit=2000, create_ctx_json=True, prefer_ctx_json=True, ctx_json_n=5, remember_context=True, n_reports=1), telegram=TelegramConfig(enabled=True, token='8401224691:AAHu14vQxwnOlD9IBPsU1yp59nZ8Ta0mMYk', chat_id='907737980', skip_verify=True, ca_path='', notify_on_early_exit=False), mt5=MT5Config(enabled=True, symbol='XAUUSD', n_M1=120, n_M5=180, n_M15=96, n_H1=120), no_run=NoRunConfig(weekend_enabled=True, killzone_enabled=False, holiday_check_enabled=True, holiday_check_country='US', timezone='Asia/Ho_Chi_Minh', killzone_summer={'asia': {'start': '06:00', 'end': '09:00'}, 'london': {'start': '14:00', 'end': '17:00'}, 'newyork_am': {'start': '19:30', 'end': '22:00'}, 'newyork_pm': {'start': '00:00', 'end': '03:00'}}, killzone_winter={'asia': {'start': '06:00', 'end': '09:00'}, 'london': {'start': '15:00', 'end': '18:00'}, 'newyork_am': {'start': '20:30', 'end': '23:00'}, 'newyork_pm': {'start': '01:00', 'end': '04:00'}}), no_trade=NoTradeConfig(enabled=True, spread_max_pips=4.2, min_atr_m5_pips=0.3, min_dist_keylvl_pips=5.0, allow_session_asia=True, allow_session_london=True, allow_session_ny=True), auto_trade=AutoTradeConfig(enabled=True, strict_bias=True, size_mode='risk_percent', risk_per_trade=1.0, split_tp_enabled=True, split_tp_ratio=50, deviation=20, magic_number=26092025, comment='AI-ICT', pending_ttl_min=90, min_rr_tp2=2.0, cooldown_min=10, dynamic_pending=True, dry_run=False, move_to_be_after_tp1=True, trailing_atr_mult=0.5, filling_type='IOC'), news=NewsConfig(block_enabled=True, block_before_min=5, block_after_min=5, cache_ttl_sec=600, provider_timeout_sec=20, priority_keywords=('business confidence', 'consumer confidence', 'consumer price index', 'cpi', 'gdp', 'gross domestic product', 'ifo', 'industrial production', 'inflation rate', 'interest rate', 'ism', 'nfp', 'non-farm payroll', 'pmi', 'purchasing managers', 'retail sales', 'trade balance', 'unemployment rate', 'zew'), provider_error_threshold=2, provider_error_backoff_sec=300, surprise_score_threshold=0.5, currency_country_overrides=None, symbol_country_overrides=None), fmp=FMPConfig(enabled=True, api_key='XL0taxDun2w72XyH70rVACj628PS0hxs'), te=TEConfig(enabled=True, api_key='2965e93128ff437:ovhzxu4u55gccrl', skip_ssl_verify=True), persistence=PersistenceConfig(max_md_reports=10, max_json_reports=10), chart=ChartConfig(timeframe='M1', num_candles=50, chart_type='Nến', refresh_interval_secs=1), api=ApiConfig(tries=5, delay=2.0), logging=LoggingConfig(log_dir='Log', log_file_name='app_debug.log', log_rotation_size_mb=5, log_rotation_backup_count=5))
+2025-10-17 03:42:27,470 - APP.configs.app_config - DEBUG - Kết thúc hàm __post_init__ của RunConfig.
+2025-10-17 03:42:27,471 - APP.services.news_service - ERROR - Không thể khởi tạo TEService: Cannot initialize TEService because the tradingeconomics dependency is not available.
+Traceback (most recent call last):
+  File "C:\tool\app_gemini-1\APP\services\te_service.py", line 9, in <module>
+    import tradingeconomics as te  # type: ignore[import]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\tradingeconomics\__init__.py", line 11, in <module>
+    from .historicalDB import getHistorical
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\tradingeconomics\historicalDB.py", line 4, in <module>
+    import pandas as pd
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\__init__.py", line 61, in <module>
+    from pandas.core.api import (
+    ...<62 lines>...
+    )
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\core\api.py", line 1, in <module>
+    from pandas._libs import (
+    ...<4 lines>...
+    )
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\_libs\__init__.py", line 18, in <module>
+    from pandas._libs.interval import Interval
+  File "pandas/_libs/interval.pyx", line 1, in init pandas._libs.interval
+  File "pandas/_libs/hashtable.pyx", line 1, in init pandas._libs.hashtable
+  File "pandas/_libs/missing.pyx", line 40, in init pandas._libs.missing
+AttributeError: partially initialized module 'pandas' from 'C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\__init__.py' has no attribute '_pandas_datetime_CAPI' (most likely due to a circular import)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool\app_gemini-1\APP\services\news_service.py", line 125, in update_config
+    self.te_service = TEService(config.te)
+                      ~~~~~~~~~^^^^^^^^^^^
+  File "C:\tool\app_gemini-1\APP\services\te_service.py", line 45, in __init__
+    raise RuntimeError(message) from _te_import_error
+RuntimeError: Cannot initialize TEService because the tradingeconomics dependency is not available.
+2025-10-17 03:42:27,485 - APP.services.news_service - DEBUG - Cấu hình NewsService đã được cập nhật.
+2025-10-17 03:42:27,487 - APP.ui.utils.timeframe_detector - DEBUG - TimeframeDetector đã được khởi tạo và biên dịch 9 mẫu regex.
+2025-10-17 03:42:27,889 - APP.ui.controllers.chart_controller - DEBUG - Cập nhật config chart stream: ChartStreamConfig(symbol='XAUUSD', timeframe='M1', candles=50, chart_type='candlestick')
+2025-10-17 03:42:27,891 - APP.ui.controllers.chart_controller - INFO - Khởi động ChartController cho symbol=XAUUSD
+2025-10-17 03:42:27,892 - APP.utils.threading_utils - DEBUG - Gửi task 'chart.info' vào nhóm 'chart.refresh' (metadata={'symbol': 'XAUUSD', 'timeframe': 'M1', 'candles': 50, 'chart_type': 'candlestick', 'component': 'chart'})
+2025-10-17 03:42:27,895 - APP.utils.threading_utils - DEBUG - Task 'chart.info' (group=chart.refresh) hoàn tất sau 0.00s
+2025-10-17 03:42:27,898 - APP.utils.threading_utils - DEBUG - Gửi task 'chart.draw' vào nhóm 'chart.refresh' (metadata={'symbol': 'XAUUSD', 'timeframe': 'M1', 'candles': 50, 'chart_type': 'candlestick', 'component': 'chart'})
+2025-10-17 03:42:27,899 - APP.utils.threading_utils - DEBUG - Gửi task 'news.refresh.autorun' vào nhóm 'news.polling' (metadata={'component': 'news', 'priority': 'autorun', 'timeout_sec': 20})
+2025-10-17 03:42:27,900 - APP.utils.threading_utils - DEBUG - Task 'chart.draw' (group=chart.refresh) hoàn tất sau 0.00s
+2025-10-17 03:42:27,904 - APP.utils.threading_utils - DEBUG - Gửi task 'news.provider.fmp' vào nhóm 'news.polling' (metadata={'component': 'news', 'provider': 'fmp', 'priority': 'autorun'})
+2025-10-17 03:42:27,906 - APP.services.fmp_service - DEBUG - Đang lấy dữ liệu lịch kinh tế từ investpy...
+2025-10-17 03:42:27,907 - APP.services.fmp_service - WARNING - Không thể lấy dữ liệu lịch kinh tế vì thiếu thư viện investpy.
+2025-10-17 03:42:27,908 - APP.utils.threading_utils - DEBUG - Task 'news.provider.fmp' (group=news.polling) hoàn tất sau 0.00s
+2025-10-17 03:42:27,911 - APP.services.news_service - INFO - NewsService làm mới cache (0 sự kiện, priority=autorun, source=network, latency=0.01s)
+2025-10-17 03:42:27,911 - APP.configs.app_config - DEBUG - Bắt đầu hàm __post_init__ của RunConfig.
+2025-10-17 03:42:27,912 - APP.utils.threading_utils - DEBUG - Task 'news.refresh.autorun' (group=news.polling) hoàn tất sau 0.01s
+2025-10-17 03:42:27,913 - APP.configs.app_config - DEBUG - RunConfig được khởi tạo: RunConfig(folder=FolderConfig(folder='C:/Users/leanhchi/AppData/Roaming/MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075/MQL5/Files/Screenshots', delete_after=True, max_files=0, only_generate_if_changed=False), upload=UploadConfig(upload_workers=4, cache_enabled=True, optimize_lossless=False), image_processing=ImageProcessingConfig(max_width=1600, jpeg_quality=85), context=ContextConfig(ctx_limit=2000, create_ctx_json=True, prefer_ctx_json=True, ctx_json_n=5, remember_context=True, n_reports=1), telegram=TelegramConfig(enabled=True, token='8401224691:AAHu14vQxwnOlD9IBPsU1yp59nZ8Ta0mMYk', chat_id='907737980', skip_verify=True, ca_path='', notify_on_early_exit=False), mt5=MT5Config(enabled=True, symbol='XAUUSD', n_M1=120, n_M5=180, n_M15=96, n_H1=120), no_run=NoRunConfig(weekend_enabled=True, killzone_enabled=False, holiday_check_enabled=True, holiday_check_country='US', timezone='Asia/Ho_Chi_Minh', killzone_summer={'asia': {'start': '06:00', 'end': '09:00'}, 'london': {'start': '14:00', 'end': '17:00'}, 'newyork_am': {'start': '19:30', 'end': '22:00'}, 'newyork_pm': {'start': '00:00', 'end': '03:00'}}, killzone_winter={'asia': {'start': '06:00', 'end': '09:00'}, 'london': {'start': '15:00', 'end': '18:00'}, 'newyork_am': {'start': '20:30', 'end': '23:00'}, 'newyork_pm': {'start': '01:00', 'end': '04:00'}}), no_trade=NoTradeConfig(enabled=True, spread_max_pips=4.2, min_atr_m5_pips=0.3, min_dist_keylvl_pips=5.0, allow_session_asia=True, allow_session_london=True, allow_session_ny=True), auto_trade=AutoTradeConfig(enabled=True, strict_bias=True, size_mode='risk_percent', risk_per_trade=1.0, split_tp_enabled=True, split_tp_ratio=50, deviation=20, magic_number=26092025, comment='AI-ICT', pending_ttl_min=90, min_rr_tp2=2.0, cooldown_min=10, dynamic_pending=True, dry_run=False, move_to_be_after_tp1=True, trailing_atr_mult=0.5, filling_type='IOC'), news=NewsConfig(block_enabled=True, block_before_min=5, block_after_min=5, cache_ttl_sec=600, provider_timeout_sec=20, priority_keywords=('business confidence', 'consumer confidence', 'consumer price index', 'cpi', 'gdp', 'gross domestic product', 'ifo', 'industrial production', 'inflation rate', 'interest rate', 'ism', 'nfp', 'non-farm payroll', 'pmi', 'purchasing managers', 'retail sales', 'trade balance', 'unemployment rate', 'zew'), provider_error_threshold=2, provider_error_backoff_sec=300, surprise_score_threshold=0.5, currency_country_overrides=None, symbol_country_overrides=None), fmp=FMPConfig(enabled=True, api_key='XL0taxDun2w72XyH70rVACj628PS0hxs'), te=TEConfig(enabled=True, api_key='2965e93128ff437:ovhzxu4u55gccrl', skip_ssl_verify=True), persistence=PersistenceConfig(max_md_reports=10, max_json_reports=10), chart=ChartConfig(timeframe='M1', num_candles=50, chart_type='Nến', refresh_interval_secs=1), api=ApiConfig(tries=5, delay=2.0), logging=LoggingConfig(log_dir='Log', log_file_name='app_debug.log', log_rotation_size_mb=5, log_rotation_backup_count=5))
+2025-10-17 03:42:27,916 - APP.configs.app_config - DEBUG - Kết thúc hàm __post_init__ của RunConfig.
+2025-10-17 03:42:27,917 - APP.services.news_service - ERROR - Không thể khởi tạo TEService: Cannot initialize TEService because the tradingeconomics dependency is not available.
+Traceback (most recent call last):
+  File "C:\tool\app_gemini-1\APP\services\te_service.py", line 9, in <module>
+    import tradingeconomics as te  # type: ignore[import]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\tradingeconomics\__init__.py", line 11, in <module>
+    from .historicalDB import getHistorical
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\tradingeconomics\historicalDB.py", line 4, in <module>
+    import pandas as pd
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\__init__.py", line 61, in <module>
+    from pandas.core.api import (
+    ...<62 lines>...
+    )
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\core\api.py", line 1, in <module>
+    from pandas._libs import (
+    ...<4 lines>...
+    )
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\_libs\__init__.py", line 18, in <module>
+    from pandas._libs.interval import Interval
+  File "pandas/_libs/interval.pyx", line 1, in init pandas._libs.interval
+  File "pandas/_libs/hashtable.pyx", line 1, in init pandas._libs.hashtable
+  File "pandas/_libs/missing.pyx", line 40, in init pandas._libs.missing
+AttributeError: partially initialized module 'pandas' from 'C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\__init__.py' has no attribute '_pandas_datetime_CAPI' (most likely due to a circular import)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool\app_gemini-1\APP\services\news_service.py", line 125, in update_config
+    self.te_service = TEService(config.te)
+                      ~~~~~~~~~^^^^^^^^^^^
+  File "C:\tool\app_gemini-1\APP\services\te_service.py", line 45, in __init__
+    raise RuntimeError(message) from _te_import_error
+RuntimeError: Cannot initialize TEService because the tradingeconomics dependency is not available.
+2025-10-17 03:42:27,952 - APP.services.news_service - DEBUG - Cấu hình NewsService đã được cập nhật.
+2025-10-17 03:42:27,990 - APP.utils.threading_utils - DEBUG - Gửi task 'news.refresh.autorun' vào nhóm 'news.polling' (metadata={'component': 'news', 'priority': 'autorun', 'timeout_sec': 20})
+2025-10-17 03:42:27,992 - APP.utils.threading_utils - DEBUG - Gửi task 'news.provider.fmp' vào nhóm 'news.polling' (metadata={'component': 'news', 'provider': 'fmp', 'priority': 'autorun'})
+2025-10-17 03:42:27,993 - APP.utils.threading_utils - DEBUG - Gửi task 'prompt.load' vào nhóm 'prompt' (metadata={'component': 'prompt', 'operation': 'load'})
+2025-10-17 03:42:27,994 - APP.services.fmp_service - DEBUG - Đang lấy dữ liệu lịch kinh tế từ investpy...
+2025-10-17 03:42:27,996 - APP.services.fmp_service - WARNING - Không thể lấy dữ liệu lịch kinh tế vì thiếu thư viện investpy.
+2025-10-17 03:42:27,997 - APP.utils.threading_utils - DEBUG - Task 'news.provider.fmp' (group=news.polling) hoàn tất sau 0.00s
+2025-10-17 03:42:27,998 - APP.services.news_service - INFO - NewsService làm mới cache (0 sự kiện, priority=autorun, source=network, latency=0.01s)
+2025-10-17 03:42:27,998 - APP.ui.controllers.io_controller - INFO - Đã gửi worker I/O prompt.load vào group prompt (metadata={'component': 'prompt', 'operation': 'load'})
+2025-10-17 03:42:27,998 - APP.utils.threading_utils - ERROR - Task 'prompt.load' (group=prompt) gặp lỗi.
+Traceback (most recent call last):
+  File "C:\tool\app_gemini-1\APP\utils\threading_utils.py", line 124, in _runner
+    result = func(*args, **call_kwargs)
+  File "C:\tool\app_gemini-1\APP\ui\controllers\io_controller.py", line 53, in _runner
+    return worker(*args, **kwargs)
+  File "C:\tool\app_gemini-1\APP\ui\pyqt6\main_window.py", line 772, in _job
+    raw = path.read_text(encoding="utf-8", errors="ignore")
+  File "C:\Users\leanhchi\AppData\Local\Programs\Python\Python313\Lib\pathlib\_local.py", line 546, in read_text
+    return PathBase.read_text(self, encoding, errors, newline)
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\leanhchi\AppData\Local\Programs\Python\Python313\Lib\pathlib\_abc.py", line 632, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\leanhchi\AppData\Local\Programs\Python\Python313\Lib\pathlib\_local.py", line 537, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: '.'
+2025-10-17 03:42:27,999 - APP.utils.threading_utils - DEBUG - Task 'news.refresh.autorun' (group=news.polling) hoàn tất sau 0.01s
+2025-10-17 03:42:28,000 - APP.utils.threading_utils - DEBUG - Gửi task 'reports.refresh' vào nhóm 'reports' (metadata={})
+2025-10-17 03:42:28,019 - APP.ui.pyqt6.event_bridge - DEBUG - Bắt đầu timer chuyển queue → signal (interval=50ms)
+2025-10-17 03:42:28,197 - APP.utils.threading_utils - DEBUG - Task 'reports.refresh' (group=reports) hoàn tất sau 0.18s
+2025-10-17 03:43:27,991 - APP.configs.app_config - DEBUG - Bắt đầu hàm __post_init__ của RunConfig.
+2025-10-17 03:43:27,992 - APP.configs.app_config - DEBUG - RunConfig được khởi tạo: RunConfig(folder=FolderConfig(folder='C:\\Users\\leanhchi\\AppData\\Roaming\\MetaQuotes\\Terminal\\D0E8209F77C8CF37AD8BF550E51FF075\\MQL5\\Files\\Screenshots', delete_after=True, max_files=1, only_generate_if_changed=False), upload=UploadConfig(upload_workers=4, cache_enabled=True, optimize_lossless=False), image_processing=ImageProcessingConfig(max_width=1600, jpeg_quality=85), context=ContextConfig(ctx_limit=2000, create_ctx_json=True, prefer_ctx_json=True, ctx_json_n=5, remember_context=True, n_reports=1), telegram=TelegramConfig(enabled=True, token='8401224691:AAHu14vQxwnOlD9IBPsU1yp59nZ8Ta0mMYk', chat_id='907737980', skip_verify=True, ca_path='', notify_on_early_exit=False), mt5=MT5Config(enabled=True, symbol='XAUUSD', n_M1=120, n_M5=180, n_M15=96, n_H1=120), no_run=NoRunConfig(weekend_enabled=True, killzone_enabled=False, holiday_check_enabled=True, holiday_check_country='US', timezone='Asia/Ho_Chi_Minh', killzone_summer={'asia': {'start': '06:00', 'end': '09:00'}, 'london': {'start': '14:00', 'end': '17:00'}, 'newyork_am': {'start': '19:30', 'end': '22:00'}, 'newyork_pm': {'start': '00:00', 'end': '03:00'}}, killzone_winter={'asia': {'start': '06:00', 'end': '09:00'}, 'london': {'start': '15:00', 'end': '18:00'}, 'newyork_am': {'start': '20:30', 'end': '23:00'}, 'newyork_pm': {'start': '01:00', 'end': '04:00'}}), no_trade=NoTradeConfig(enabled=True, spread_max_pips=4.2, min_atr_m5_pips=0.3, min_dist_keylvl_pips=5.0, allow_session_asia=True, allow_session_london=True, allow_session_ny=True), auto_trade=AutoTradeConfig(enabled=True, strict_bias=True, size_mode='risk_percent', risk_per_trade=1.0, split_tp_enabled=True, split_tp_ratio=50, deviation=20, magic_number=26092025, comment='AI-ICT', pending_ttl_min=90, min_rr_tp2=2.0, cooldown_min=10, dynamic_pending=True, dry_run=False, move_to_be_after_tp1=True, trailing_atr_mult=0.5, filling_type='IOC'), news=NewsConfig(block_enabled=True, block_before_min=5, block_after_min=5, cache_ttl_sec=600, provider_timeout_sec=20, priority_keywords=('business confidence', 'consumer confidence', 'consumer price index', 'cpi', 'gdp', 'gross domestic product', 'ifo', 'industrial production', 'inflation rate', 'interest rate', 'ism', 'nfp', 'non-farm payroll', 'pmi', 'purchasing managers', 'retail sales', 'trade balance', 'unemployment rate', 'zew'), provider_error_threshold=2, provider_error_backoff_sec=300, surprise_score_threshold=0.5, currency_country_overrides=None, symbol_country_overrides=None), fmp=FMPConfig(enabled=True, api_key='XL0taxDun2w72XyH70rVACj628PS0hxs'), te=TEConfig(enabled=True, api_key='2965e93128ff437:ovhzxu4u55gccrl', skip_ssl_verify=True), persistence=PersistenceConfig(max_md_reports=10, max_json_reports=10), chart=ChartConfig(timeframe='M1', num_candles=50, chart_type='candlestick', refresh_interval_secs=1), api=ApiConfig(tries=5, delay=2.0), logging=LoggingConfig(log_dir='Log', log_file_name='app_debug.log', log_rotation_size_mb=5, log_rotation_backup_count=5))
+2025-10-17 03:43:27,993 - APP.configs.app_config - DEBUG - Kết thúc hàm __post_init__ của RunConfig.
+2025-10-17 03:43:27,994 - APP.services.news_service - ERROR - Không thể khởi tạo TEService: Cannot initialize TEService because the tradingeconomics dependency is not available.
+Traceback (most recent call last):
+  File "C:\tool\app_gemini-1\APP\services\te_service.py", line 9, in <module>
+    import tradingeconomics as te  # type: ignore[import]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\tradingeconomics\__init__.py", line 11, in <module>
+    from .historicalDB import getHistorical
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\tradingeconomics\historicalDB.py", line 4, in <module>
+    import pandas as pd
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\__init__.py", line 61, in <module>
+    from pandas.core.api import (
+    ...<62 lines>...
+    )
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\core\api.py", line 1, in <module>
+    from pandas._libs import (
+    ...<4 lines>...
+    )
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\_libs\__init__.py", line 18, in <module>
+    from pandas._libs.interval import Interval
+  File "pandas/_libs/interval.pyx", line 1, in init pandas._libs.interval
+  File "pandas/_libs/hashtable.pyx", line 1, in init pandas._libs.hashtable
+  File "pandas/_libs/missing.pyx", line 40, in init pandas._libs.missing
+AttributeError: partially initialized module 'pandas' from 'C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\__init__.py' has no attribute '_pandas_datetime_CAPI' (most likely due to a circular import)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool\app_gemini-1\APP\services\news_service.py", line 125, in update_config
+    self.te_service = TEService(config.te)
+                      ~~~~~~~~~^^^^^^^^^^^
+  File "C:\tool\app_gemini-1\APP\services\te_service.py", line 45, in __init__
+    raise RuntimeError(message) from _te_import_error
+RuntimeError: Cannot initialize TEService because the tradingeconomics dependency is not available.
+2025-10-17 03:43:28,000 - APP.services.news_service - DEBUG - Cấu hình NewsService đã được cập nhật.
+2025-10-17 03:43:28,000 - APP.configs.app_config - DEBUG - Bắt đầu hàm __post_init__ của RunConfig.
+2025-10-17 03:43:28,001 - APP.configs.app_config - DEBUG - RunConfig được khởi tạo: RunConfig(folder=FolderConfig(folder='C:\\Users\\leanhchi\\AppData\\Roaming\\MetaQuotes\\Terminal\\D0E8209F77C8CF37AD8BF550E51FF075\\MQL5\\Files\\Screenshots', delete_after=True, max_files=1, only_generate_if_changed=False), upload=UploadConfig(upload_workers=4, cache_enabled=True, optimize_lossless=False), image_processing=ImageProcessingConfig(max_width=1600, jpeg_quality=85), context=ContextConfig(ctx_limit=2000, create_ctx_json=True, prefer_ctx_json=True, ctx_json_n=5, remember_context=True, n_reports=1), telegram=TelegramConfig(enabled=True, token='8401224691:AAHu14vQxwnOlD9IBPsU1yp59nZ8Ta0mMYk', chat_id='907737980', skip_verify=True, ca_path='', notify_on_early_exit=False), mt5=MT5Config(enabled=True, symbol='XAUUSD', n_M1=120, n_M5=180, n_M15=96, n_H1=120), no_run=NoRunConfig(weekend_enabled=True, killzone_enabled=False, holiday_check_enabled=True, holiday_check_country='US', timezone='Asia/Ho_Chi_Minh', killzone_summer={'asia': {'start': '06:00', 'end': '09:00'}, 'london': {'start': '14:00', 'end': '17:00'}, 'newyork_am': {'start': '19:30', 'end': '22:00'}, 'newyork_pm': {'start': '00:00', 'end': '03:00'}}, killzone_winter={'asia': {'start': '06:00', 'end': '09:00'}, 'london': {'start': '15:00', 'end': '18:00'}, 'newyork_am': {'start': '20:30', 'end': '23:00'}, 'newyork_pm': {'start': '01:00', 'end': '04:00'}}), no_trade=NoTradeConfig(enabled=True, spread_max_pips=4.2, min_atr_m5_pips=0.3, min_dist_keylvl_pips=5.0, allow_session_asia=True, allow_session_london=True, allow_session_ny=True), auto_trade=AutoTradeConfig(enabled=True, strict_bias=True, size_mode='risk_percent', risk_per_trade=1.0, split_tp_enabled=True, split_tp_ratio=50, deviation=20, magic_number=26092025, comment='AI-ICT', pending_ttl_min=90, min_rr_tp2=2.0, cooldown_min=10, dynamic_pending=True, dry_run=False, move_to_be_after_tp1=True, trailing_atr_mult=0.5, filling_type='IOC'), news=NewsConfig(block_enabled=True, block_before_min=5, block_after_min=5, cache_ttl_sec=600, provider_timeout_sec=20, priority_keywords=('business confidence', 'consumer confidence', 'consumer price index', 'cpi', 'gdp', 'gross domestic product', 'ifo', 'industrial production', 'inflation rate', 'interest rate', 'ism', 'nfp', 'non-farm payroll', 'pmi', 'purchasing managers', 'retail sales', 'trade balance', 'unemployment rate', 'zew'), provider_error_threshold=2, provider_error_backoff_sec=300, surprise_score_threshold=0.5, currency_country_overrides=None, symbol_country_overrides=None), fmp=FMPConfig(enabled=True, api_key='XL0taxDun2w72XyH70rVACj628PS0hxs'), te=TEConfig(enabled=True, api_key='2965e93128ff437:ovhzxu4u55gccrl', skip_ssl_verify=True), persistence=PersistenceConfig(max_md_reports=10, max_json_reports=10), chart=ChartConfig(timeframe='M1', num_candles=50, chart_type='candlestick', refresh_interval_secs=1), api=ApiConfig(tries=5, delay=2.0), logging=LoggingConfig(log_dir='Log', log_file_name='app_debug.log', log_rotation_size_mb=5, log_rotation_backup_count=5))
+2025-10-17 03:43:28,003 - APP.configs.app_config - DEBUG - Kết thúc hàm __post_init__ của RunConfig.
+2025-10-17 03:43:28,003 - APP.services.news_service - ERROR - Không thể khởi tạo TEService: Cannot initialize TEService because the tradingeconomics dependency is not available.
+Traceback (most recent call last):
+  File "C:\tool\app_gemini-1\APP\services\te_service.py", line 9, in <module>
+    import tradingeconomics as te  # type: ignore[import]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\tradingeconomics\__init__.py", line 11, in <module>
+    from .historicalDB import getHistorical
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\tradingeconomics\historicalDB.py", line 4, in <module>
+    import pandas as pd
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\__init__.py", line 61, in <module>
+    from pandas.core.api import (
+    ...<62 lines>...
+    )
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\core\api.py", line 1, in <module>
+    from pandas._libs import (
+    ...<4 lines>...
+    )
+  File "C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\_libs\__init__.py", line 18, in <module>
+    from pandas._libs.interval import Interval
+  File "pandas/_libs/interval.pyx", line 1, in init pandas._libs.interval
+  File "pandas/_libs/hashtable.pyx", line 1, in init pandas._libs.hashtable
+  File "pandas/_libs/missing.pyx", line 40, in init pandas._libs.missing
+AttributeError: partially initialized module 'pandas' from 'C:\tool\app_gemini-1\.venv\Lib\site-packages\pandas\__init__.py' has no attribute '_pandas_datetime_CAPI' (most likely due to a circular import)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool\app_gemini-1\APP\services\news_service.py", line 125, in update_config
+    self.te_service = TEService(config.te)
+                      ~~~~~~~~~^^^^^^^^^^^
+  File "C:\tool\app_gemini-1\APP\services\te_service.py", line 45, in __init__
+    raise RuntimeError(message) from _te_import_error
+RuntimeError: Cannot initialize TEService because the tradingeconomics dependency is not available.
+2025-10-17 03:43:28,043 - APP.services.news_service - DEBUG - Cấu hình NewsService đã được cập nhật.
+2025-10-17 03:43:28,044 - APP.utils.threading_utils - DEBUG - Gửi task 'news.refresh.autorun' vào nhóm 'news.polling' (metadata={'component': 'news', 'priority': 'autorun', 'timeout_sec': 20})
+2025-10-17 03:43:28,061 - APP.utils.threading_utils - DEBUG - Gửi task 'news.provider.fmp' vào nhóm 'news.polling' (metadata={'component': 'news', 'provider': 'fmp', 'priority': 'autorun'})
+2025-10-17 03:43:28,098 - APP.services.fmp_service - DEBUG - Đang lấy dữ liệu lịch kinh tế từ investpy...
